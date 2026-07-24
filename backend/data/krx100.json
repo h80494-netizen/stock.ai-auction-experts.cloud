@@ -1,0 +1,130 @@
+[
+  {
+    "ticker": "KRX:005930",
+    "name": "삼성전자",
+    "industry": "반도체, 스마트폰, 가전",
+    "categories": ["AI H/W", "모바일"],
+    "products": ["메모리 반도체", "갤럭시 스마트폰", "TV", "파운드리"],
+    "competitors": {
+      "Foundry": [
+        {"name": "TSMC", "ticker": "NYSE:TSM"},
+        {"name": "Intel", "ticker": "NASDAQ:INTC"}
+      ],
+      "Memory": [
+        {"name": "SK하이닉스", "ticker": "KRX:000660"},
+        {"name": "Micron", "ticker": "NASDAQ:MU"},
+        {"name": "Kioxia", "ticker": "Unlisted"}
+      ],
+      "Mobile": [
+        {"name": "Apple", "ticker": "NASDAQ:AAPL"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:000660",
+    "name": "SK하이닉스",
+    "industry": "반도체",
+    "categories": ["AI H/W"],
+    "products": ["DRAM", "NAND 플래시", "HBM"],
+    "competitors": {
+      "Memory": [
+        {"name": "삼성전자", "ticker": "KRX:005930"},
+        {"name": "Micron", "ticker": "NASDAQ:MU"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:035420",
+    "name": "NAVER",
+    "industry": "IT, 인터넷, 플랫폼",
+    "categories": ["AI S/W", "플랫폼"],
+    "products": ["검색엔진", "HyperCLOVA X", "커머스"],
+    "competitors": {
+      "AI S/W": [
+        {"name": "Google", "ticker": "NASDAQ:GOOGL"},
+        {"name": "OpenAI", "ticker": "Unlisted"},
+        {"name": "카카오", "ticker": "KRX:035720"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:005380",
+    "name": "현대차",
+    "industry": "자동차",
+    "categories": ["전기차", "Physical AI (자율주행)"],
+    "products": ["승용차", "아이오닉", "자율주행"],
+    "competitors": {
+      "EV/Auto": [
+        {"name": "Tesla", "ticker": "NASDAQ:TSLA"},
+        {"name": "BYD", "ticker": "SZSE:002594"},
+        {"name": "기아", "ticker": "KRX:000270"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:051910",
+    "name": "LG화학",
+    "industry": "화학, 2차전지",
+    "categories": ["Battery"],
+    "products": ["양극재", "배터리 소재"],
+    "competitors": {
+      "Battery": [
+        {"name": "CATL", "ticker": "SZSE:300750"},
+        {"name": "삼성SDI", "ticker": "KRX:006400"},
+        {"name": "포스코퓨처엠", "ticker": "KRX:003670"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:241560",
+    "name": "두산로보틱스",
+    "industry": "기계, 로봇",
+    "categories": ["Physical AI (로봇)"],
+    "products": ["협동로봇"],
+    "competitors": {
+      "Robotics": [
+        {"name": "레인보우로보틱스", "ticker": "KRX:277810"},
+        {"name": "Boston Dynamics", "ticker": "Unlisted"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:272210",
+    "name": "마녀공장",
+    "industry": "화장품",
+    "categories": ["K뷰티"],
+    "products": ["스킨케어", "클렌징"],
+    "competitors": {
+      "Cosmetics": [
+        {"name": "아모레퍼시픽", "ticker": "KRX:090430"},
+        {"name": "클리오", "ticker": "KRX:237880"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:097950",
+    "name": "CJ제일제당",
+    "industry": "식품",
+    "categories": ["K푸드"],
+    "products": ["비비고", "햇반"],
+    "competitors": {
+      "Food": [
+        {"name": "삼양식품", "ticker": "KRX:003230"},
+        {"name": "대상", "ticker": "KRX:001680"}
+      ]
+    }
+  },
+  {
+    "ticker": "KRX:352820",
+    "name": "하이브",
+    "industry": "엔터테인먼트",
+    "categories": ["K컬처"],
+    "products": ["BTS", "NewJeans", "위버스"],
+    "competitors": {
+      "Entertainment": [
+        {"name": "JYP Ent.", "ticker": "KRX:035900"},
+        {"name": "SM", "ticker": "KRX:041510"}
+      ]
+    }
+  }
+]

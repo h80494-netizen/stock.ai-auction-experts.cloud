@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TV Test</title>
+</head>
+<body>
+    <div id="tv_chart"></div>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    <script type="text/javascript">
+        new TradingView.widget({
+            "autosize": true,
+            "symbol": "KRX:035720",
+            "interval": "D",
+            "timezone": "Asia/Seoul",
+            "container_id": "tv_chart"
+        });
+    </script>
+</body>
+</html>

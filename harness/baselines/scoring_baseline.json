@@ -1,0 +1,5 @@
+{
+  "article_id": "forbes_mock123",
+  "expected_score": 100,
+  "expected_factors": ["Investment", "Supply", "Demand", "Net Profit"]
+}
