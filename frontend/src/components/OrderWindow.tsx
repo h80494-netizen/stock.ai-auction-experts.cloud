@@ -38,8 +38,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     
     // 강제 활성화 모드이거나 9시 5분 이후일 때 스냅샷 생성/불러오기
     if (isAfter0905) {
-      const savedDate = localStorage.getItem('snapshot0905_date');
-      const savedData = localStorage.getItem('snapshot0905_data');
+      const savedDate = localStorage.getItem('snapshot0905_date_v2');
+      const savedData = localStorage.getItem('snapshot0905_data_v2');
       
       if (savedDate === todayStr && savedData) {
         // 오늘자 스냅샷이 이미 있으면 로드
@@ -51,8 +51,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           newData[s.ticker] = s.foreignRatio;
         });
         setSnapshotData(newData);
-        localStorage.setItem('snapshot0905_date', todayStr);
-        localStorage.setItem('snapshot0905_data', JSON.stringify(newData));
+        localStorage.setItem('snapshot0905_date_v2', todayStr);
+        localStorage.setItem('snapshot0905_data_v2', JSON.stringify(newData));
       }
     }
   }, [computedStocks]);
@@ -150,6 +150,32 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const todayStr = new Date().toISOString().split('T')[0];
   const alreadyBoughtToday = pnlHistory.some(h => h.date === todayStr) || holdings.length > 0;
 
+  // 매수 완료된 종목의 매입단가, 매수수량, 주문금액 스냅샷 관리
+  const [buySnapshot, setBuySnapshot] = useState<Record<string, {price: number, qty: number, orderTotal: number}>>({});
+
+  useEffect(() => {
+    if (holdings.length > 0) {
+      const snapshot: Record<string, any> = {};
+      holdings.forEach(h => {
+        const cleanTicker = h.ticker.split(':').pop() || h.ticker;
+        snapshot[cleanTicker] = {
+          price: h.buyPrice,
+          qty: h.qty,
+          orderTotal: h.buyPrice * h.qty
+        };
+      });
+      setBuySnapshot(snapshot);
+      localStorage.setItem('buySnapshot_date', todayStr);
+      localStorage.setItem('buySnapshot_data', JSON.stringify(snapshot));
+    } else {
+      const savedDate = localStorage.getItem('buySnapshot_date');
+      if (savedDate === todayStr) {
+        const savedData = localStorage.getItem('buySnapshot_data');
+        if (savedData) setBuySnapshot(JSON.parse(savedData));
+      }
+    }
+  }, [holdings, todayStr]);
+
   // Compute portfolio totals
   const portfolioSummary = useMemo(() => {
     let totalBuyAmount = 0;
@@ -204,7 +230,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         }
       });
       const results = await Promise.all(promises);
-      successCount += results.reduce((sum, res) => sum + res, 0);
+      successCount += results.reduce((sum: number, res) => sum + res, 0);
     }
     
     await fetchHoldings();
@@ -318,7 +344,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                 type="text" 
                 value={totalAmount.toLocaleString()} 
                 onChange={handleAmountChange}
-                className="bg-black border border-gray-700 rounded px-3 py-2 text-right font-mono font-bold w-full text-lg focus:outline-none focus:border-yellow-500 transition-colors"
+                disabled={alreadyBoughtToday && !forceEnable}
+                className={`bg-black border border-gray-700 rounded px-3 py-2 text-right font-mono font-bold w-full text-lg focus:outline-none focus:border-yellow-500 transition-colors ${alreadyBoughtToday && !forceEnable ? 'opacity-50 cursor-not-allowed' : ''}`}
               />
               <span className="text-gray-400 font-bold">원</span>
             </div>
@@ -396,18 +423,24 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                   </td>
                 </tr>
               ) : orderStocks.length > 0 ? orderStocks.map((stock, i) => {
+                const cleanTicker = stock.ticker.split(':').pop() || stock.ticker;
+                const snap = buySnapshot[cleanTicker];
+                
                 const liveP = livePrices[stock.ticker] || stock.price || 1;
-                const price = liveP; // avoid division by zero
-                const qty = Math.floor(amountPerStock / price);
-                const orderTotal = qty * price;
+                const price = snap ? snap.price : liveP; // avoid division by zero
+                const qty = snap ? snap.qty : Math.floor(amountPerStock / price);
+                const orderTotal = snap ? snap.orderTotal : qty * price;
                 const changePctStr = stock.changePct > 0 ? `+${stock.changePct}%` : `${stock.changePct}%`;
                 const changeColor = stock.changePct > 0 ? 'text-red-400' : (stock.changePct < 0 ? 'text-blue-400' : 'text-gray-400');
 
                 return (
                   <tr key={stock.ticker} className={`border-b border-gray-800 hover:bg-gray-800/50 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
-                    <td className="px-3 py-3 font-mono text-gray-400">{stock.ticker.split(':').pop() || stock.ticker}</td>
-                    <td className="px-3 py-3 font-bold">{stock.name}</td>
-                    <td className="px-3 py-3 text-right font-mono">{(stock.price || 0).toLocaleString()}</td>
+                    <td className="px-3 py-3 font-mono text-gray-400">{cleanTicker}</td>
+                    <td className="px-3 py-3 font-bold">
+                      {stock.name}
+                      {snap && <span className="ml-2 text-[10px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded border border-green-800">매입고정</span>}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono">{(price || 0).toLocaleString()}</td>
                     <td className={`px-3 py-3 text-right font-mono font-bold ${changeColor}`}>{changePctStr}</td>
                     <td className="px-3 py-3 text-right font-mono text-purple-300">
                       {stock.foreignSumCurrent > 0 ? '+' : ''}{Math.floor(stock.foreignSumCurrent).toLocaleString()}주

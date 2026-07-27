@@ -80,15 +80,15 @@ def get_db_stock_info(ticker: str):
     
     # 실시간 현재가 조회
     try:
-        from kis_instance import kis_client
+        from naver_finance_scraper import naver_scraper
         clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
         real_price = 0
         change = 0
         change_pct = 0
         is_krx = ticker.startswith('KRX:') or ticker.isdigit()
         
-        if kis_client and is_krx:
-            detail = kis_client.get_current_price_detail(clean_ticker)
+        if is_krx:
+            detail = naver_scraper.get_current_price_detail(clean_ticker)
             real_price = detail.get('price', 0)
             change = detail.get('change', 0)
             change_pct = detail.get('changePct', 0)
@@ -524,39 +524,13 @@ def api_get_market_top50(market: str):
 def api_get_realtime_prices(tickers: str = ""):
     """
     Returns real-time prices for the requested tickers (comma-separated).
-    Uses yfinance bulk download for high performance.
+    Uses Naver Finance Scraper.
     """
     if not tickers: return {}
-    import yfinance as yf
+    from naver_finance_scraper import naver_scraper
     
     ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    # yfinance uses .KS for KOSPI and .KQ for KOSDAQ. We assume KOSPI if length is 6 digits.
-    yf_tickers = []
-    mapping = {}
-    for t in ticker_list:
-        clean = t.replace("KRX:", "")
-        yf_t = f"{clean}.KS" if clean.isdigit() else clean
-        yf_tickers.append(yf_t)
-        mapping[yf_t] = t
-        
-    try:
-        data = yf.download(yf_tickers, period="1d", progress=False)
-        prices = {}
-        if 'Close' in data:
-            close_data = data['Close']
-            if len(yf_tickers) == 1:
-                val = float(close_data.iloc[-1])
-                prices[mapping[yf_tickers[0]]] = val
-            else:
-                for yf_t in yf_tickers:
-                    if yf_t in close_data:
-                        val = float(close_data[yf_t].iloc[-1])
-                        if val == val: # Check for NaN
-                            prices[mapping[yf_t]] = val
-        return prices
-    except Exception as e:
-        print("Error fetching real-time prices:", e)
-        return {}
+    return naver_scraper.get_realtime_prices(ticker_list)
 
 @app.get("/api/indices")
 def get_indices():
@@ -599,11 +573,11 @@ def get_indices():
 def api_kis_chart(ticker: str, period: str = "D", is_overseas: bool = False, excd: str = ""):
     """
     Returns chart OHLCV data for lightweight-charts.
-    Fallback to yfinance for robust chart rendering.
+    Uses yfinance for robust chart rendering.
     """
     import yfinance as yf
     from datetime import datetime, timedelta
-    
+            
     # Map periods to yfinance intervals
     interval_map = {"D": "1d", "W": "1wk", "M": "1mo", "m": "1m"}
     interval = interval_map.get(period, "1d")
@@ -1201,27 +1175,21 @@ def get_kis_price(ticker: str):
 
 @app.post("/api/kis/order/{ticker}")
 def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = ""):
-    if not kis_client:
-        return {"error": "KIS API client not initialized"}
-    success = False
-    try:
-        if type == "buy":
-            success = kis_client.order_buy(ticker, qty, price)
-        elif type == "sell":
-            success = kis_client.order_sell(ticker, qty, price)
-        else:
-            return {"error": "Invalid order type. Must be 'buy' or 'sell'"}
-    except Exception as e:
-        print(f"Order error (market closed?): {e}")
-        
-    # Always update DB for demonstration regardless of real API success
+    # --- 가상 모의투자 (Paper Trading) 로직 ---
+    # KIS API 연동 오류를 우회하기 위해 DB 기록만 남기는 방식으로 대체합니다.
+    success = True
+    
+    # Always update DB for demonstration
+
     from database import update_holding, get_stock
     adj_qty = qty if type == "buy" else -qty
     
     actual_price = price
     if actual_price == 0:
         try:
-            actual_price = kis_client.get_current_price_detail(ticker)['price']
+            from naver_finance_scraper import naver_scraper
+            clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
+            actual_price = naver_scraper.get_current_price_detail(clean_ticker)['price']
         except:
             pass
             
@@ -1316,6 +1284,7 @@ def api_get_fundamentals(ticker: str):
     """
     Returns fundamental metrics (PER, PBR, EPS, ROE) and yearly EPS trend for a given ticker via yfinance.
     """
+    import yfinance as yf
     try:
         yf_ticker = ticker
         

@@ -25,16 +25,19 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
     const fetchLivePrices = async () => {
       try {
         const topStocks = combined.slice(0, 50).map(s => s.ticker).join(',');
-        const res = await fetch(`/api/realtime-prices?tickers=${topStocks}`);
-        if (!res.ok) throw new Error(res.statusText || 'API Error');
+        const res = await fetch(`/api/realtime-prices?tickers=${encodeURIComponent(topStocks)}`);
+        if (!res.ok) {
+          console.error('Failed to fetch live prices:', res.status);
+          return;
+        }
         const data = await res.json();
         if (data && Object.keys(data).length > 0) {
           setLivePrices(prev => ({ ...prev, ...data }));
         }
-      } catch (e) { console.error(e); }
+      } catch (e) { console.error('Live price fetch error:', e); }
     };
     fetchLivePrices();
-    const interval = setInterval(fetchLivePrices, 5000);
+    const interval = setInterval(fetchLivePrices, 15000);
     return () => clearInterval(interval);
   }, [stocks, globalStocks]);
   

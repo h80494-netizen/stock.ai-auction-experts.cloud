@@ -70,34 +70,32 @@ def get_major_global_stocks():
     results = []
     for tk, info in stocks.items():
         try:
-            if kis_client:
-                data = kis_client.get_overseas_price(info["excd"], tk)
-                price_str = data.get("last", "0")
-                sign = data.get("sign", "3") # 1,2 up, 3 equal, 4,5 down
-                change_str = data.get("diff", "0")
-                change_pct_str = data.get("rate", "0")
-                
-                price = float(price_str) if price_str else 0
-                change = float(change_str) if change_str else 0
-                if sign in ["4", "5"]:
-                    change = -change
-                change_pct = float(change_pct_str) if change_pct_str else 0
-                if sign in ["4", "5"]:
-                    change_pct = -change_pct
-                
-                results.append({
-                    "ticker": tk,
-                    "name": info["name"],
-                    "price": round(price, 2),
-                    "change": round(change, 2),
-                    "changePct": round(change_pct, 2),
-                    "market_cap": 0, # KIS overseas might not return MCAP in price API
-                    "categories": ["Global Major"]
-                })
-            else:
-                results.append({"ticker": tk, "name": info["name"], "price": 0, "change": 0, "changePct": 0, "market_cap": 0, "categories": ["Global Major"]})
+            import yfinance as yf
+            yf_ticker = tk
+            if info["excd"] == "TSE" and not yf_ticker.endswith(".T"):
+                yf_ticker += ".T"
+            elif info["excd"] == "HKS" and not yf_ticker.endswith(".HK"):
+                yf_ticker += ".HK"
+            
+            t = yf.Ticker(yf_ticker)
+            info_data = t.info
+            price = info_data.get("regularMarketPrice") or info_data.get("previousClose") or info_data.get("currentPrice") or 0
+            change = info_data.get("regularMarketChange") or 0
+            change_pct = info_data.get("regularMarketChangePercent") or 0
+            market_cap = info_data.get("marketCap") or 0
+
+            results.append({
+                "ticker": tk,
+                "name": info["name"],
+                "price": round(price, 2),
+                "change": round(change, 2),
+                "changePct": round(change_pct, 2),
+                "market_cap": market_cap,
+                "categories": ["Global Major"]
+            })
         except Exception as e:
             print(f"Failed to process {tk}: {e}")
+            results.append({"ticker": tk, "name": info["name"], "price": 0, "change": 0, "changePct": 0, "market_cap": 0, "categories": ["Global Major"]})
             results.append({"ticker": tk, "name": info["name"], "price": 0, "change": 0, "changePct": 0, "market_cap": 0, "categories": ["Global Major"]})
     return results
 

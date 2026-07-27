@@ -42,6 +42,7 @@ def analyze_news(title, publisher, timestamp):
         "domain": publisher or "unknown",
         "isRealTime": is_realtime,
         "importance_score": score,
+        "matched_keywords": [w for w in GOOD_KEYWORDS + BAD_KEYWORDS if w in title_lower],
         "factors": [
             {"category": "Keyword Match", "score": good_matches * 15 + bad_matches * 15},
             {"category": "Recency", "score": 20 if is_realtime else 0}
@@ -107,12 +108,34 @@ def fetch_stock_news(name, ticker, market_code):
             
         avg_score = total_score / len(top_news) if top_news else 0
         
+        # Generate decisive_comment
+        KEYWORD_KO = {
+            "surge": "급등", "jump": "상승", "soar": "폭등", "beat": "실적 상회", "upgrade": "목표가 상향", 
+            "buy": "매수", "up": "상승세", "record": "기록적", "growth": "성장", "profit": "수익/흑자", "dividend": "배당",
+            "drop": "하락", "fall": "하락세", "plunge": "폭락", "miss": "실적 하회", "downgrade": "목표가 하향", 
+            "sell": "매도", "down": "하락세", "loss": "손실/적자", "decline": "감소", "cut": "삭감/축소",
+            "상승": "상승", "급등": "급등", "흑자": "흑자", "성장": "성장", "호조": "호조", "상회": "상회",
+            "하락": "하락", "급락": "급락", "적자": "적자", "감소": "감소", "부진": "부진", "하회": "하회"
+        }
+        all_keywords = set()
+        for news in top_news:
+            if "matched_keywords" in news:
+                for kw in news["matched_keywords"]:
+                    all_keywords.add(kw)
+                    
+        translated_kws = list(set([KEYWORD_KO.get(kw, kw) for kw in all_keywords]))
+        if translated_kws:
+            decisive_comment = f"최근 글로벌 뉴스에서 '{', '.join(translated_kws)}' 관련 모멘텀이 부각되며 주가에 결정적 영향을 미치고 있습니다."
+        else:
+            decisive_comment = f"시장의 주요 이슈와 펀더멘털 변화가 주가 변동성에 영향을 주고 있습니다."
+        
         return {
             "ticker": ticker,
             "name": name,
             "market": market_code,
             "total_score": round(avg_score, 1),
             "news_count": news_count,
+            "decisive_comment": decisive_comment,
             "top_news": top_news
         }
     except Exception as e:

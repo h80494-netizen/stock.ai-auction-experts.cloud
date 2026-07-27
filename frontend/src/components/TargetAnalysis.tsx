@@ -324,38 +324,21 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
         const priceSeries = targetChart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
         priceSeries.setData(priceData);
         
-        if (fundamentals.targetHigh && fundamentals.targetHigh > 0) {
-          priceSeries.createPriceLine({ price: fundamentals.targetHigh, color: '#FF5252', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: '최고목표가' });
-        }
-        if (fundamentals.target_history && fundamentals.target_history.length > 0) {
-          const rawMarkers = [...fundamentals.target_history]
-            .filter((m: any) => m.time && m.time.length >= 10)
-            .sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
-            
-          if (rawMarkers.length > 0) {
-            const current = rawMarkers[rawMarkers.length - 1];
-            const previous = rawMarkers.length > 1 ? rawMarkers[rawMarkers.length - 2] : null;
-            const highest = [...rawMarkers].sort((a, b) => b.value - a.value)[0];
-            const lowest = [...rawMarkers].sort((a, b) => a.value - b.value)[0];
-            
-            const selectedMarkers = [lowest, highest, previous, current].filter(Boolean);
-            
-            const uniqueMarkers: any[] = [];
-            const seenSet = new Set();
-            selectedMarkers.forEach((m: any) => {
-               const key = `${m.time}_${m.value}`;
-               if (!seenSet.has(key)) {
-                  seenSet.add(key);
-                  uniqueMarkers.push(m);
-               }
-            });
-            
-            uniqueMarkers.sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime());
-
-            try {
-              createSeriesMarkers(priceSeries, uniqueMarkers);
-            } catch(e) { console.error("Marker error", e); }
-          }
+        if (selectedStock.currentTarget && selectedStock.currentTarget > 0 && priceData.length > 0) {
+          const latestTime = priceData[priceData.length - 1].time;
+          const targetSeries = targetChart.addSeries(LineSeries, { 
+              color: '#FF5252',
+              lineWidth: 0,
+              crosshairMarkerVisible: false,
+              lastValueVisible: true,
+              title: '목표가'
+          });
+          targetSeries.setData([{ time: latestTime, value: selectedStock.currentTarget }]);
+          try {
+            createSeriesMarkers(targetSeries, [
+                { time: latestTime, position: 'inBar', color: '#FF5252', shape: 'circle', size: 1, text: '목표가' }
+            ]);
+          } catch(e) { console.error("Marker error", e); }
         }
         targetChart.timeScale().fitContent();
       }

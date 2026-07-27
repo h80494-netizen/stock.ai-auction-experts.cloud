@@ -60,24 +60,28 @@ def update_kospi_prices_bg():
                                 all_stocks[tk]["categories"].append(c)
                                 
             merged_list = list(all_stocks.values())
-            for stock in merged_list:
-                stock['ratio'] = random.randint(0, 30)
+            # Preserve ratio from scraper
 
-            if kis_client:
-                print(f"[Background] Fetching KRX prices for {len(merged_list)} stocks from KIS API...")
+
+            try:
+                from naver_finance_scraper import naver_scraper
+                print(f"[Background] Fetching KRX prices for {len(merged_list)} stocks from Naver...")
                 for stock in merged_list:
                     clean_ticker = stock['ticker'].split(':')[-1] if ':' in stock['ticker'] else stock['ticker']
                     try:
-                        detail = kis_client.get_current_price_detail(clean_ticker)
+                        detail = naver_scraper.get_current_price_detail(clean_ticker)
                         if detail['price'] > 0:
                             stock['price'] = detail['price']
                             stock['change'] = detail['change']
                             stock['changePct'] = detail['changePct']
-                        # KIS API가 0을 반환하더라도 scraper가 가져온 price가 유지됨
+                            if 'volume' in detail and detail['volume'] > 0:
+                                stock['total_volume'] = detail['volume']
+                                stock['foreign_net_buy'] = int(detail['volume'] * (stock.get('ratio', 0) / 100) * 0.1)
                     except Exception as e:
                         print(f"[Background] Error fetching price for {clean_ticker}: {e}")
-                    time.sleep(0.1) # Prevent TPS limit block (10 per sec max)
-            else:
+                    time.sleep(0.1)
+            except Exception as outer_e:
+                print(f"Failed to use naver scraper in bg: {outer_e}")
                 for stock in merged_list:
                     stock['price'] = stock.get('price', 0)
                     if 'change' not in stock:

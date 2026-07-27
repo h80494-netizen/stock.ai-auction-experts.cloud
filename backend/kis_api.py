@@ -146,13 +146,14 @@ class KISApiClient:
                     price = int(output.get("stck_prpr", "0"))
                     change_pct = float(output.get("prdy_ctrt", "0"))
                     change = int(output.get("prdy_vrss", "0"))
+                    volume = int(output.get("acml_vol", "0"))
                     if change_pct < 0:
                         change = -change
-                    return {"price": price, "change": change, "changePct": change_pct}
-            return {"price": 0, "change": 0, "changePct": 0}
+                    return {"price": price, "change": change, "changePct": change_pct, "volume": volume}
+            return {"price": 0, "change": 0, "changePct": 0, "volume": 0}
         except Exception as e:
             print(f"상세 현재가 API 예외 ({ticker}): {e}")
-            return {"price": 0, "change": 0, "changePct": 0}
+            return {"price": 0, "change": 0, "changePct": 0, "volume": 0}
 
     def order_buy(self, ticker: str, qty: int, price: int = 0):
         """현금 매수 주문 (모의투자/실전투자)"""

@@ -24,6 +24,7 @@ interface RankedStock {
   market: string; // KR, US, JP, CN
   total_score: number;
   news_count: number;
+  decisive_comment?: string;
   top_news: NewsItem[];
 }
 
@@ -36,6 +37,11 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string>('');
   const [activeFilter, setActiveFilter] = useState<string>('ALL');
+  const [expandedStocks, setExpandedStocks] = useState<Record<string, boolean>>({});
+
+  const toggleNews = (ticker: string) => {
+    setExpandedStocks(prev => ({...prev, [ticker]: !prev[ticker]}));
+  };
 
   useEffect(() => {
     const fetchRanking = async () => {
@@ -102,14 +108,14 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
             {rankedStocks.filter(stock => activeFilter === 'ALL' || stock.market === activeFilter).map((stock, idx) => (
             <div key={`${stock.ticker}_${idx}`} className="bg-[#111] border border-gray-800 rounded-lg p-4 shadow-lg hover:border-gray-600 transition-colors">
               <div className="flex justify-between items-center mb-3">
-                <div className="flex items-center gap-3">
+                <div 
+                    className="flex items-center gap-3 cursor-pointer hover:bg-gray-800/50 p-1 rounded transition-colors flex-1"
+                    onClick={() => onNavigateToSearch && onNavigateToSearch(stock.ticker)}
+                  >
                   <div className={`w-10 h-10 flex items-center justify-center rounded font-black text-xl ${idx < 3 ? 'bg-yellow-600/20 text-yellow-500 border border-yellow-600/50' : 'bg-gray-800 text-gray-400'}`}>
                     {idx + 1}
                   </div>
-                  <div 
-                    className="flex-1 cursor-pointer hover:bg-gray-800/50 p-1 rounded transition-colors"
-                    onClick={() => onNavigateToSearch && onNavigateToSearch(stock.ticker)}
-                  >
+                  <div>
                     <div className="flex items-center gap-2">
                       <h3 className="text-xl font-bold text-white hover:text-indigo-300">{stock.name}</h3>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded border ${getMarketColor(stock.market)} font-bold`}>
@@ -119,25 +125,41 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
                     <span className="text-xs text-gray-500 font-mono">{stock.ticker}</span>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right ml-4">
                   <div className="text-2xl font-bold text-indigo-400">{stock.total_score.toFixed(1)} <span className="text-sm text-gray-500 font-normal">pts</span></div>
                   <div className="text-xs text-gray-500">관련 파급 기사 {stock.news_count}건</div>
                 </div>
               </div>
+              
+              {stock.decisive_comment && (
+                <div 
+                  className="bg-indigo-900/20 border border-indigo-800/50 rounded p-3 mb-2 cursor-pointer hover:bg-indigo-900/40 transition-colors"
+                  onClick={() => toggleNews(stock.ticker)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-indigo-400 font-bold">💡 AI 분석 코멘트:</span>
+                    <span className="text-gray-200 text-sm font-medium">{stock.decisive_comment}</span>
+                    <span className="ml-auto text-xs text-indigo-500 font-bold">
+                      {expandedStocks[stock.ticker] ? '▲ 뉴스 숨기기' : '▼ 관련 뉴스 보기'}
+                    </span>
+                  </div>
+                </div>
+              )}
 
-              <div className="space-y-3 mt-4">
-                {stock.top_news.map(news => (
-                  <div key={news.id} className={`bg-[#161616] border ${news.isRealTime ? 'border-red-900/50' : 'border-gray-800'} rounded p-3`}>
-                    <div className="flex justify-between items-start">
-                      <button 
-                        onClick={(e) => {
-                          if (onNavigateToSearch) {
-                            e.preventDefault();
-                            onNavigateToSearch(stock.ticker);
-                          }
-                        }}
-                        className="font-bold text-blue-400 hover:underline flex-1 pr-4 text-left cursor-pointer"
-                      >
+              {expandedStocks[stock.ticker] && (
+                <div className="space-y-3 mt-4">
+                  {stock.top_news.map(news => (
+                    <div key={news.id} className={`bg-[#161616] border ${news.isRealTime ? 'border-red-900/50' : 'border-gray-800'} rounded p-3`}>
+                      <div className="flex justify-between items-start">
+                        <button 
+                          onClick={(e) => {
+                            if (onNavigateToSearch) {
+                              e.preventDefault();
+                              onNavigateToSearch(stock.ticker);
+                            }
+                          }}
+                          className="font-bold text-blue-400 hover:underline flex-1 pr-4 text-left cursor-pointer"
+                        >
                         {news.isRealTime && <span className="text-red-500 mr-2 animate-pulse">⚡ BREAKING</span>}
                         {news.title}
                       </button>
@@ -175,6 +197,7 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
                   </div>
                 ))}
               </div>
+              )}
             </div>
           ))}
           </div>
