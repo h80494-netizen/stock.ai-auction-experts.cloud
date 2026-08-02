@@ -7,16 +7,24 @@ export default function GlobalIndicesView() {
   const [activeCategory, setActiveCategory] = useState<'주가' | '채권' | '원자재'>('주가');
   const [activeSubCategory, setActiveSubCategory] = useState<string>('귀금속');
 
+  const [indicesData, setIndicesData] = useState<any[]>([]);
+
+  React.useEffect(() => {
+    fetch('/api/indices')
+      .then(res => res.json())
+      .then(data => setIndicesData(data))
+      .catch(err => console.error('Failed to fetch indices:', err));
+  }, []);
+
   const categories = {
     '주가': [
-      { name: "KOSPI (한국 종합주가지수 / KODEX 200)", symbol: "KRX:069500", link: "https://kr.tradingview.com/symbols/KRX-KOSPI/?timeframe=6M" },
-      { name: "KOSDAQ (한국 코스닥지수 / KODEX 코스닥150)", symbol: "KRX:229200", link: "https://kr.tradingview.com/symbols/KRX-KOSDAQ/?timeframe=6M" },
-      { name: "S&P 500 (미국)", symbol: "SPX" },
-      { name: "NASDAQ 100 (미국)", symbol: "NDX" },
-      { name: "Dow Jones (미국)", symbol: "DJI" },
-      { name: "Nikkei 225 (일본)", symbol: "NI225" },
-      { name: "Shanghai Composite (중국)", symbol: "SSE:000001" },
-      { name: "Euro Stoxx 50 (유럽)", symbol: "SX5E" }
+      { name: "KOSPI (KODEX 200)", symbol: "KRX:069500" },
+      { name: "KOSDAQ (KODEX 코스닥150)", symbol: "KRX:229200" },
+      { name: "S&P 500 (SPY)", symbol: "SPY" },
+      { name: "NASDAQ 100 (QQQ)", symbol: "QQQ" },
+      { name: "일본 (EWJ)", symbol: "EWJ" },
+      { name: "중국 (FXI)", symbol: "FXI" },
+      { name: "유럽 (EZU)", symbol: "EZU" }
     ],
     '채권': [
       { name: "한국 10년물 국채", symbol: "TVC:KR10Y", link: "https://kr.tradingview.com/symbols/TVC-KR10Y/" },
@@ -104,12 +112,28 @@ export default function GlobalIndicesView() {
       
       {/* Grid of Charts */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 pb-10">
-        {getActiveItems().map(item => (
+        {getActiveItems().map(item => {
+          const apiInfo = indicesData.find(d => d.symbol === item.symbol);
+          const displayPrice = apiInfo?.price ? apiInfo.price.toLocaleString() : null;
+          const displayChange = apiInfo?.changePct !== undefined ? apiInfo.changePct : null;
+          const changeColor = displayChange !== null && displayChange > 0 ? 'text-red-400' : (displayChange !== null && displayChange < 0 ? 'text-blue-400' : 'text-gray-400');
+          
+          return (
           <div key={item.symbol} className="bg-[#111] border border-gray-800 rounded p-4 flex flex-col h-[400px]">
             <div className="flex justify-between items-center mb-2">
-              <h3 className="font-bold text-gray-200">{item.name}</h3>
-              {'link' in item && item.link && (
-                <a href={item.link} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
+              <h3 className="font-bold text-gray-200">
+                {item.name}
+                {displayPrice && (
+                   <span className="ml-3 font-mono">
+                     {displayPrice} 
+                     <span className={`ml-2 text-sm ${changeColor}`}>
+                       ({displayChange > 0 ? '+' : ''}{displayChange}%)
+                     </span>
+                   </span>
+                )}
+              </h3>
+              {('link' in item) && (item as any).link && (
+                <a href={(item as any).link} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
                   TradingView에서 지수 원본 보기 ↗
                 </a>
               )}
@@ -118,7 +142,8 @@ export default function GlobalIndicesView() {
               <TradingViewWidget symbol={item.symbol} />
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

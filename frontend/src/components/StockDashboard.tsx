@@ -56,11 +56,16 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
     setLoading(true);
     try {
       const res = await fetch(`/api/db/search/${encodeURIComponent(query)}`);
-      if (!res.ok) throw new Error(res.statusText || 'API Error');
+      if (!res.ok) {
+        console.warn('Search API Error:', res.statusText);
+        setSearchResults([]);
+        setLoading(false);
+        return;
+      }
       const data = await res.json();
       setSearchResults(data);
     } catch (err) {
-      console.error(err);
+      console.warn('Search error:', err);
     }
     setLoading(false);
   };
@@ -97,7 +102,6 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
         data = { error: `Server error: ${res.status}` };
       } else {
         try {
-          if (!res.ok) throw new Error(res.statusText || 'API Error');
           data = await res.json();
         } catch (e) {
           data = { error: 'Invalid JSON response from server' };
@@ -114,7 +118,6 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
           searchData = { error: `DB Server error: ${searchRes.status}` };
         } else {
           try {
-            if (!searchRes.ok) throw new Error(searchRes.statusText || 'API Error');
             searchData = await searchRes.json();
           } catch (e) {
             searchData = { error: 'Invalid JSON from DB' };
@@ -145,14 +148,17 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
       // Fetch summary
       try {
         const sumRes = await fetch(`/api/stock/${ticker}/summary`);
-        if (!sumRes.ok) throw new Error(sumRes.statusText || 'API Error');
-        const sumData = await sumRes.json();
-        setBusinessSummary(sumData.summary || '');
+        if (!sumRes.ok) {
+          console.warn("Summary fetch API error", sumRes.statusText);
+        } else {
+          const sumData = await sumRes.json();
+          setBusinessSummary(sumData.summary || '');
+        }
       } catch (e) {
-        console.error("Summary fetch error", e);
+        console.warn("Summary fetch error", e);
       }
     } catch (err) {
-      console.error(err);
+      console.warn("Select error:", err);
     }
     setLoading(false);
   };

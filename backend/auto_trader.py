@@ -20,8 +20,8 @@ except Exception as e:
     print(f"Brokerage API 초기화 실패: {e}")
     BROKER = None
 
-def job_905_buy():
-    print(f"[{datetime.now()}] 9:05 AM 자동매수 스케줄러 실행 시작...")
+def job_910_buy():
+    print(f"[{datetime.now()}] 9:10 AM 자동매수 스케줄러 실행 시작...")
     if not BROKER:
         print("Broker 객체가 없습니다.")
         return
@@ -96,8 +96,8 @@ def job_905_buy():
         else:
             print(f"[{name}] 단가가 너무 높아 500만원으로 1주도 살 수 없습니다.")
 
-def job_1455_sell():
-    print(f"[{datetime.now()}] 14:55 PM 자동매도 스케줄러 실행 시작...")
+def job_1500_sell():
+    print(f"[{datetime.now()}] 15:00 PM 자동매도 스케줄러 실행 시작...")
     if not BROKER:
         return
         
@@ -147,5 +147,5 @@ def job_1455_sell():
 
 if __name__ == "__main__":
     # Test execution
-    # job_905_buy()
+    # job_910_buy()
     pass

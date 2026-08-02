@@ -243,7 +243,7 @@ function ChartRenderer({ id, data, type, fundamentals }: { id: string, data: any
     } else if (type === 'eps') {
       const epsSeries = chart.addSeries(HistogramSeries, { color: '#26a69a' });
       const epsData = data.map((item: any) => {
-        let timeStr = item.time;
+        let timeStr = String(item.time);
         if (timeStr.length === 4) timeStr = `${timeStr}-12-31`;
         let color = item.value >= 0 ? '#26a69a' : '#ef5350';
         if (item.is_estimate) color = item.value >= 0 ? '#81c784' : '#e57373';

@@ -76,7 +76,7 @@ def update_kospi_prices_bg():
                             stock['changePct'] = detail['changePct']
                             if 'volume' in detail and detail['volume'] > 0:
                                 stock['total_volume'] = detail['volume']
-                                stock['foreign_net_buy'] = int(detail['volume'] * (stock.get('ratio', 0) / 100) * 0.1)
+                                stock['foreign_net_buy'] = naver_scraper.get_foreign_brokerage_net_buy(clean_ticker)
                     except Exception as e:
                         print(f"[Background] Error fetching price for {clean_ticker}: {e}")
                     time.sleep(0.1)

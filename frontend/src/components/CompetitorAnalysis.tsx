@@ -50,32 +50,54 @@ export default function CompetitorAnalysis({ onNavigateToStock }: { onNavigateTo
   }, []);
 
   useEffect(() => {
-    if (selectedSector) {
-      setLoadingNews(true);
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
+
+    const fetchDetails = () => {
+      if (!selectedSector) return;
+
+      if (!pollInterval) {
+        setLoadingNews(true);
+        setLoadingTickers(true);
+        setSectorDetails([]);
+      }
+
       fetch(`/api/competitors/news?sector=${encodeURIComponent(selectedSector)}`)
         .then(res => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
         .then(data => {
-          setNews(data);
-          setLoadingNews(false);
+          if (isMounted) {
+            setNews(data);
+            setLoadingNews(false);
+          }
         })
         .catch(err => {
           console.error("Error fetching news", err);
-          setLoadingNews(false);
+          if (isMounted) setLoadingNews(false);
         });
 
-      setLoadingTickers(true);
-      setSectorDetails([]); 
       fetch(`/api/competitors/sector-details?sector=${encodeURIComponent(selectedSector)}`)
         .then(res => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
         .then(data => {
-          setSectorDetails(data);
-          setLoadingTickers(false);
+          if (isMounted) {
+            setSectorDetails(data);
+            setLoadingTickers(false);
+          }
         })
         .catch(err => {
           console.error("Error fetching sector details", err);
-          setLoadingTickers(false);
+          if (isMounted) setLoadingTickers(false);
         });
-    }
+    };
+
+    fetchDetails();
+    pollInterval = setInterval(() => {
+      if (!document.hidden) fetchDetails();
+    }, 60000); // 1 minute poll
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, [selectedSector]);
 
   return (
@@ -112,7 +134,7 @@ export default function CompetitorAnalysis({ onNavigateToStock }: { onNavigateTo
             <h2 className="text-lg font-bold mb-3 text-white border-b border-gray-800 pb-2">섹터별 상대강도 (Relative Strength)</h2>
             <div className="w-full h-64 lg:h-80 relative bg-[#0a0a0a] rounded flex items-center justify-center p-2 border border-gray-800">
               <img 
-                src={`/charts/${SECTOR_CHARTS[selectedSector]}`} 
+                src={`/charts/${SECTOR_CHARTS[selectedSector]}?v=${Date.now()}`} 
                 alt={`${selectedSector} Chart`}
                 className="max-w-full max-h-full object-contain rounded"
               />
@@ -129,17 +151,20 @@ export default function CompetitorAnalysis({ onNavigateToStock }: { onNavigateTo
                 <tr>
                   <th className="px-3 py-2 font-medium">종목</th>
                   <th className="px-3 py-2 font-medium text-right">현재가</th>
+                  <th className="px-3 py-2 font-medium text-right text-blue-300">전일대비</th>
+                  <th className="px-3 py-2 font-medium text-right text-red-400">1년 수익률</th>
                   <th className="px-3 py-2 font-medium text-right text-purple-400">PER</th>
                   <th className="px-3 py-2 font-medium text-right text-purple-400">EPS</th>
                   <th className="px-3 py-2 font-medium text-right text-blue-400">BPS</th>
                   <th className="px-3 py-2 font-medium text-right text-green-400">ROE</th>
                   <th className="px-3 py-2 font-medium text-right text-green-400">ROA</th>
+                  <th className="px-3 py-2 font-medium text-right text-yellow-400">배당수익률</th>
                 </tr>
               </thead>
               <tbody>
                 {loadingTickers ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-10 text-center text-gray-500 animate-pulse">실시간 재무정보 로딩 중...</td>
+                    <td colSpan={10} className="px-3 py-10 text-center text-gray-500 animate-pulse">실시간 재무정보 로딩 중...</td>
                   </tr>
                 ) : sectorDetails.length > 0 ? (
                   sectorDetails.map((t, i) => (
@@ -158,22 +183,28 @@ export default function CompetitorAnalysis({ onNavigateToStock }: { onNavigateTo
                         <div className="font-bold text-yellow-500">{t.ticker}</div>
                         <div className="text-xs text-gray-400">{t.name}</div>
                       </td>
+                      <td className="px-3 py-3 text-right font-mono text-gray-200">
+                        {t.price !== 'N/A' && typeof t.price === 'number' ? t.price.toLocaleString() : t.price}
+                      </td>
                       <td className="px-3 py-3 text-right">
-                        <div className="font-mono text-gray-200">{t.price !== 'N/A' && typeof t.price === 'number' ? t.price.toLocaleString() : t.price}</div>
-                        <div className={`text-[10px] font-mono font-bold ${t.change > 0 ? 'text-red-500' : t.change < 0 ? 'text-blue-500' : 'text-gray-500'}`}>
-                          {t.change !== 'N/A' ? `${t.change > 0 ? '▲ ' : t.change < 0 ? '▼ ' : ''}${Math.abs(t.change)}%` : ''}
+                        <div className={`font-mono font-bold ${typeof t.change === 'number' && t.change > 0 ? 'text-red-500' : typeof t.change === 'number' && t.change < 0 ? 'text-blue-500' : 'text-gray-500'}`}>
+                          {typeof t.change === 'number' ? `${t.change > 0 ? '▲ ' : t.change < 0 ? '▼ ' : ''}${Math.abs(t.change)}%` : 'N/A'}
                         </div>
+                      </td>
+                      <td className={`px-3 py-3 text-right font-mono font-bold ${t.return_1y !== 'N/A' && String(t.return_1y).startsWith('-') ? 'text-blue-400' : 'text-red-400'}`}>
+                        {t.return_1y || 'N/A'}
                       </td>
                       <td className="px-3 py-3 text-right font-mono text-purple-300">{t.per || 'N/A'}</td>
                       <td className="px-3 py-3 text-right font-mono text-purple-300">{t.eps || 'N/A'}</td>
                       <td className="px-3 py-3 text-right font-mono text-blue-300">{t.bps || 'N/A'}</td>
                       <td className="px-3 py-3 text-right font-mono text-green-300">{t.roe || 'N/A'}</td>
                       <td className="px-3 py-3 text-right font-mono text-green-300">{t.roa || 'N/A'}</td>
+                      <td className="px-3 py-3 text-right font-mono text-yellow-300">{t.div_yield || 'N/A'}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="px-3 py-8 text-center text-gray-500">종목 데이터가 없습니다.</td>
+                    <td colSpan={10} className="px-3 py-8 text-center text-gray-500">종목 데이터가 없습니다.</td>
                   </tr>
                 )}
               </tbody>

@@ -57,9 +57,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     }
   }, [computedStocks]);
 
-  // 외국인 순매수 비중 5% 초과 종목 필터링 후 상위 20개 추출 (9시 5분 스냅샷 기준 - 테스트용 임시 5%)
+  // 외국계 증권사 순매수 비중 20% 초과 종목 필터링 후 상위 20개 추출 (9시 5분 스냅샷 기준)
   const orderStocks = useMemo(() => {
-    const THRESHOLD = 5; // 임시 테스트용
+    const THRESHOLD = 20; // 외국계 순매수 비중 20% 초과 종목
 
     if (Object.keys(snapshotData).length === 0) {
       // 스냅샷이 없으면 (9시 5분 이전) 실시간 기준으로 보여줌
@@ -150,18 +150,30 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const todayStr = new Date().toISOString().split('T')[0];
   const alreadyBoughtToday = pnlHistory.some(h => h.date === todayStr) || holdings.length > 0;
 
-  // 매수 완료된 종목의 매입단가, 매수수량, 주문금액 스냅샷 관리
-  const [buySnapshot, setBuySnapshot] = useState<Record<string, {price: number, qty: number, orderTotal: number}>>({});
+  // 매수 완료된 종목의 매입단가, 매수수량, 주문금액, 체결시간 스냅샷 관리
+  const [buySnapshot, setBuySnapshot] = useState<Record<string, {price: number, qty: number, orderTotal: number, time?: string}>>({});
 
   useEffect(() => {
     if (holdings.length > 0) {
+      let existingSnapshot: Record<string, any> = {};
+      const savedDate = localStorage.getItem('buySnapshot_date');
+      if (savedDate === todayStr) {
+        const savedData = localStorage.getItem('buySnapshot_data');
+        if (savedData) {
+          try { existingSnapshot = JSON.parse(savedData); } catch(e) {}
+        }
+      }
+
       const snapshot: Record<string, any> = {};
+      const nowTime = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+      
       holdings.forEach(h => {
         const cleanTicker = h.ticker.split(':').pop() || h.ticker;
         snapshot[cleanTicker] = {
           price: h.buyPrice,
           qty: h.qty,
-          orderTotal: h.buyPrice * h.qty
+          orderTotal: h.buyPrice * h.qty,
+          time: existingSnapshot[cleanTicker]?.time || nowTime
         };
       });
       setBuySnapshot(snapshot);
@@ -438,7 +450,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                     <td className="px-3 py-3 font-mono text-gray-400">{cleanTicker}</td>
                     <td className="px-3 py-3 font-bold">
                       {stock.name}
-                      {snap && <span className="ml-2 text-[10px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded border border-green-800">매입고정</span>}
+                      {snap && <span className="ml-2 text-[10px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded border border-green-800">매입고정 {snap.time ? `(${snap.time})` : ''}</span>}
                     </td>
                     <td className="px-3 py-3 text-right font-mono">{(price || 0).toLocaleString()}</td>
                     <td className={`px-3 py-3 text-right font-mono font-bold ${changeColor}`}>{changePctStr}</td>
@@ -477,7 +489,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               }) : (
                 <tr>
                   <td colSpan={11} className="px-3 py-8 text-center text-gray-500">
-                    현재 외국인 순매수 5% 이상 종목이 없습니다 (테스트 중).
+                    현재 외국계 순매수 비중 20% 이상 종목이 없습니다.
                   </td>
                 </tr>
               )}

@@ -16,9 +16,10 @@ import MarketScannerView from '@/components/MarketScannerView';
 import TrendingStocksView from '@/components/TrendingStocksView';
 import GlobalNewsRankingView from '@/components/GlobalNewsRankingView';
 import ETFStrategyView from '@/components/ETFStrategyView';
+import ETFSimulationHistoryView from '@/components/ETFSimulationHistoryView';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history'>('search');
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
   const [globalData, setGlobalData] = useState<any>({ indices: [], stocks: [] });
@@ -220,6 +221,12 @@ export default function Home() {
           >
             ETF 투자전략
           </button>
+          <button 
+            onClick={() => setActiveTab('etf_history')} 
+            className={`px-4 py-3 font-bold transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_history' ? 'text-white border-b-2 border-indigo-300' : 'text-gray-400 hover:text-white'}`}
+          >
+            시뮬레이션 히스토리
+          </button>
           <button onClick={() => setActiveTab('target')} className={`px-4 py-3 font-bold transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'target' ? 'text-white border-b-2 border-red-500' : 'text-gray-400 hover:text-white'}`}>AI 목표가/수익률</button>
           <button onClick={() => setActiveTab('heatmap')} className={`px-4 py-3 font-bold transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'heatmap' ? 'text-white border-b-2 border-green-500' : 'text-gray-400 hover:text-white'}`}>AI 힛맵</button>
           <button onClick={() => setActiveTab('trending')} className={`px-4 py-3 font-bold transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'trending' ? 'text-white border-b-2 border-yellow-500' : 'text-gray-400 hover:text-white'}`}>🔥 핫 주식 (Trending)</button>
@@ -298,6 +305,8 @@ export default function Home() {
           <ETFView />
         ) : activeTab === 'etf_strategy' ? (
           <ETFStrategyView />
+        ) : activeTab === 'etf_history' ? (
+          <ETFSimulationHistoryView />
         ) : activeTab === 'derivatives' ? (
           <DerivativesView />
         ) : activeTab === 'scanner' ? (

@@ -79,5 +79,4 @@ def generate_rs_chart(sector_name, stocks):
 import pandas as pd
 if __name__ == "__main__":
     for sector_name, stocks in SECTORS.items():
-        if "AI H/W" in sector_name:
-            generate_rs_chart(sector_name, stocks)
+        generate_rs_chart(sector_name, stocks)

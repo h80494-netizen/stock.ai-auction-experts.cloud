@@ -187,55 +187,78 @@ def get_ticker_specific_news(ticker: str, name: str):
     return formatted_news
 
 def get_sector_details(sector_name: str):
+    import concurrent.futures
     tickers = SECTORS.get(sector_name, [])
     if not tickers:
         return []
     
-    ticker_symbols = " ".join([t["ticker"] for t in tickers])
-    try:
-        yft = yf.Tickers(ticker_symbols)
-        details = []
-        for t_obj in tickers:
-            ticker = t_obj["ticker"]
-            t_info = yft.tickers[ticker].info if hasattr(yft, 'tickers') and ticker in yft.tickers else yf.Ticker(ticker).info
+    def fetch_detail(t_obj):
+        ticker = t_obj["ticker"]
+        try:
+            t = yf.Ticker(ticker)
+            t_info = t.info
             
             price = t_info.get("currentPrice", t_info.get("regularMarketPrice", "N/A"))
             change = t_info.get("regularMarketChangePercent", "N/A")
-            if change != "N/A":
-                change = round(change, 2)
+            if change != "N/A" and change is not None:
+                try:
+                    change = round(float(change), 2)
+                except ValueError:
+                    change = "N/A"
+            else:
+                change = "N/A"
                 
-            # Extra fundamentals
             per = t_info.get("forwardPE", t_info.get("trailingPE", "N/A"))
             eps = t_info.get("forwardEps", t_info.get("trailingEps", "N/A"))
             bps = t_info.get("bookValue", "N/A")
             roe = t_info.get("returnOnEquity", "N/A")
             roa = t_info.get("returnOnAssets", "N/A")
+            div_yield = t_info.get("dividendYield", "N/A")
+            return_1y = t_info.get("52WeekChange", "N/A")
             
-            # If Korean stock and fundamentals are missing, fetch from Naver
             is_korean = ticker.startswith("KRX:") or ticker.endswith(".KS") or ticker.endswith(".KQ")
-            if is_korean and (per == "N/A" or eps == "N/A" or bps == "N/A" or roe == "N/A"):
+            if is_korean:
                 code = ticker.split(":")[-1].split(".")[0]
                 try:
-                    from ingestion.scrapers.naver_scraper import get_naver_fundamentals
-                    nv_fund = get_naver_fundamentals(code)
-                    if per == "N/A" and nv_fund["per"] != "N/A": per = nv_fund["per"]
-                    if eps == "N/A" and nv_fund["eps"] != "N/A": eps = nv_fund["eps"]
-                    if bps == "N/A" and nv_fund["bps"] != "N/A": bps = nv_fund["bps"]
-                    if roe == "N/A" and nv_fund["roe"] != "N/A": 
-                        roe = nv_fund["roe"] # Already formatted with %
+                    from naver_finance_scraper import naver_scraper
+                    rt_detail = naver_scraper.get_current_price_detail(code)
+                    if rt_detail.get('price'): price = rt_detail['price']
+                    if rt_detail.get('changePct') is not None: change = rt_detail['changePct']
                 except Exception:
                     pass
+                
+                if per == "N/A" or eps == "N/A" or bps == "N/A" or roe == "N/A" or per is None or eps is None:
+                    try:
+                        from ingestion.scrapers.naver_scraper import get_naver_fundamentals
+                        nv_fund = get_naver_fundamentals(code)
+                        if (per == "N/A" or per is None) and nv_fund.get("per") != "N/A": per = nv_fund["per"]
+                        if (eps == "N/A" or eps is None) and nv_fund.get("eps") != "N/A": eps = nv_fund["eps"]
+                        if (bps == "N/A" or bps is None) and nv_fund.get("bps") != "N/A": bps = nv_fund["bps"]
+                        if (roe == "N/A" or roe is None) and nv_fund.get("roe") != "N/A": 
+                            roe = nv_fund["roe"]
+                    except Exception:
+                        pass
             
-            if per != "N/A": per = round(float(per), 2) if isinstance(per, (int, float)) else per
-            if eps != "N/A": eps = round(float(eps), 2) if isinstance(eps, (int, float)) else eps
-            if bps != "N/A": bps = round(float(bps), 2) if isinstance(bps, (int, float)) else bps
+            if per != "N/A" and per is not None: per = round(float(per), 2) if isinstance(per, (int, float)) else per
+            else: per = "N/A"
+            if eps != "N/A" and eps is not None: eps = round(float(eps), 2) if isinstance(eps, (int, float)) else eps
+            else: eps = "N/A"
+            if bps != "N/A" and bps is not None: bps = round(float(bps), 2) if isinstance(bps, (int, float)) else bps
+            else: bps = "N/A"
             
-            if roe != "N/A" and isinstance(roe, (int, float)): 
-                roe = f"{round(roe * 100, 2)}%"
-            if roa != "N/A" and isinstance(roa, (int, float)): 
-                roa = f"{round(roa * 100, 2)}%"
+            if roe != "N/A" and roe is not None and isinstance(roe, (int, float)): roe = f"{round(roe * 100, 2)}%"
+            elif roe is None: roe = "N/A"
             
-            details.append({
+            if roa != "N/A" and roa is not None and isinstance(roa, (int, float)): roa = f"{round(roa * 100, 2)}%"
+            elif roa is None: roa = "N/A"
+            
+            if div_yield != "N/A" and div_yield is not None and isinstance(div_yield, (int, float)): div_yield = f"{round(div_yield * 100, 2)}%"
+            elif div_yield is None: div_yield = "N/A"
+            
+            if return_1y != "N/A" and return_1y is not None and isinstance(return_1y, (int, float)): return_1y = f"{round(return_1y * 100, 2)}%"
+            elif return_1y is None: return_1y = "N/A"
+            
+            return {
                 "ticker": ticker,
                 "name": t_obj["name"],
                 "price": price,
@@ -244,11 +267,31 @@ def get_sector_details(sector_name: str):
                 "eps": eps,
                 "bps": bps,
                 "roe": roe,
-                "roa": roa
-            })
+                "roa": roa,
+                "div_yield": div_yield,
+                "return_1y": return_1y
+            }
+        except Exception as e:
+            print(f"Error fetching detail for {ticker}: {e}")
+            return {
+                "ticker": ticker, "name": t_obj["name"], "price": "N/A", "change": "N/A",
+                "per": "N/A", "eps": "N/A", "bps": "N/A", "roe": "N/A", "roa": "N/A", 
+                "div_yield": "N/A", "return_1y": "N/A"
+            }
+
+    try:
+        details = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_ticker = {executor.submit(fetch_detail, t): t for t in tickers}
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                res = future.result()
+                if res:
+                    details.append(res)
+        
+        details.sort(key=lambda x: [t["ticker"] for t in tickers].index(x["ticker"]))
         return details
     except Exception as e:
-        print(f"get_sector_details error for {sector_name}: {e}")
+        print(f"get_sector_details parallel error for {sector_name}: {e}")
         return tickers
 
 def get_ticker_fundamentals(ticker: str):

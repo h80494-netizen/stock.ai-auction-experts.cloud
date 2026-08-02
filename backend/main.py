@@ -27,15 +27,38 @@ app.add_middleware(
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import auto_trader
+from etf_strategy import update_etf_data
 
 scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
 def start_scheduler():
-    scheduler.add_job(auto_trader.job_905_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
-    scheduler.add_job(auto_trader.job_1455_sell, CronTrigger(hour=14, minute=55, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    import threading
+    
+    # 서버 구동 시 백그라운드에서 ETF 데이터 즉시 1회 갱신 (사용자가 바로 변화를 볼 수 있도록)
+    threading.Thread(target=update_etf_data, daemon=True).start()
+    
+    scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=10, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_1500_sell, CronTrigger(hour=15, minute=0, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    
+    # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
+    scheduler.add_job(update_etf_data, CronTrigger(hour=8, minute=0, timezone='Asia/Seoul'))
+    scheduler.add_job(update_etf_data, CronTrigger(hour=18, minute=0, timezone='Asia/Seoul'))
+    
+    # 경쟁업체 차트 주기적 업데이트 (매일 아침 7시 30분)
+    import subprocess
+    def update_rs_charts():
+        try:
+            subprocess.run(["python", "generate_rs_charts.py"], cwd=os.path.dirname(os.path.abspath(__file__)))
+        except Exception as e:
+            print("RS Charts update error:", e)
+            
+    scheduler.add_job(update_rs_charts, CronTrigger(hour=7, minute=30, timezone='Asia/Seoul'))
+    # 시작 시에도 백그라운드 스레드로 한 번 생성 (사용자가 바로 최신 차트를 볼 수 있도록)
+    threading.Thread(target=update_rs_charts, daemon=True).start()
+    
     scheduler.start()
-    print("APScheduler started: Trading jobs scheduled for 09:05 and 14:55 KST (Mon-Fri)")
+    print("APScheduler started: Trading & ETF jobs scheduled")
 
 @app.on_event("shutdown")
 def stop_scheduler():
@@ -536,10 +559,13 @@ def api_get_realtime_prices(tickers: str = ""):
 def get_indices():
     import yfinance as yf
     tickers = {
-        "KOSPI": "^KS11",
-        "KOSDAQ": "^KQ11",
-        "KOSPI200": "^KS200",
-        "KOSPI200 선물": "^KS200" # yfinance lacks real KR futures, fallback to KS200 for now
+        "KOSPI (KODEX 200)": "069500.KS",
+        "KOSDAQ (KODEX 코스닥150)": "229200.KS",
+        "S&P 500 (SPY)": "SPY",
+        "NASDAQ 100 (QQQ)": "QQQ",
+        "일본 (EWJ)": "EWJ",
+        "중국 (FXI)": "FXI",
+        "유럽 (EZU)": "EZU"
     }
     
     results = []
@@ -552,21 +578,22 @@ def get_indices():
                 change = info.get("regularMarketChange") or 0
                 changePct = info.get("regularMarketChangePercent") or 0
                 
-                if name == "KOSPI200 선물":
-                    price = round(price * 1.001, 2) if price else 0
-                    change = round(change * 1.005, 2) if change else 0
+                tv_symbol = t.replace(".KS", "").replace(".KQ", "")
+                if t.endswith(".KS") or t.endswith(".KQ"):
+                    tv_symbol = f"KRX:{tv_symbol}"
                 
                 results.append({
                     "name": name,
+                    "symbol": tv_symbol,
                     "price": price,
                     "change": round(change, 2),
                     "changePct": round(changePct, 2)
                 })
             except Exception as e:
-                print(f"Error fetching index {name}: {e}")
-                results.append({"name": name, "price": 0, "change": 0, "changePct": 0})
+                print(f"Error fetching ETF {name}: {e}")
+                results.append({"name": name, "symbol": "", "price": 0, "change": 0, "changePct": 0})
     except Exception as e:
-        print(f"Error fetching indices: {e}")
+        print(f"Error fetching ETFs: {e}")
     return results
 
 @app.get("/api/kis/chart/{ticker}")

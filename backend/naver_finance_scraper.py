@@ -43,6 +43,30 @@ class NaverFinanceScraper:
             
         return {"price": 0, "change": 0, "changePct": 0, "volume": 0}
 
+    def get_foreign_brokerage_net_buy(self, ticker: str) -> int:
+        """외국계 증권사 순매수량(매수-매도) 조회"""
+        clean_ticker = self._clean_ticker(ticker)
+        url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
+        try:
+            from bs4 import BeautifulSoup
+            res = requests.get(url, headers=self.headers, timeout=3)
+            res.encoding = 'euc-kr'
+            soup = BeautifulSoup(res.text, 'html.parser')
+            tb = soup.select_one('.tb_type1')
+            if tb:
+                trs = tb.find_all('tr')
+                if len(trs) >= 2:
+                    cols = [td.get_text(strip=True) for td in trs[1].find_all(['th', 'td'])]
+                    if len(cols) >= 4:
+                        net_buy_str = cols[2].replace(',', '').replace('+', '')
+                        if net_buy_str.strip() == '':
+                            return 0
+                        return int(net_buy_str)
+        except Exception as e:
+            print(f"Naver foreign net buy error ({ticker}): {e}")
+            
+        return 0
+
     def get_current_price(self, ticker: str) -> int:
         detail = self.get_current_price_detail(ticker)
         return detail.get("price", 0)

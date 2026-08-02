@@ -1,6 +1,6 @@
 @echo off
 echo Starting Backend Server...
-start cmd /k "cd backend && pip install -r requirements.txt && uvicorn main:app --reload --host 0.0.0.0 --port 8080"
+start cmd /k "cd backend && pip install -r requirements.txt && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
 
 echo Starting Frontend Server...
 start cmd /k "cd frontend && npm install && npm run dev"

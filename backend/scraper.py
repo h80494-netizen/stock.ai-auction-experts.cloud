@@ -83,7 +83,7 @@ def get_kospi_100():
                             "market_cap": mcap,
                             "total_volume": total_vol,
                             "ratio": foreign_ratio,
-                            "foreign_net_buy": int(total_vol * (foreign_ratio / 100) * 0.1), # 가상의 순매수량 계산
+                            "foreign_net_buy": 0, # 백그라운드 태스크에서 실제 값으로 업데이트 됨
                             "categories": []
                         })
                         if len(stocks) >= 100:

@@ -36,11 +36,16 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
           : `/api/kis/chart/${cleanTicker}?period=${period}`;
           
         const res = await fetch(url);
-        if (!res.ok) throw new Error(res.statusText || 'API Error');
+        if (!res.ok) {
+           console.warn('Chart fetch API Error:', res.statusText);
+           setChartData([]);
+           setLoading(false);
+           return;
+        }
         const data = await res.json();
         setChartData(data);
       } catch (err) {
-        console.error(err);
+        console.warn('Chart fetch error:', err);
       }
       setLoading(false);
     };

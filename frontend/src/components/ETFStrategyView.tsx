@@ -35,27 +35,45 @@ export default function ETFStrategyView() {
   const [criteria, setCriteria] = useState<string>('sharpe');
 
   useEffect(() => {
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
+
     const fetchData = async () => {
-      setLoading(true);
+      if (!pollInterval) setLoading(true);
       try {
+        const ts = Date.now();
         const [stratRes, simRes] = await Promise.all([
-          fetch(`/api/etf/strategy?criteria=${criteria}`),
-          fetch(`/api/etf/simulation?criteria=${criteria}`)
+          fetch(`/api/etf/strategy?criteria=${criteria}&t=${ts}`, { cache: 'no-store' }),
+          fetch(`/api/etf/simulation?criteria=${criteria}&t=${ts}`, { cache: 'no-store' })
         ]);
-        if (!stratRes.ok) throw new Error(stratRes.statusText || 'API Error');
+        if (!stratRes.ok || !simRes.ok) {
+          console.error('ETF Strategy API Error:', stratRes.statusText, simRes.statusText);
+          if (isMounted) setLoading(false);
+          return;
+        }
         const stratJson = await stratRes.json();
-        if (!simRes.ok) throw new Error(simRes.statusText || 'API Error');
         const simJson = await simRes.json();
         
-        setData(stratJson);
-        setSimData(simJson);
+        if (isMounted) {
+          setData(stratJson);
+          setSimData(simJson);
+        }
       } catch (err) {
-        console.error(err);
+        console.error('ETF Strategy fetch exception:', String(err));
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
+
     fetchData();
+    pollInterval = setInterval(() => {
+      if (!document.hidden) fetchData();
+    }, 30000);
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, [criteria]);
 
   const chartData = useMemo(() => {
@@ -384,7 +402,7 @@ export default function ETFStrategyView() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} />
+                  <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} minTickGap={30} />
                   <YAxis domain={['auto', 'auto']} stroke="#9ca3af" tick={{fill: '#9ca3af'}} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />
@@ -450,7 +468,7 @@ export default function ETFStrategyView() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} />
+                  <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} minTickGap={30} />
                   <YAxis domain={['auto', 'auto']} stroke="#9ca3af" tick={{fill: '#9ca3af'}} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />

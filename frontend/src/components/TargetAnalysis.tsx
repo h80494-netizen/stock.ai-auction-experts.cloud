@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { createChart, ColorType, LineStyle, LineSeries, createSeriesMarkers } from 'lightweight-charts';
+import KISChart from './KISChart';
 import AutocompleteSearch from './AutocompleteSearch';
 
 const targetCache: Record<string, any> = {};
@@ -23,6 +23,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
   const [cacheLoaded, setCacheLoaded] = useState(false);
 
   const targetChartRef = useRef<HTMLDivElement>(null);
+  const [chartData, setChartData] = useState<any[]>([]);
 
   // Load cache on mount
   useEffect(() => {
@@ -105,11 +106,12 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
       
       // Determine country
       let country = 'US';
-      if (ticker.endsWith('.KS') || ticker.endsWith('.KQ') || ticker.startsWith('KRX:') || (!isNaN(Number(ticker)) && ticker.length==6)) {
+      const tickerStr = String(ticker);
+      if (tickerStr.endsWith('.KS') || tickerStr.endsWith('.KQ') || tickerStr.startsWith('KRX:') || (!isNaN(Number(tickerStr)) && tickerStr.length==6)) {
           country = 'KR';
-      } else if (ticker.endsWith('.T')) {
+      } else if (tickerStr.endsWith('.T')) {
           country = 'JP';
-      } else if (ticker.endsWith('.SS') || ticker.endsWith('.SZ') || (!isNaN(Number(ticker)) && ticker.length==6)) {
+      } else if (tickerStr.endsWith('.SS') || tickerStr.endsWith('.SZ') || (!isNaN(Number(tickerStr)) && tickerStr.length==6)) {
           country = 'CN';
       }
       
@@ -222,11 +224,12 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
             }
             
             let country = 'US';
-            if (stock.ticker.endsWith('.KS') || stock.ticker.endsWith('.KQ') || stock.ticker.startsWith('KRX:') || (!isNaN(Number(stock.ticker)) && stock.ticker.length==6)) {
+            const tStr = String(stock.ticker);
+            if (tStr.endsWith('.KS') || tStr.endsWith('.KQ') || tStr.startsWith('KRX:') || (!isNaN(Number(tStr)) && tStr.length==6)) {
                 country = 'KR';
-            } else if (stock.ticker.endsWith('.T')) {
+            } else if (tStr.endsWith('.T')) {
                 country = 'JP';
-            } else if (stock.ticker.endsWith('.SS') || stock.ticker.endsWith('.SZ') || (!isNaN(Number(stock.ticker)) && stock.ticker.length==6)) {
+            } else if (tStr.endsWith('.SS') || tStr.endsWith('.SZ') || (!isNaN(Number(tStr)) && tStr.length==6)) {
                 country = 'CN';
             }
             
@@ -288,73 +291,36 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
     });
   }, [targetData, filter, countryFilter]);
 
-  // Render Target Price Chart for selected
+  // Fetch chart data for KISChart
   useEffect(() => {
     if (!selectedStock || !selectedStock.fundamentals) return;
-    const fundamentals = selectedStock.fundamentals;
-    
-    let targetChart: any = null;
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
 
-    const chartOptions = {
-      layout: { background: { type: ColorType.Solid, color: '#000000' }, textColor: '#d1d4dc' },
-      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
-    };
-
-    const renderChart = async () => {
-        let priceData = [];
-        if (fundamentals.price_chart && fundamentals.price_chart.length > 0 && typeof fundamentals.price_chart[0].close !== 'undefined') {
-          priceData = fundamentals.price_chart.map((d: any) => ({ time: d.time, value: d.close }));
-        } else if (fundamentals.price_chart && fundamentals.price_chart.length > 0) {
-          priceData = fundamentals.price_chart;
-        }
-
-        try {
-          const res = await fetch(`/api/kis/chart/${selectedStock.ticker}?period=D&is_overseas=${selectedStock.country !== 'KR'}`);
-          if (!res.ok) throw new Error(res.statusText || 'API Error');
-          const freshData = await res.json();
-          if (freshData && freshData.length > 0) {
-              priceData = freshData.map((d: any) => ({ time: d.time, value: d.close !== undefined ? d.close : d.value }));
-              fundamentals.price_chart = freshData;
+    const fetchData = async () => {
+      try {
+        const res = await fetch(`/api/kis/chart/${selectedStock.ticker}?period=D&is_overseas=${selectedStock.country !== 'KR'}`);
+        if (!res.ok) throw new Error(res.statusText || 'API Error');
+        const freshData = await res.json();
+        if (freshData && freshData.length > 0) {
+          const priceData = freshData.map((d: any) => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close !== undefined ? d.close : d.value, volume: d.volume }));
+          if (isMounted) {
+            setChartData(priceData);
           }
-        } catch (e) { console.error("Fresh price fetch failed", e); }
-
-      if (targetChartRef.current && priceData && priceData.length > 0) {
-        targetChartRef.current.innerHTML = ''; // clear previous
-        targetChart = createChart(targetChartRef.current, { ...chartOptions, width: targetChartRef.current.clientWidth, height: targetChartRef.current.clientHeight });
-        const priceSeries = targetChart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
-        priceSeries.setData(priceData);
-        
-        if (selectedStock.currentTarget && selectedStock.currentTarget > 0 && priceData.length > 0) {
-          const latestTime = priceData[priceData.length - 1].time;
-          const targetSeries = targetChart.addSeries(LineSeries, { 
-              color: '#FF5252',
-              lineWidth: 0,
-              crosshairMarkerVisible: false,
-              lastValueVisible: true,
-              title: '목표가'
-          });
-          targetSeries.setData([{ time: latestTime, value: selectedStock.currentTarget }]);
-          try {
-            createSeriesMarkers(targetSeries, [
-                { time: latestTime, position: 'inBar', color: '#FF5252', shape: 'circle', size: 1, text: '목표가' }
-            ]);
-          } catch(e) { console.error("Marker error", e); }
         }
-        targetChart.timeScale().fitContent();
+      } catch (e) {
+        console.error("Fresh price fetch failed", e);
       }
     };
     
-    renderChart();
-
-    const handleResize = () => {
-      if (targetChart && targetChartRef.current) targetChart.applyOptions({ width: targetChartRef.current.clientWidth });
-    };
-    
-    window.addEventListener('resize', handleResize);
+    fetchData();
+    pollInterval = setInterval(() => {
+      if (!document.hidden) fetchData();
+    }, 30000);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
-      if (targetChart) targetChart.remove();
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
     };
   }, [selectedStock]);
 
@@ -479,10 +445,16 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
             <div className="flex-1 bg-[#111] border border-gray-800 rounded p-4 flex flex-col overflow-hidden">
               <h3 className="text-lg font-bold text-gray-200 mb-2">주가 vs 최고목표가 추이 및 일자별 목표가</h3>
               <div className="h-1/2 relative min-h-[200px]">
-                {selectedStock.fundamentals?.price_chart?.length > 0 ? (
-                  <div ref={targetChartRef} className="absolute inset-0" />
+                {chartData.length > 0 ? (
+                  <KISChart 
+                    data={chartData} 
+                    symbol={selectedStock.name} 
+                    fundamentals={selectedStock.fundamentals} 
+                    currentPrice={selectedStock.price} 
+                    changePct={selectedStock.changePct} 
+                  />
                 ) : (
-                  <div className="flex h-full items-center justify-center text-gray-600">차트 데이터가 없습니다.</div>
+                  <div className="flex h-full items-center justify-center text-gray-600">차트 데이터 로딩 중...</div>
                 )}
               </div>
               

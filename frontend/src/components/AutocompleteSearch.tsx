@@ -37,9 +37,9 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
       
       // 1. Local matching (allows Korean support if localStocks has it)
       const localMatches = localStocks.filter(s => 
-        (s.name && s.name.toLowerCase().includes(q)) || 
-        (s.symbol && s.symbol.toLowerCase().includes(q)) ||
-        (s.ticker && s.ticker.toLowerCase().includes(q))
+        (s.name && String(s.name).toLowerCase().includes(q)) || 
+        (s.symbol && String(s.symbol).toLowerCase().includes(q)) ||
+        (s.ticker && String(s.ticker).toLowerCase().includes(q))
       ).map(s => ({
         ticker: s.ticker || s.symbol,
         name: s.name,
@@ -84,12 +84,12 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
     if (q) {
       // If user typed exact name or ticker, resolve to ticker
       const match = suggestions.find(s => 
-        s.name.toLowerCase() === q.toLowerCase() || 
-        s.ticker.toLowerCase() === q.toLowerCase()
+        String(s.name).toLowerCase() === q.toLowerCase() || 
+        String(s.ticker).toLowerCase() === q.toLowerCase()
       ) || localStocks.find(s => 
-        (s.name && s.name.toLowerCase() === q.toLowerCase()) || 
-        (s.ticker && s.ticker.toLowerCase() === q.toLowerCase()) ||
-        (s.symbol && s.symbol.toLowerCase() === q.toLowerCase())
+        (s.name && String(s.name).toLowerCase() === q.toLowerCase()) || 
+        (s.ticker && String(s.ticker).toLowerCase() === q.toLowerCase()) ||
+        (s.symbol && String(s.symbol).toLowerCase() === q.toLowerCase())
       );
       
       if (match) {

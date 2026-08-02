@@ -63,10 +63,29 @@ def update_etf_data():
             
     conn.commit()
     conn.close()
+    
+    with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
+        f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+def check_and_update_etf_data():
+    last_update_file = os.path.join(DATA_DIR, 'last_update.txt')
+    needs_update = True
+    if os.path.exists(last_update_file):
+        with open(last_update_file, 'r') as f:
+            last_time_str = f.read().strip()
+            try:
+                last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
+                if (datetime.now() - last_time).total_seconds() < 12 * 3600:
+                    needs_update = False
+            except:
+                pass
+                
+    if needs_update:
+        update_etf_data()
 
 def get_etf_strategy_results(criteria="momentum"):
+    check_and_update_etf_data()
     init_db()
-    # update_etf_data() # Usually called via scheduler, but can be triggered if needed or in background
     conn = sqlite3.connect(DB_PATH)
     
     results = []
@@ -135,6 +154,7 @@ def get_etf_strategy_results(criteria="momentum"):
     return results
 
 def get_etf_simulation(criteria="momentum"):
+    check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
     

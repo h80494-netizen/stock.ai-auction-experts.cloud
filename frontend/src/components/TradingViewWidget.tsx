@@ -4,9 +4,10 @@ import React, { useEffect, useRef, memo, useState } from "react";
 
 function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, defaultInterval?: string }) {
   const container = useRef<HTMLDivElement>(null);
+  const symbolStr = String(symbol);
   
-  const isKrx = symbol.endsWith(".KS") || symbol.endsWith(".KQ") || symbol.startsWith("KRX:") || /^\d{6}$/.test(symbol);
-  const isUS = /^[A-Z]+$/.test(symbol) && !symbol.includes(".");
+  const isKrx = symbolStr.endsWith(".KS") || symbolStr.endsWith(".KQ") || symbolStr.startsWith("KRX:") || /^\d{6}$/.test(symbolStr);
+  const isUS = /^[A-Z]+$/.test(symbolStr) && !symbolStr.includes(".");
   
   // interval: '1' (1min), 'D' (1 day), 'W' (1 week), 'M' (1 month), '12M' (1 year)
   // Fallback to 'D' if '1' is requested but not supported (e.g. Japanese/Chinese stocks)
@@ -17,10 +18,10 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
   // We must use Naver Image automatically if interval is '1' for KRX stocks.
   const [useNaverForKrx, setUseNaverForKrx] = useState<boolean>(false);
 
-  const shouldRenderNaver = isKrx;
+  const shouldRenderNaver = isKrx && useNaverForKrx;
 
   const getNaverImageUrl = () => {
-    const code = symbol.replace("KRX:", "").replace(".KS", "").replace(".KQ", "");
+    const code = symbolStr.replace("KRX:", "").replace(".KS", "").replace(".KQ", "");
     // Add timestamp to prevent browser caching of real-time images
     const ts = new Date().getTime();
     if (interval === '1') return `https://ssl.pstatic.net/imgfinance/chart/item/area/day/${code}.png?sidcode=${ts}`;
@@ -31,7 +32,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
   };
 
   // Convert symbol for TradingView compatibility
-  let tvSymbol = symbol.toUpperCase();
+  let tvSymbol = symbolStr.toUpperCase();
   if (tvSymbol.endsWith(".KS") || tvSymbol.endsWith(".KQ")) {
     tvSymbol = "KRX:" + tvSymbol.split(".")[0];
   } else if (/^\d{4}$/.test(tvSymbol)) {
@@ -90,7 +91,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
     } else {
       loadWidget();
     }
-  }, [symbol, interval, shouldRenderNaver, tvSymbol, safeContainerId]);
+  }, [symbolStr, interval, shouldRenderNaver, tvSymbol, safeContainerId]);
 
   const intervals = [
     { label: '분봉', value: '1' },
@@ -107,7 +108,6 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
       <div className="flex items-center justify-between bg-[#1e222d] px-4 py-2 border-b border-gray-800">
         <div className="flex items-center gap-2">
           {intervals.map(intv => {
-            const isUS = /^[A-Z]+$/.test(symbol) && !symbol.includes(".");
             // Hide 1-min interval for non-US and non-KRX foreign stocks because free TradingView widget falls back to US stocks
             if (intv.value === '1' && !isKrx && !isUS) return null;
             
@@ -127,8 +127,8 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
           })}
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs font-bold text-gray-400">{symbol}</span>
-          {(symbol.startsWith("KRX:") || symbol.endsWith(".KS") || symbol.endsWith(".KQ")) && (
+          <span className="text-xs font-bold text-gray-400">{symbolStr}</span>
+          {(isKrx) && (
             <button
               onClick={() => setUseNaverForKrx(!useNaverForKrx)}
               className="text-[10px] bg-gray-800 text-gray-400 px-2 py-1 rounded hover:bg-gray-700"

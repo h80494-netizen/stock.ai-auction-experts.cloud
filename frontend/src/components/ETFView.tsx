@@ -19,21 +19,36 @@ export default function ETFView() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
+
     const fetchList = async () => {
       try {
         const res = await fetch('/api/etf/list');
         if (res.ok) {
           const data = await res.json();
-          setEtfs(data.etfs || []);
-          setEtns(data.etns || []);
+          if (isMounted) {
+            setEtfs(data.etfs || []);
+            setEtns(data.etns || []);
+          }
         }
       } catch (e) {
         console.error(e);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
+
     fetchList();
+    
+    pollInterval = setInterval(() => {
+      if (!document.hidden) fetchList();
+    }, 15000);
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, []);
 
   useEffect(() => {
@@ -97,6 +112,58 @@ export default function ETFView() {
       setDetailLoading(false);
     }
   };
+
+  useEffect(() => {
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
+
+    const fetchDetail = async () => {
+      if (!selectedItem) return;
+      
+      if (country === 'US') {
+        try {
+          const res = await fetch(`/api/etf/us/${selectedItem.symbol}/details`);
+          if (res.ok) {
+            const data = await res.json();
+            if (isMounted) setUsDetail(data);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+        return;
+      }
+
+      // For KR
+      try {
+        const portRes = await fetch(`/api/etf/${selectedItem.itemcode}/portfolio`);
+        if (portRes.ok) {
+          const portData = await portRes.json();
+          if (isMounted) setPortfolio(portData || []);
+        }
+        
+        if (activeType === 'ETN') {
+          const matRes = await fetch(`/api/etf/${selectedItem.itemcode}/maturity`);
+          if (matRes.ok) {
+            const matData = await matRes.json();
+            if (isMounted) setMaturity(matData.maturity_date || '');
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    if (selectedItem) {
+      pollInterval = setInterval(() => {
+        if (!document.hidden) fetchDetail();
+      }, 15000);
+    }
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [selectedItem, country, activeType]);
 
   if (loading) {
     return <div className="p-10 text-center text-gray-500">Loading ETF/ETN Data...</div>;

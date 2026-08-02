@@ -39,11 +39,11 @@ export default function TrendingStocksView() {
   useEffect(() => {
     setLoading(true);
     fetch(`/api/trending?region=${activeRegion}`)
-      .then(res => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
+      .then(res => res.ok ? res.json() : Promise.reject(res.statusText || 'API Error'))
       .then(data => {
         setTrendingData(Array.isArray(data) ? data : []);
       })
-      .catch(e => console.error(e))
+      .catch(e => console.error('Trending API Error:', String(e)))
       .finally(() => setLoading(false));
   }, [activeRegion]);
 

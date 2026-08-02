@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import KISChart from './KISChart';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createChart, ColorType, LineSeries, createSeriesMarkers } from 'lightweight-charts';
 import AutocompleteSearch from './AutocompleteSearch';
 
 interface PriceViewProps {
@@ -17,6 +17,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
   const [selectedStock, setSelectedStock] = useState<any>(globalStocks.length > 0 ? globalStocks[0] : (stocks.length > 0 ? stocks[0] : null));
   const [chartData, setChartData] = useState<any[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
+  const targetChartRef = useRef<HTMLDivElement>(null);
   const [indices, setIndices] = useState<any[]>([]);
   const [realtimeNews, setRealtimeNews] = useState<any[]>(news);
   const [fetchedAdditionalStocks, setFetchedAdditionalStocks] = useState<any[]>([]);
@@ -124,8 +125,13 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
   const [period, setPeriod] = useState("D"); // "m" (분봉), "D" (일봉), "W" (주봉), "M" (월봉)
 
   useEffect(() => {
-    if (selectedStock) {
-      setLoadingChart(true);
+    let isMounted = true;
+    let pollInterval: NodeJS.Timeout;
+
+    const fetchData = () => {
+      if (!selectedStock) return;
+      if (!pollInterval) setLoadingChart(true);
+      
       const isGlobal = selectedStock.categories?.some((c: string) => c.includes("Global Major") || (c.includes("Top 50") && !c.includes("KR")));
       let cleanTicker = selectedStock.ticker;
       let excd = "";
@@ -165,6 +171,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
         safeFetch(`/api/stock/${cleanTicker}/summary`)
       ])
         .then(([chartDataRes, fundData, newsData, summaryData]) => {
+          if (!isMounted) return;
           if (Array.isArray(chartDataRes)) {
             setChartData(chartDataRes);
           } else {
@@ -182,6 +189,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
           setLoadingChart(false);
         })
         .catch(err => {
+          if (!isMounted) return;
           console.error("Fetch error", err);
           setChartData([]);
           setFundamentals(null);
@@ -189,8 +197,75 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
           setStockSummary(null);
           setLoadingChart(false);
         });
+    };
+
+    if (selectedStock) {
+      fetchData();
+      pollInterval = setInterval(() => {
+        if (!document.hidden) fetchData();
+      }, 10000);
     }
+
+    return () => {
+      isMounted = false;
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, [selectedStock, period]);
+
+  useEffect(() => {
+    if (!targetChartRef.current || chartData.length === 0) return;
+
+    const chartOptions = {
+      layout: { background: { type: ColorType.Solid, color: '#000000' }, textColor: '#d1d4dc' },
+      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+      width: targetChartRef.current.clientWidth,
+      height: targetChartRef.current.clientHeight,
+    };
+
+    targetChartRef.current.innerHTML = '';
+    const targetChart = createChart(targetChartRef.current, chartOptions);
+    const priceSeries = targetChart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
+    
+    // Sort and remove duplicates for time
+    const sortedData = [...chartData].sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
+    const uniqueData = sortedData.filter((item, index, arr) => index === 0 || item.time !== arr[index - 1].time);
+
+    const lineData = uniqueData.map((d: any) => ({
+      time: d.time,
+      value: d.close !== undefined ? d.close : (d.value !== undefined ? d.value : d.open)
+    }));
+    priceSeries.setData(lineData);
+
+    if (selectedStock?.currentTarget && selectedStock.currentTarget > 0 && lineData.length > 0) {
+      const latestTime = lineData[lineData.length - 1].time;
+      const targetSeries = targetChart.addSeries(LineSeries, { 
+          color: '#FF5252',
+          lineWidth: 0,
+          crosshairMarkerVisible: false,
+          lastValueVisible: true,
+          title: '목표가'
+      });
+      targetSeries.setData([{ time: latestTime, value: selectedStock.currentTarget }]);
+      try {
+        createSeriesMarkers(targetSeries, [
+            { time: latestTime, position: 'inBar', color: '#FF5252', shape: 'circle', size: 1, text: '목표가' }
+        ]);
+      } catch(e) {}
+    }
+    targetChart.timeScale().fitContent();
+
+    const handleResize = () => {
+      if (targetChartRef.current) {
+        targetChart.applyOptions({ width: targetChartRef.current.clientWidth });
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      targetChart.remove();
+    };
+  }, [chartData, selectedStock]);
 
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
@@ -391,9 +466,9 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
               <div className="flex-1 w-full bg-black relative flex">
                 <div className="w-1/2 h-full relative flex flex-col items-center justify-center border-r border-gray-800">
                   {loadingChart ? (
-                    <div className="text-gray-500">KIS API 차트 데이터 로딩 중...</div>
+                    <div className="text-gray-500">차트 데이터 로딩 중...</div>
                   ) : (
-                    <KISChart data={chartData} symbol={latestSelectedStock?.name} fundamentals={fundamentals} currentPrice={latestSelectedStock?.price} changePct={latestSelectedStock?.changePct} />
+                    <div ref={targetChartRef} className="w-full h-full absolute inset-0" />
                   )}
                 </div>
                 <div className="w-1/2 h-full p-2 flex flex-col justify-center bg-[#0a0a0a] overflow-y-auto">
