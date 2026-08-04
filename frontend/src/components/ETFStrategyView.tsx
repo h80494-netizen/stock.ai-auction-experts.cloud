@@ -31,7 +31,7 @@ export default function ETFStrategyView() {
   const [data, setData] = useState<any[]>([]);
   const [simData, setSimData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [period, setPeriod] = useState<string>('YTD(25.01~)');
+  const [period, setPeriod] = useState<string>('YTD(26.01~)');
   const [criteria, setCriteria] = useState<string>('sharpe');
 
   useEffect(() => {
@@ -98,8 +98,8 @@ export default function ETFStrategyView() {
     let startDate = '1900-01-01';
     const today = new Date();
     
-    if (period === 'YTD(25.01~)') {
-      startDate = '2025-01-02';
+    if (period === 'YTD(26.01~)') {
+      startDate = '2026-01-02';
     } else if (period === '3개월') {
       const d = new Date(today);
       d.setMonth(d.getMonth() - 3);
@@ -173,8 +173,8 @@ export default function ETFStrategyView() {
     let startDate = '1900-01-01';
     const today = new Date();
     
-    if (period === 'YTD(25.01~)') {
-      startDate = '2025-01-02';
+    if (period === 'YTD(26.01~)') {
+      startDate = '2026-01-02';
     } else if (period === '3개월') {
       const d = new Date(today);
       d.setMonth(d.getMonth() - 3);
@@ -250,7 +250,7 @@ export default function ETFStrategyView() {
     return null;
   };
 
-  const periodOptions = ['YTD(25.01~)', '3개월', '6개월', '12개월'];
+  const periodOptions = ['YTD(26.01~)', '3개월', '6개월', '12개월'];
 
   return (
     <div className="p-4 h-full overflow-y-auto space-y-6">

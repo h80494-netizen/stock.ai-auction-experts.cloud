@@ -47,9 +47,10 @@ def start_scheduler():
     
     # 경쟁업체 차트 주기적 업데이트 (매일 아침 7시 30분)
     import subprocess
+    import sys
     def update_rs_charts():
         try:
-            subprocess.run(["python", "generate_rs_charts.py"], cwd=os.path.dirname(os.path.abspath(__file__)))
+            subprocess.run([sys.executable, "generate_rs_charts.py"], cwd=os.path.dirname(os.path.abspath(__file__)))
         except Exception as e:
             print("RS Charts update error:", e)
             
@@ -887,7 +888,19 @@ def get_analyst_report(ticker: str):
         opinion = "Hold"
         opinion_text = "보유"
         
+    dart_summary = ""
+    if is_krx:
+        try:
+            import dart_analyzer
+            dart_summary = dart_analyzer.analyze_dart_with_ai(stock.get("name", ticker), pure_ticker)
+        except Exception as e:
+            print(f"DART analysis error: {e}")
+            
     business_outlook = f"동사는 최근 매크로 환경 변화에도 불구하고 안정적인 이익 창출력을 유지할 것으로 전망됩니다. 특히 핵심 사업 부문에서의 시장 지배력이 유지되고 있으며, 신규 사업 부문에서의 성장 모멘텀이 기대됩니다."
+    
+    if dart_summary:
+        business_outlook = f"[DART 최근 주요 공시 AI 분석]\n{dart_summary}\n\n[기본 영업 전망]\n{business_outlook}"
+
     investment_outlook = f"수익성 개선 추세가 이어지며, 잉여현금흐름(FCF) 증가에 따른 주주환원 확대 가능성이 존재합니다. 글로벌 경쟁사 대비 밸류에이션 매력도 존재하며, 장기적인 관점에서의 비중 확대를 권고합니다."
     price_outlook = f"본 리포트에서는 잉여현금흐름을 할인한 DCF 모델(가치: {int(target_price_dcf):,}원)과 BPS 및 미래 초과이익을 고려한 RIM 모델(가치: {int(target_price_rim):,}원)을 복합적으로 고려하여 목표가 {int(target_price):,}원을 제시합니다. 현재 주가({int(curr_price):,}원) 대비 매력적인 구간으로 판단됩니다."
 
