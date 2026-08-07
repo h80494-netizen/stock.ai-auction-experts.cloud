@@ -283,13 +283,27 @@ def get_sector_details(sector_name: str):
         details = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_ticker = {executor.submit(fetch_detail, t): t for t in tickers}
-            for future in concurrent.futures.as_completed(future_to_ticker):
-                res = future.result()
-                if res:
-                    details.append(res)
+            try:
+                for future in concurrent.futures.as_completed(future_to_ticker, timeout=6):
+                    res = future.result()
+                    if res:
+                        details.append(res)
+            except concurrent.futures.TimeoutError:
+                print(f"Timeout while fetching details for {sector_name}")
         
-        details.sort(key=lambda x: [t["ticker"] for t in tickers].index(x["ticker"]))
-        return details
+        # Merge fetched details with original tickers to maintain order and fill missing
+        fetched_dict = {d["ticker"]: d for d in details}
+        final_details = []
+        for t in tickers:
+            if t["ticker"] in fetched_dict:
+                final_details.append(fetched_dict[t["ticker"]])
+            else:
+                final_details.append({
+                    "ticker": t["ticker"], "name": t["name"], "price": "N/A", "change": "N/A",
+                    "per": "N/A", "eps": "N/A", "bps": "N/A", "roe": "N/A", "roa": "N/A", 
+                    "div_yield": "N/A", "return_1y": "N/A"
+                })
+        return final_details
     except Exception as e:
         print(f"get_sector_details parallel error for {sector_name}: {e}")
         return tickers

@@ -1,10 +1,15 @@
 import feedparser
 import time
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.retry_util import with_retry
 from kis_instance import kis_client
 
 _global_cache = None
 _last_fetch = 0
 
+@with_retry(max_retries=3, initial_delay=1.0)
 def fetch_global_indices():
     """
     Fetch global indices and exchange rates using yfinance.
@@ -53,6 +58,7 @@ def fetch_global_indices():
         
     return results
 
+@with_retry(max_retries=3, initial_delay=1.0)
 def get_major_global_stocks():
     """
     Fetch major global stocks using KIS API.

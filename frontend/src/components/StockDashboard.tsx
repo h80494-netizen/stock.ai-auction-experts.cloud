@@ -89,10 +89,19 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
   }, [globalSearchTicker]);
 
   const handleSelect = async (ticker: string) => {
-    setLoading(true);
     if (setGlobalSearchTicker && ticker !== globalSearchTicker) {
       setGlobalSearchTicker(ticker);
     }
+    
+    // 빠른 UI 반응성을 위한 Optimistic Update
+    const selectedFromList = combinedList.find(s => s.ticker === ticker);
+    if (selectedFromList) {
+      setSelectedStock(selectedFromList);
+      setStockDetails({ stock: selectedFromList, financials: [] });
+    } else {
+      setLoading(true);
+    }
+
     try {
       // First try to fetch from /api/fundamentals/ (more global coverage) or search
       const res = await fetch(`/api/fundamentals/${ticker}`);

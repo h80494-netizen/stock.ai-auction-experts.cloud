@@ -2,6 +2,40 @@ import requests
 import json
 import time
 import os
+import threading
+
+class RateLimiter:
+    def __init__(self, calls_per_second=15):
+        self.calls_per_second = calls_per_second
+        self.interval = 1.0 / calls_per_second
+        self.lock = threading.Lock()
+        self.last_call = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            if elapsed < self.interval:
+                time.sleep(self.interval - elapsed)
+            self.last_call = time.time()
+
+class SimpleCache:
+    def __init__(self, ttl_seconds=5):
+        self.cache = {}
+        self.ttl = ttl_seconds
+        self.lock = threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
+                value, timestamp = self.cache[key]
+                if time.time() - timestamp < self.ttl:
+                    return value
+            return None
+
+    def set(self, key, value):
+        with self.lock:
+            self.cache[key] = (value, time.time())
 
 class KISApiClient:
     def __init__(self, app_key: str, app_secret: str, account_no: str, is_mock: bool = True):
@@ -27,6 +61,9 @@ class KISApiClient:
         self.token_expired_at = 0
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.token_file = os.path.join(current_dir, "kis_token.json")
+        
+        self.rate_limiter = RateLimiter(calls_per_second=15)
+        self.api_cache = SimpleCache(ttl_seconds=5)
         
         # Initial token generation
         self.load_or_issue_token()
@@ -103,6 +140,11 @@ class KISApiClient:
 
     def get_current_price(self, ticker: str) -> int:
         """현재가 조회 (국내주식)"""
+        cache_key = f"get_current_price_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
+            
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = self.get_headers("FHKST01010100")
         
@@ -111,13 +153,16 @@ class KISApiClient:
             "FID_INPUT_ISCD": ticker
         }
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
                     output = data.get("output", {})
                     price_str = output.get("stck_prpr", "0")
-                    return int(price_str)
+                    price_val = int(price_str)
+                    self.api_cache.set(cache_key, price_val)
+                    return price_val
                 else:
                     print(f"현재가 조회 오류 ({ticker}): {data.get('msg1')}")
                     return 0
@@ -130,6 +175,11 @@ class KISApiClient:
 
     def get_current_price_detail(self, ticker: str) -> dict:
         """현재가, 등락, 등락률 상세 조회 (국내주식)"""
+        cache_key = f"get_current_price_detail_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
+            
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = self.get_headers("FHKST01010100")
         
@@ -138,6 +188,7 @@ class KISApiClient:
             "FID_INPUT_ISCD": ticker
         }
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
@@ -149,7 +200,9 @@ class KISApiClient:
                     volume = int(output.get("acml_vol", "0"))
                     if change_pct < 0:
                         change = -change
-                    return {"price": price, "change": change, "changePct": change_pct, "volume": volume}
+                    result = {"price": price, "change": change, "changePct": change_pct, "volume": volume}
+                    self.api_cache.set(cache_key, result)
+                    return result
             return {"price": 0, "change": 0, "changePct": 0, "volume": 0}
         except Exception as e:
             print(f"상세 현재가 API 예외 ({ticker}): {e}")
@@ -170,6 +223,7 @@ class KISApiClient:
             "ORD_UNPR": str(price)
         }
         try:
+            self.rate_limiter.wait()
             res = requests.post(url, headers=headers, data=json.dumps(body), timeout=3)
             if res.status_code == 200:
                 data = res.json()
@@ -201,6 +255,7 @@ class KISApiClient:
             "ORD_UNPR": str(price)
         }
         try:
+            self.rate_limiter.wait()
             res = requests.post(url, headers=headers, data=json.dumps(body), timeout=3)
             if res.status_code == 200:
                 data = res.json()
@@ -222,6 +277,11 @@ class KISApiClient:
         if self.is_mock:
             return []
             
+        cache_key = f"overseas_chart_{excd}_{ticker}_{period}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # 해외 분봉은 API가 다름 (inquire-time-itemchartprice)
         # 하지만 해외주식은 모의투자 미지원이므로 일단 일봉(dailyprice)만 유지
         url = f"{self.base_url}/uapi/overseas-price/v1/quotations/dailyprice"
@@ -237,11 +297,14 @@ class KISApiClient:
             "MODP": "1"
         }
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
-                    return data.get("output2", [])
+                    result = data.get("output2", [])
+                    self.api_cache.set(cache_key, result)
+                    return result
                 else:
                     print(f"해외 차트 조회 오류 ({ticker}): {data.get('msg1')}")
             return []
@@ -251,6 +314,11 @@ class KISApiClient:
 
     def get_domestic_chart(self, ticker: str, period: str = "D"):
         """국내주식 차트 (분봉, 일/주/월봉)"""
+        cache_key = f"dom_chart_{ticker}_{period}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         import datetime
         now = datetime.datetime.now()
         
@@ -280,11 +348,14 @@ class KISApiClient:
             }
             
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
-                    return data.get("output2", [])
+                    result = data.get("output2", [])
+                    self.api_cache.set(cache_key, result)
+                    return result
                 else:
                     print(f"차트 조회 오류 ({ticker}): {data.get('msg1')}")
             return []
@@ -305,12 +376,19 @@ class KISApiClient:
             "EXCD": excd,
             "SYMB": ticker
         }
+        cache_key = f"overseas_price_{excd}_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
-                    return data.get("output", {})
+                    result = data.get("output", {})
+                    self.api_cache.set(cache_key, result)
+                    return result
                 else:
                     print(f"해외 현재가 조회 오류 ({ticker}): {data.get('msg1')}")
             return {}
@@ -318,36 +396,7 @@ class KISApiClient:
             print(f"해외 현재가 예외 ({ticker}): {e}")
             return {}
 
-    def get_overseas_chart(self, excd: str, ticker: str):
-        """해외주식 일봉 차트"""
-        if self.is_mock:
-            # 모의투자 API 해외 미지원 더미 반환
-            return []
-            
-        url = f"{self.base_url}/uapi/overseas-price/v1/quotations/dailyprice"
-        headers = self.get_headers("FHKST03030100")
-        import datetime
-        now = datetime.datetime.now()
-        params = {
-            "AUTH": "",
-            "EXCD": excd,
-            "SYMB": ticker,
-            "GUBN": "0",
-            "BYMD": now.strftime("%Y%m%d"),
-            "MODP": "1"
-        }
-        try:
-            res = requests.get(url, headers=headers, params=params, timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("rt_cd") == "0":
-                    return data.get("output2", [])
-                else:
-                    print(f"해외 차트 조회 오류 ({ticker}): {data.get('msg1')}")
-            return []
-        except Exception as e:
-            print(f"해외 차트 예외 ({ticker}): {e}")
-            return []
+
 
     def get_orderbook(self, ticker: str) -> dict:
         """국내주식 호가 조회"""
@@ -357,12 +406,19 @@ class KISApiClient:
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": ticker
         }
+        cache_key = f"orderbook_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
-                    return data.get("output1", {})
+                    result = data.get("output1", {})
+                    self.api_cache.set(cache_key, result)
+                    return result
             return {}
         except Exception as e:
             print(f"호가 조회 예외 ({ticker}): {e}")
@@ -377,12 +433,19 @@ class KISApiClient:
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": ticker
         }
+        cache_key = f"investor_trend_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
                 if data.get("rt_cd") == "0":
-                    return data.get("output", {})
+                    result = data.get("output", {})
+                    self.api_cache.set(cache_key, result)
+                    return result
             return {}
         except Exception as e:
             print(f"투자자 동향 예외 ({ticker}): {e}")
@@ -404,7 +467,12 @@ class KISApiClient:
             "CTX_AREA_NK": "",
             "CTX_AREA_FK": ""
         }
+        cache_key = f"is_market_open_{now.strftime('%Y%m%d')}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
+            self.rate_limiter.wait()
             res = requests.get(url, headers=headers, params=params, timeout=3)
             if res.status_code == 200:
                 data = res.json()
@@ -413,7 +481,9 @@ class KISApiClient:
                     if out:
                         today_info = out[0]
                         # opnd_yn (영업일 여부): Y 이면 개장, N 이면 휴장
-                        return today_info.get("opnd_yn") == "Y"
+                        result = today_info.get("opnd_yn") == "Y"
+                        self.api_cache.set(cache_key, result)
+                        return result
             # API 실패 시 단순히 주말만 거른 상태이므로 True를 리턴할 수 있으나, 안전하게 주말이 아니면 True 리턴
             return True
         except Exception as e:

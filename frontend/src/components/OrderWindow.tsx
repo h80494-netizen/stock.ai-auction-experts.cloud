@@ -29,6 +29,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   // 9시 5분 스냅샷 관리
   const [snapshotData, setSnapshotData] = useState<Record<string, number>>({});
   
+  // 사용자 지정 임계값 (기본 20%)
+  const [threshold, setThreshold] = useState<number>(20);
+  
   useEffect(() => {
     if (computedStocks.length === 0) return;
     
@@ -57,25 +60,23 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     }
   }, [computedStocks]);
 
-  // 외국계 증권사 순매수 비중 20% 초과 종목 필터링 후 상위 20개 추출 (9시 5분 스냅샷 기준)
+  // 외국계 증권사 순매수 비중 임계값 초과 종목 필터링 후 상위 20개 추출 (9시 5분 스냅샷 기준)
   const orderStocks = useMemo(() => {
-    const THRESHOLD = 20; // 외국계 순매수 비중 20% 초과 종목
-
     if (Object.keys(snapshotData).length === 0) {
       // 스냅샷이 없으면 (9시 5분 이전) 실시간 기준으로 보여줌
       return computedStocks
-        .filter(s => s.foreignRatio > THRESHOLD)
+        .filter(s => s.foreignRatio >= threshold)
         .sort((a, b) => b.foreignRatio - a.foreignRatio)
         .slice(0, 20);
     }
     
     // 스냅샷이 있으면 9시 5분 비율 기준으로 고정 및 필터링
     return computedStocks
-      .filter(s => snapshotData[s.ticker] > THRESHOLD)
+      .filter(s => snapshotData[s.ticker] >= threshold)
       .map(s => ({ ...s, ratio0905: snapshotData[s.ticker] }))
       .sort((a, b) => b.ratio0905 - a.ratio0905)
       .slice(0, 20);
-  }, [computedStocks, snapshotData]);
+  }, [computedStocks, snapshotData, threshold]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -338,7 +339,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       <div className="w-full flex flex-col p-2 h-full">
         
         <div className="flex justify-between items-center mb-2 px-2">
-          <h2 className="text-xl font-bold text-red-500 flex-shrink-0">🚨 매수주문 (외국인 순매수 20%↑)</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold text-red-500 flex-shrink-0">🚨 매수주문 (외국인 순매수 {threshold}%↑)</h2>
+            <select 
+              value={threshold} 
+              onChange={e => setThreshold(Number(e.target.value))}
+              className="bg-gray-800 text-xs text-gray-300 border border-gray-600 rounded px-2 py-1 focus:outline-none focus:border-red-500"
+            >
+              <option value={20}>20% (기본)</option>
+              <option value={15}>15%</option>
+              <option value={10}>10%</option>
+              <option value={5}>5%</option>
+              <option value={1}>1% (테스트)</option>
+              <option value={0}>0% (모두보기)</option>
+            </select>
+          </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-gray-400 cursor-pointer flex items-center">
               <input type="checkbox" className="mr-1" checked={forceEnable} onChange={e => setForceEnable(e.target.checked)} />

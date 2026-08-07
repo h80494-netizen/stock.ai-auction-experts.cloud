@@ -90,7 +90,7 @@ export default function AnalystReport() {
                 <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-8 border-b border-gray-200">
                     <div>
                         <h2 className="text-lg font-black text-indigo-900 mb-3 border-l-4 border-indigo-600 pl-2">영업 및 실적 전망</h2>
-                        <p className="text-sm text-gray-700 leading-relaxed text-justify indent-2">
+                        <p className="text-sm text-gray-700 leading-relaxed text-justify indent-2 whitespace-pre-wrap">
                             {outlooks.business}
                         </p>
                     </div>

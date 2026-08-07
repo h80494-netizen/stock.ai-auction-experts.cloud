@@ -1,6 +1,19 @@
 import json
 import os
-from fastapi import FastAPI, HTTPException
+import time
+import sys
+import logging
+import asyncio
+import threading
+import yfinance as yf
+import concurrent.futures
+from datetime import datetime, timedelta
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.retry_util import with_retry
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+
+# Global executor for yfinance to prevent OOM
+yf_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -38,7 +51,7 @@ def start_scheduler():
     # 서버 구동 시 백그라운드에서 ETF 데이터 즉시 1회 갱신 (사용자가 바로 변화를 볼 수 있도록)
     threading.Thread(target=update_etf_data, daemon=True).start()
     
-    scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=10, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
     scheduler.add_job(auto_trader.job_1500_sell, CronTrigger(hour=15, minute=0, day_of_week='mon-fri', timezone='Asia/Seoul'))
     
     # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
@@ -1244,11 +1257,14 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
         
     return {"ticker": ticker, "success": True, "real_api_success": success, "type": type}
 
+@with_retry(max_retries=3, initial_delay=1.0)
 def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = ""):
     import yfinance as yf
     try:
         yf_ticker = ticker
-        if is_overseas:
+        if yf_ticker.startswith("^") or "=X" in yf_ticker:
+            pass # Global indices and forex don't need country suffix
+        elif is_overseas:
             if excd == "TSE" and not yf_ticker.endswith(".T"):
                 yf_ticker = f"{ticker}.T"
             elif excd == "HKS" and not yf_ticker.endswith(".HK"):
@@ -1345,10 +1361,13 @@ def api_get_fundamentals(ticker: str):
         
         if not is_krx:
             try:
-                info = yf.Ticker(yf_ticker).info
+                def get_info():
+                    return yf.Ticker(yf_ticker).info
+                future = yf_executor.submit(get_info)
+                info = future.result(timeout=3)
                 targetMean = info.get("targetMeanPrice", 0) or 0
             except Exception as e:
-                print("yfinance info fetch error:", e)
+                print("yfinance info fetch error/timeout:", e)
         
         # Generate target price history for chart markers
         target_history = []
@@ -1442,8 +1461,12 @@ def api_get_fundamentals(ticker: str):
         price_chart = []
         try:
             benchmark = "^KS11" if yf_ticker.endswith(".KS") or yf_ticker.endswith(".KQ") else "^GSPC"
-            df_stk = yf.download(yf_ticker, period="6mo", interval="1d", progress=False)
-            df_bnc = yf.download(benchmark, period="6mo", interval="1d", progress=False)
+            def download_data():
+                return (yf.download(yf_ticker, period="6mo", interval="1d", progress=False),
+                        yf.download(benchmark, period="6mo", interval="1d", progress=False))
+            
+            future = yf_executor.submit(download_data)
+            df_stk, df_bnc = future.result(timeout=4)
             
             if not df_stk.empty:
                 s_close = df_stk['Close'] if 'Close' in df_stk.columns else df_stk.iloc[:, 3]
