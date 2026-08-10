@@ -52,11 +52,40 @@ class NaverFinanceScraper:
             print(f"Naver scraper error ({ticker}): {e}")
             
         if result["price"] == 0:
+            # Fallback 1: KIS API
+            try:
+                from kis_instance import kis_client
+                if kis_client:
+                    kis_price = kis_client.get_current_price(ticker)
+                    if kis_price > 0:
+                        result["price"] = int(kis_price)
+                        return result
+            except Exception as e:
+                print(f"KIS fallback error ({ticker}): {e}")
+                
+            # Fallback 2: Public Data API (Domestic) and YFinance (Overseas)
             try:
                 yf_ticker = ticker
-                if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ") and not yf_ticker.endswith(".T"):
-                    yf_ticker = f"{ticker}.KS"
-                info = yf.Ticker(yf_ticker).info
+                clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
+                if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                    from public_data_api import get_current_price as get_pd_price
+                    pd_info = get_pd_price(clean_for_check)
+                    if pd_info:
+                        result["price"] = int(pd_info.get("stck_prpr", "0"))
+                        result["change"] = int(pd_info.get("prdy_vrss", "0"))
+                        result["changePct"] = float(pd_info.get("prdy_ctrt", "0"))
+                        result["volume"] = int(pd_info.get("acml_vol", "0"))
+                        return result
+                    
+                    yf_ticker = f"{clean_for_check}.KS"
+                elif clean_for_check.isdigit() and len(clean_for_check) == 4:
+                    if clean_for_check == "0700":
+                        yf_ticker = f"{clean_for_check}.HK"
+                    else:
+                        yf_ticker = f"{clean_for_check}.T"
+                
+                from utils.yf_util import get_yf_ticker
+                info = get_yf_ticker(yf_ticker).info
                 price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or 0
                 result["price"] = int(price)
                 result["change"] = int(info.get("regularMarketChange", 0))
@@ -129,14 +158,41 @@ class NaverFinanceScraper:
         except Exception as e:
             print(f"Naver realtime bulk scraper error: {e}")
             
-        # Fallback for missing tickers via yfinance
+        # Fallback for missing tickers via KIS API and yfinance
         for original_ticker in tickers:
             if original_ticker not in prices or prices[original_ticker] == 0:
+                # 1. KIS API
+                try:
+                    from kis_instance import kis_client
+                    if kis_client:
+                        kis_price = kis_client.get_current_price(original_ticker)
+                        if kis_price > 0:
+                            prices[original_ticker] = int(kis_price)
+                            continue
+                except Exception as e:
+                    print(f"KIS fallback error for {original_ticker}: {e}")
+                    
+                # 2. Public Data API & YFinance
                 try:
                     yf_ticker = original_ticker
-                    if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ") and not yf_ticker.endswith(".T"):
-                        yf_ticker = f"{original_ticker}.KS"
-                    info = yf.Ticker(yf_ticker).info
+                    clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
+                    if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                        from public_data_api import get_current_price as get_pd_price
+                        pd_info = get_pd_price(clean_for_check)
+                        if pd_info:
+                            prices[original_ticker] = int(pd_info.get("stck_prpr", "0"))
+                            continue
+                        
+                        yf_ticker = f"{clean_for_check}.KS"
+                    elif clean_for_check.isdigit() and len(clean_for_check) == 4:
+                        # Simple heuristic: 0700 is Tencent(HK), others usually Japanese(TSE)
+                        if clean_for_check == "0700":
+                            yf_ticker = f"{clean_for_check}.HK"
+                        else:
+                            yf_ticker = f"{clean_for_check}.T"
+                    
+                    from utils.yf_util import get_yf_ticker
+                    info = get_yf_ticker(yf_ticker).info
                     price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or 0
                     if price > 0:
                         prices[original_ticker] = int(price)

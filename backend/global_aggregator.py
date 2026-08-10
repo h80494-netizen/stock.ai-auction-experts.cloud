@@ -28,11 +28,11 @@ def fetch_global_indices():
     
     results = []
     try:
-        import yfinance as yf
-        yft = yf.Tickers(" ".join(tickers.values()))
+        from utils.yf_util import get_yf_tickers, get_yf_ticker
+        yft = get_yf_tickers(" ".join(tickers.values()))
         for name, t in tickers.items():
             try:
-                info = yft.tickers[t].info if hasattr(yft, 'tickers') and t in yft.tickers else yf.Ticker(t).info
+                info = yft.tickers[t].info if hasattr(yft, 'tickers') and t in yft.tickers else get_yf_ticker(t).info
                 price = info.get("regularMarketPrice") or info.get("previousClose") or info.get("currentPrice") or 0
                 change_pct = info.get("regularMarketChangePercent") or 0
                 change = info.get("regularMarketChange") or 0
@@ -76,14 +76,14 @@ def get_major_global_stocks():
     results = []
     for tk, info in stocks.items():
         try:
-            import yfinance as yf
+            from utils.yf_util import get_yf_ticker
             yf_ticker = tk
             if info["excd"] == "TSE" and not yf_ticker.endswith(".T"):
                 yf_ticker += ".T"
             elif info["excd"] == "HKS" and not yf_ticker.endswith(".HK"):
                 yf_ticker += ".HK"
             
-            t = yf.Ticker(yf_ticker)
+            t = get_yf_ticker(yf_ticker)
             info_data = t.info
             price = info_data.get("regularMarketPrice") or info_data.get("previousClose") or info_data.get("currentPrice") or 0
             change = info_data.get("regularMarketChange") or 0
@@ -200,13 +200,13 @@ def get_market_top50(market: str):
     if not target_tickers:
         return []
         
-    import yfinance as yf
+    from utils.yf_util import get_yf_tickers, get_yf_ticker
     try:
-        yft = yf.Tickers(" ".join(target_tickers))
+        yft = get_yf_tickers(" ".join(target_tickers))
         results = []
         for t in target_tickers:
             try:
-                info = yft.tickers[t].info if hasattr(yft, 'tickers') and t in yft.tickers else yf.Ticker(t).info
+                info = yft.tickers[t].info if hasattr(yft, 'tickers') and t in yft.tickers else get_yf_ticker(t).info
                 price = info.get("currentPrice", info.get("regularMarketPrice", 0))
                 change_pct = info.get("regularMarketChangePercent", 0)
                 name = info.get("shortName", t)

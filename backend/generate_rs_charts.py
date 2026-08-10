@@ -1,7 +1,8 @@
 import yfinance as yf
-import matplotlib.pyplot as plt
 import os
 import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import datetime
 
 # Set Korean font

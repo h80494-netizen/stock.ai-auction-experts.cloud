@@ -1,8 +1,11 @@
 import sqlite3
 import os
-import yfinance as yf
+import requests
+import time
 import pandas as pd
 from datetime import datetime, timedelta
+
+FINNHUB_API_KEY = "d9s7iihr01qopv4616vgd9s7iihr01qopv461700"
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 DB_PATH = os.path.join(DATA_DIR, 'etf_strategy.db')
@@ -43,23 +46,28 @@ def update_etf_data():
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=730)
+    end_unix = int(end_date.timestamp())
+    start_unix = int(start_date.timestamp())
     
     for ticker in ETF_TARGETS.keys():
         try:
-            df = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), progress=False)
-            if df.empty: continue
-            
-            for index, row in df.iterrows():
-                date_str = index.strftime('%Y-%m-%d')
-                # yfinance returns multi-index columns sometimes in recent versions, handle properly
-                close_val = row['Close'].iloc[0] if isinstance(row['Close'], pd.Series) else row['Close']
-                
-                c.execute('''
-                    INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
-                    VALUES (?, ?, ?)
-                ''', (ticker, date_str, float(close_val)))
+            url = f"https://finnhub.io/api/v1/stock/candle?symbol={ticker}&resolution=D&from={start_unix}&to={end_unix}&token={FINNHUB_API_KEY}"
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("s") == "ok":
+                    times = data.get("t", [])
+                    closes = data.get("c", [])
+                    for i in range(len(times)):
+                        date_str = datetime.utcfromtimestamp(times[i]).strftime('%Y-%m-%d')
+                        close_val = closes[i]
+                        c.execute('''
+                            INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
+                            VALUES (?, ?, ?)
+                        ''', (ticker, date_str, float(close_val)))
+            time.sleep(1) # Prevent 429 Too Many Requests
         except Exception as e:
-            print(f"Failed to fetch ETF data for {ticker}: {e}")
+            print(f"Failed to fetch ETF data for {ticker} from Finnhub: {e}")
             
     conn.commit()
     conn.close()
@@ -83,7 +91,7 @@ def check_and_update_etf_data():
     if needs_update:
         update_etf_data()
 
-def get_etf_strategy_results(criteria="momentum"):
+def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -122,7 +130,7 @@ def get_etf_strategy_results(criteria="momentum"):
         return_5d = ((current_price - prev_5d_price) / prev_5d_price) * 100
         return_20d = ((current_price - prev_20d_price) / prev_20d_price) * 100
         
-        momentum_score = (return_1d * 0.5) + (return_5d * 0.3) + (return_20d * 0.2) # 5:3:2 weight
+        momentum_score = (return_1d * w1) + (return_5d * w5) + (return_20d * w20)
         
         sharpe_ratio = 0
         if criteria == "sharpe":
@@ -153,7 +161,7 @@ def get_etf_strategy_results(criteria="momentum"):
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
     return results
 
-def get_etf_simulation(criteria="momentum"):
+def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -211,7 +219,7 @@ def get_etf_simulation(criteria="momentum"):
                 ret_1d = ((curr_p - prev_1d_p) / prev_1d_p) * 100
                 ret_5d = ((curr_p - prev_5d_p) / prev_5d_p) * 100
                 ret_20d = ((curr_p - prev_20d_p) / prev_20d_p) * 100
-                score = (ret_1d * 0.5) + (ret_5d * 0.3) + (ret_20d * 0.2)
+                score = (ret_1d * w1) + (ret_5d * w5) + (ret_20d * w20)
                 
                 final_score = score
                 if criteria == "sharpe":
@@ -245,10 +253,122 @@ def get_etf_simulation(criteria="momentum"):
         # Update target for next day
         current_target = best_ticker
 
-    # Format response
     return {
         "dates": dates,
         "strategy": strategy_returns,
         "selected_etf": selected_etf,
         "etfs": etf_normalized
     }
+
+def run_bulk_simulation(criteria="momentum"):
+    models = []
+    # Generate 21 models
+    for i in range(21):
+        w1_pct = 50 - i
+        w5_pct = 40 - i
+        w20_pct = 100 - w1_pct - w5_pct
+        
+        w1 = w1_pct / 100.0
+        w5 = w5_pct / 100.0
+        w20 = w20_pct / 100.0
+        
+        sim_data = get_etf_simulation(criteria, w1, w5, w20)
+        
+        if not sim_data or not sim_data.get('dates'):
+            continue
+            
+        dates = sim_data['dates']
+        strategy = sim_data['strategy']
+        
+        if len(dates) < 2:
+            continue
+            
+        # Calculate returns for different periods
+        # dates are YYYY-MM-DD ascending
+        current_date = datetime.strptime(dates[-1], "%Y-%m-%d")
+        
+        def get_return(months_back):
+            target_date = (current_date - timedelta(days=months_back*30)).strftime("%Y-%m-%d")
+            # Find closest date
+            start_idx = 0
+            for j, d in enumerate(dates):
+                if d >= target_date:
+                    start_idx = j
+                    break
+            if start_idx >= len(strategy):
+                start_idx = len(strategy) - 1
+            
+            start_val = strategy[start_idx]
+            end_val = strategy[-1]
+            if start_val == 0: return 0
+            return ((end_val / start_val) - 1) * 100
+
+        ret_3m = get_return(3)
+        ret_6m = get_return(6)
+        ret_1y = get_return(12)
+        
+        # Calculate Total Return
+        total_ret = ((strategy[-1] / strategy[0]) - 1) * 100
+        
+        # Calculate Sharpe Ratio of the strategy
+        strategy_series = pd.Series(strategy)
+        daily_rets = strategy_series.pct_change().dropna()
+        std_dev = daily_rets.std()
+        mean_ret = daily_rets.mean()
+        # Annualized sharpe ratio (approx 252 trading days)
+        if std_dev > 0:
+            sharpe_ratio = (mean_ret / std_dev) * (252 ** 0.5)
+        else:
+            sharpe_ratio = 0
+            
+        # Calculate MDD
+        cum_max = strategy_series.cummax()
+        drawdown = (strategy_series - cum_max) / cum_max
+        mdd = drawdown.min() * 100
+        
+        # Calculate Trade Metrics (Hitting ratio, avg win, avg loss)
+        selected_etf = sim_data['selected_etf']
+        trades_returns = []
+        entry_value = strategy[0]
+        
+        for j in range(1, len(selected_etf)):
+            if selected_etf[j] != selected_etf[j-1]:
+                # Position changed
+                exit_value = strategy[j]
+                if entry_value > 0 and selected_etf[j-1] not in ["Waiting", "CASH", ""]:
+                    trade_ret = ((exit_value - entry_value) / entry_value) * 100
+                    trades_returns.append(trade_ret)
+                entry_value = exit_value
+                
+        # Last open position
+        if selected_etf[-1] not in ["Waiting", "CASH", ""] and entry_value > 0:
+            exit_value = strategy[-1]
+            trade_ret = ((exit_value - entry_value) / entry_value) * 100
+            trades_returns.append(trade_ret)
+            
+        wins = [r for r in trades_returns if r > 0]
+        losses = [r for r in trades_returns if r <= 0]
+        
+        win_rate = (len(wins) / len(trades_returns)) * 100 if trades_returns else 0
+        avg_win = sum(wins) / len(wins) if wins else 0
+        avg_loss = sum(losses) / len(losses) if losses else 0
+            
+        models.append({
+            "model": f"Model {i+1}",
+            "weights": {"w1": w1_pct, "w5": w5_pct, "w20": w20_pct},
+            "ret_3m": ret_3m,
+            "ret_6m": ret_6m,
+            "ret_1y": ret_1y,
+            "total_ret": total_ret,
+            "sharpe": sharpe_ratio,
+            "mdd": mdd,
+            "win_rate": win_rate,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "dates": dates,
+            "strategy": strategy,
+            "selected_etf": selected_etf
+        })
+        
+    return models
+

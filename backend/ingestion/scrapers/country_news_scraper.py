@@ -16,8 +16,11 @@ def get_google_news_rss(keyword: str, market: str):
         
     encoded_keyword = urllib.parse.quote(keyword)
     url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl={hl}&gl={gl}&ceid={ceid}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, headers=headers, timeout=5)
         root = ET.fromstring(res.text)
         news = []
         for item in root.findall('.//item')[:10]:
@@ -85,7 +88,10 @@ def translate_text(text, target_lang):
             "dt": "t",
             "q": text
         }
-        res = requests.get(url, params=params, timeout=5)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(url, params=params, headers=headers, timeout=5)
         data = res.json()
         translated = "".join([d[0] for d in data[0] if d[0]])
         return translated

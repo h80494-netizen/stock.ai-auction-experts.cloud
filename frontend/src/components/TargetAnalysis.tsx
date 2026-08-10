@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import KISChart from './KISChart';
+import { createChart, ColorType, LineSeries, createSeriesMarkers } from 'lightweight-charts';
 import AutocompleteSearch from './AutocompleteSearch';
 
 const targetCache: Record<string, any> = {};
@@ -324,6 +324,61 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
     };
   }, [selectedStock]);
 
+  useEffect(() => {
+    if (!targetChartRef.current || chartData.length === 0) return;
+
+    const chartOptions = {
+      layout: { background: { type: ColorType.Solid, color: '#000000' }, textColor: '#d1d4dc' },
+      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+      width: targetChartRef.current.clientWidth,
+      height: targetChartRef.current.clientHeight,
+    };
+
+    targetChartRef.current.innerHTML = '';
+    const targetChart = createChart(targetChartRef.current, chartOptions);
+    const priceSeries = targetChart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
+    
+    // Sort and remove duplicates for time
+    const sortedData = [...chartData].sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
+    const uniqueData = sortedData.filter((item, index, arr) => index === 0 || item.time !== arr[index - 1].time);
+
+    const lineData = uniqueData.map((d: any) => ({
+      time: d.time,
+      value: d.close !== undefined ? d.close : (d.value !== undefined ? d.value : d.open)
+    }));
+    priceSeries.setData(lineData);
+
+    if (selectedStock?.currentTarget && selectedStock.currentTarget > 0 && lineData.length > 0) {
+      const latestTime = lineData[lineData.length - 1].time;
+      const targetSeries = targetChart.addSeries(LineSeries, { 
+          color: '#FF5252',
+          lineWidth: 2,
+          crosshairMarkerVisible: false,
+          lastValueVisible: true,
+          title: '목표가'
+      });
+      targetSeries.setData([{ time: latestTime, value: selectedStock.currentTarget }]);
+      try {
+        createSeriesMarkers(targetSeries, [
+            { time: latestTime, position: 'inBar', color: '#FF5252', shape: 'circle', size: 1, text: '목표가' }
+        ]);
+      } catch(e) {}
+    }
+    targetChart.timeScale().fitContent();
+
+    const handleResize = () => {
+      if (targetChartRef.current) {
+        targetChart.applyOptions({ width: targetChartRef.current.clientWidth });
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      targetChart.remove();
+    };
+  }, [chartData, selectedStock]);
+
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
       {/* Left Sidebar: Data Table */}
@@ -446,13 +501,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
               <h3 className="text-lg font-bold text-gray-200 mb-2">주가 vs 최고목표가 추이 및 일자별 목표가</h3>
               <div className="h-1/2 relative min-h-[200px]">
                 {chartData.length > 0 ? (
-                  <KISChart 
-                    data={chartData} 
-                    symbol={selectedStock.name} 
-                    fundamentals={selectedStock.fundamentals} 
-                    currentPrice={selectedStock.price} 
-                    changePct={selectedStock.changePct} 
-                  />
+                  <div ref={targetChartRef} className="w-full h-full absolute inset-0" />
                 ) : (
                   <div className="flex h-full items-center justify-center text-gray-600">차트 데이터 로딩 중...</div>
                 )}

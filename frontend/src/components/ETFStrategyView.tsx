@@ -33,6 +33,7 @@ export default function ETFStrategyView() {
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>('YTD(26.01~)');
   const [criteria, setCriteria] = useState<string>('sharpe');
+  const [activeWeights, setActiveWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
 
   useEffect(() => {
     let isMounted = true;
@@ -42,9 +43,10 @@ export default function ETFStrategyView() {
       if (!pollInterval) setLoading(true);
       try {
         const ts = Date.now();
+        const query = `?criteria=${criteria}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&t=${ts}`;
         const [stratRes, simRes] = await Promise.all([
-          fetch(`/api/etf/strategy?criteria=${criteria}&t=${ts}`, { cache: 'no-store' }),
-          fetch(`/api/etf/simulation?criteria=${criteria}&t=${ts}`, { cache: 'no-store' })
+          fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }),
+          fetch(`/api/etf/simulation${query}`, { cache: 'no-store' })
         ]);
         if (!stratRes.ok || !simRes.ok) {
           console.error('ETF Strategy API Error:', stratRes.statusText, simRes.statusText);
@@ -74,7 +76,9 @@ export default function ETFStrategyView() {
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [criteria]);
+  }, [criteria, activeWeights]);
+
+
 
   const chartData = useMemo(() => {
     if (!simData || !simData.dates) return [];
@@ -255,8 +259,7 @@ export default function ETFStrategyView() {
   return (
     <div className="p-4 h-full overflow-y-auto space-y-6">
       
-      {/* 전략 기준 선택 토글 */}
-      <div className="flex justify-center mb-4 sm:mb-6">
+      <div className="flex flex-col sm:flex-row justify-center items-center gap-4 mb-4 sm:mb-6">
         <div className="bg-gray-800 p-1 rounded-lg flex flex-col sm:flex-row shadow-lg border border-gray-700 w-full sm:w-auto">
           <button
             onClick={() => setCriteria('momentum')}
@@ -280,6 +283,7 @@ export default function ETFStrategyView() {
           </button>
         </div>
       </div>
+
 
       {/* 시뮬레이션 기간별 성과 지표 (총수익률, 매매횟수, 수수료, 실질수익률) */}
       <div className="bg-gray-800 p-4 sm:p-5 rounded-lg shadow-lg border border-gray-700 space-y-3">
@@ -335,7 +339,7 @@ export default function ETFStrategyView() {
 
       <div className="p-4 sm:p-6 bg-gradient-to-r from-blue-900 to-indigo-900 rounded-lg shadow-lg border border-blue-500">
         <h2 className="text-lg sm:text-2xl font-bold mb-2 break-keep">
-          🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? '1일 50%, 5일 30%, 20일 20% 가중 합산' : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
+          🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? `1일 ${Math.round(activeWeights.w1*100)}%, 5일 ${Math.round(activeWeights.w5*100)}%, 20일 ${Math.round(activeWeights.w20*100)}% 가중 합산` : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
         </h2>
         <div className="text-3xl sm:text-4xl font-extrabold text-yellow-400 my-3 sm:my-4">
           {isCash ? (

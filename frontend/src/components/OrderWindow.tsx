@@ -29,8 +29,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   // 9시 5분 스냅샷 관리
   const [snapshotData, setSnapshotData] = useState<Record<string, number>>({});
   
-  // 사용자 지정 임계값 (기본 20%)
-  const [threshold, setThreshold] = useState<number>(20);
+  // 사용자 지정 임계값 (기본 10%)
+  const [threshold, setThreshold] = useState<number>(10);
+  const [thresholdInput, setThresholdInput] = useState<string>("10");
   
   useEffect(() => {
     if (computedStocks.length === 0) return;
@@ -341,18 +342,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         <div className="flex justify-between items-center mb-2 px-2">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-bold text-red-500 flex-shrink-0">🚨 매수주문 (외국인 순매수 {threshold}%↑)</h2>
-            <select 
-              value={threshold} 
-              onChange={e => setThreshold(Number(e.target.value))}
-              className="bg-gray-800 text-xs text-gray-300 border border-gray-600 rounded px-2 py-1 focus:outline-none focus:border-red-500"
-            >
-              <option value={20}>20% (기본)</option>
-              <option value={15}>15%</option>
-              <option value={10}>10%</option>
-              <option value={5}>5%</option>
-              <option value={1}>1% (테스트)</option>
-              <option value={0}>0% (모두보기)</option>
-            </select>
+            <div className="flex items-center gap-1">
+              <input 
+                type="number" 
+                value={thresholdInput} 
+                onChange={e => setThresholdInput(e.target.value)}
+                className="bg-gray-800 text-xs text-gray-300 border border-gray-600 rounded px-2 py-1 focus:outline-none focus:border-red-500 w-16 text-right"
+              />
+              <span className="text-gray-400 text-xs">%</span>
+              <button 
+                onClick={() => setThreshold(Number(thresholdInput))}
+                className="bg-red-700 hover:bg-red-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
+              >
+                적용
+              </button>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-gray-400 cursor-pointer flex items-center">

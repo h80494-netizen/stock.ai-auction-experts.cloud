@@ -52,7 +52,7 @@ def start_scheduler():
     threading.Thread(target=update_etf_data, daemon=True).start()
     
     scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
-    scheduler.add_job(auto_trader.job_1500_sell, CronTrigger(hour=15, minute=0, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_1525_sell, CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Seoul'))
     
     # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
     scheduler.add_job(update_etf_data, CronTrigger(hour=8, minute=0, timezone='Asia/Seoul'))
@@ -268,15 +268,20 @@ def get_stocks():
 # --- ETF / ETN Endpoints ---
 
 @app.get("/api/etf/strategy")
-async def get_etf_strategy(criteria: str = "momentum"):
+async def get_etf_strategy(criteria: str = "momentum", w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
     from etf_strategy import get_etf_strategy_results
-    results = get_etf_strategy_results(criteria=criteria)
+    results = get_etf_strategy_results(criteria=criteria, w1=w1, w5=w5, w20=w20)
     return results
 
 @app.get("/api/etf/simulation")
-async def get_etf_sim(criteria: str = "momentum"):
+async def get_etf_sim(criteria: str = "momentum", w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
     from etf_strategy import get_etf_simulation
-    return get_etf_simulation(criteria=criteria)
+    return get_etf_simulation(criteria=criteria, w1=w1, w5=w5, w20=w20)
+
+@app.get("/api/etf/simulation-models")
+async def api_get_etf_simulation_models(criteria: str = "momentum"):
+    from etf_strategy import run_bulk_simulation
+    return run_bulk_simulation(criteria=criteria)
 
 @app.get("/api/etf/list")
 def api_get_etf_list():
@@ -627,8 +632,11 @@ def api_kis_chart(ticker: str, period: str = "D", is_overseas: bool = False, exc
     yf_ticker = ticker
     if not is_overseas:
         if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ"):
-            # Assume KS for Korean stocks
-            yf_ticker = f"{yf_ticker}.KS"
+            clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
+            if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                yf_ticker = f"{clean_for_check}.KS"
+            else:
+                yf_ticker = clean_for_check
     else:
         if excd == "TSE" and not yf_ticker.endswith(".T"): yf_ticker = f"{yf_ticker}.T"
         elif excd == "HKS" and not yf_ticker.endswith(".HK"): yf_ticker = f"{yf_ticker}.HK"
@@ -689,13 +697,15 @@ def search_global_stock(ticker: str):
     import yfinance as yf
     try:
         clean_ticker = ticker.upper().strip()
-        t = yf.Ticker(clean_ticker)
+        from utils.yf_util import get_yf_ticker
+        t = get_yf_ticker(clean_ticker)
         info = t.info
         
         # If not found or empty, fallback for Korean stocks (6 digits -> .KS)
         if (not info or ("shortName" not in info and "longName" not in info)) and clean_ticker.isdigit() and len(clean_ticker) == 6:
             clean_ticker = f"{clean_ticker}.KS"
-            t = yf.Ticker(clean_ticker)
+            from utils.yf_util import get_yf_ticker
+            t = get_yf_ticker(clean_ticker)
             info = t.info
             
         if not info or ("shortName" not in info and "longName" not in info):
@@ -1259,6 +1269,14 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
 
 @with_retry(max_retries=3, initial_delay=1.0)
 def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = ""):
+    if not is_overseas and period != "m":
+        clean_for_check = ticker.replace("KRX:", "").replace("KOSDAQ:", "").replace(".KS", "").replace(".KQ", "")
+        if clean_for_check.isdigit() and len(clean_for_check) == 6:
+            from public_data_api import get_stock_history
+            history = get_stock_history(clean_for_check, count=150)
+            if history:
+                return history
+
     import yfinance as yf
     try:
         yf_ticker = ticker
@@ -1276,7 +1294,11 @@ def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = "")
                     yf_ticker = f"{ticker}.SZ"
         else:
             if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ"):
-                yf_ticker = f"{ticker}.KS"
+                clean_for_check = ticker.replace("KRX:", "").replace("KOSDAQ:", "")
+                if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                    yf_ticker = f"{clean_for_check}.KS"
+                else:
+                    yf_ticker = clean_for_check
         
         interval = "5m" if period == "m" else ("1d" if period == "D" else ("1wk" if period == "W" else "1mo"))
         yf_period = "5d" if period == "m" else "6mo"
@@ -1352,8 +1374,11 @@ def api_get_fundamentals(ticker: str):
         # Quick heuristic to format non-US tickers for yfinance
         if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ") and not yf_ticker.endswith(".T") and not yf_ticker.endswith(".HK") and not yf_ticker.endswith(".SS") and not yf_ticker.endswith(".SZ"):
             # If it's pure numbers, assume Korean KS
-            if yf_ticker.isdigit():
-                yf_ticker = f"{yf_ticker}.KS"
+            clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
+            if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                yf_ticker = f"{clean_for_check}.KS"
+            else:
+                yf_ticker = clean_for_check
         
         info = {}
         targetMean = 0
@@ -1362,7 +1387,8 @@ def api_get_fundamentals(ticker: str):
         if not is_krx:
             try:
                 def get_info():
-                    return yf.Ticker(yf_ticker).info
+                    from utils.yf_util import get_yf_ticker
+                    return get_yf_ticker(yf_ticker).info
                 future = yf_executor.submit(get_info)
                 info = future.result(timeout=3)
                 targetMean = info.get("targetMeanPrice", 0) or 0
@@ -1385,7 +1411,8 @@ def api_get_fundamentals(ticker: str):
                     pass
         else:
             try:
-                upgrades = yf.Ticker(yf_ticker).upgrades_downgrades
+                from utils.yf_util import get_yf_ticker
+                upgrades = get_yf_ticker(yf_ticker).upgrades_downgrades
                 if upgrades is not None and not upgrades.empty:
                     # Take the last 50 upgrades/downgrades
                     recent = upgrades.head(50)

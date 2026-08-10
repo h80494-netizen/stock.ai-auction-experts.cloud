@@ -14,7 +14,7 @@ try:
         account_no="44790516-01", 
         api_key="PS7qebWyCKOenh2K32vrFUzuFLNguRPtJad2",
         app_secret="X4uheemKo6gRCwa6aZjCVcanJlok52HJCLi7yXpAyGMIYZV9ueUcuXT0HKftn4Sx64fdN+/pSOJEiQzei0oi6eM7MpzOYpXIvp2lUqftn60497mGsWaNh5Noe3M4lxrV4qfJ9wChBIKoiyOshWPi2pNFdossVKkP6k80I1GhPXLDN7GJmsQ=",
-        is_mock=True
+        is_mock=False
     )
 except Exception as e:
     print(f"Brokerage API 초기화 실패: {e}")
@@ -96,8 +96,8 @@ def job_910_buy():
         else:
             print(f"[{name}] 단가가 너무 높아 500만원으로 1주도 살 수 없습니다.")
 
-def job_1500_sell():
-    print(f"[{datetime.now()}] 15:00 PM 자동매도 스케줄러 실행 시작...")
+def job_1525_sell():
+    print(f"[{datetime.now()}] 15:25 PM 자동매도 스케줄러 실행 시작...")
     if not BROKER:
         return
         
