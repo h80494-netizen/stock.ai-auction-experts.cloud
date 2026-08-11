@@ -30,8 +30,20 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const [snapshotData, setSnapshotData] = useState<Record<string, number>>({});
   
   // 사용자 지정 임계값 (기본 10%)
-  const [threshold, setThreshold] = useState<number>(10);
-  const [thresholdInput, setThresholdInput] = useState<string>("10");
+  const [threshold, setThreshold] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('orderThreshold');
+      if (saved) return Number(saved);
+    }
+    return 15;
+  });
+  const [thresholdInput, setThresholdInput] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('orderThreshold');
+      if (saved) return saved;
+    }
+    return "15";
+  });
   
   useEffect(() => {
     if (computedStocks.length === 0) return;
@@ -351,10 +363,17 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               />
               <span className="text-gray-400 text-xs">%</span>
               <button 
-                onClick={() => setThreshold(Number(thresholdInput))}
+                onClick={() => {
+                  const val = Number(thresholdInput);
+                  setThreshold(val);
+                  if (typeof window !== 'undefined') {
+                    localStorage.setItem('orderThreshold', val.toString());
+                  }
+                  alert(`외국인 순매수 기준이 ${val}%로 확정되었습니다.`);
+                }}
                 className="bg-red-700 hover:bg-red-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
               >
-                적용
+                확정
               </button>
             </div>
           </div>
