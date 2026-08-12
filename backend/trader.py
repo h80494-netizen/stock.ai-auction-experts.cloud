@@ -20,16 +20,16 @@ class BrokerageAPI:
 
 def execute_equal_weight_buy(stocks: List[Dict], total_capital: float, broker: BrokerageAPI):
     """
-    9시 5분 기준, 외국계 순매수 비중이 20% 이상인 종목을 동일 비중으로 전량 매수하는 로직.
+    9시 5분 기준, 외국계 순매수 비중이 10% 이상인 종목을 동일 비중으로 전량 매수하는 로직.
     """
-    print(f"\n--- [9:05 AM] 외국계 순매수 20% 이상 종목 퀀트 매수 시작 ---")
+    print(f"\n--- [9:05 AM] 외국계 순매수 10% 이상 종목 퀀트 매수 시작 ---")
     
-    # 1. 조건 검색: 외국계 순매수 비율 >= 20%
-    target_stocks = [s for s in stocks if s.get("ratio", 0) >= 20.0]
+    # 1. 조건 검색: 외국계 순매수 비율 >= 10%
+    target_stocks = [s for s in stocks if s.get("ratio", 0) >= 10.0]
     
     results = []
     if not target_stocks:
-        print("조건(순매수 20% 이상)을 만족하는 종목이 없어 매수를 진행하지 않습니다.")
+        print("조건(순매수 10% 이상)을 만족하는 종목이 없어 매수를 진행하지 않습니다.")
         return results
 
     print(f"포착된 매수 대상 종목 수: {len(target_stocks)}개")

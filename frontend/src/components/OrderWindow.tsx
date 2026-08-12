@@ -35,14 +35,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const saved = localStorage.getItem('orderThreshold');
       if (saved) return Number(saved);
     }
-    return 15;
+    return 10;
   });
   const [thresholdInput, setThresholdInput] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('orderThreshold');
       if (saved) return saved;
     }
-    return "15";
+    return "10";
   });
   
   useEffect(() => {
@@ -59,16 +59,29 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       
       if (savedDate === todayStr && savedData) {
         // 오늘자 스냅샷이 이미 있으면 로드
-        setSnapshotData(JSON.parse(savedData));
+        const parsed = JSON.parse(savedData);
+        const hasValidData = Object.values(parsed).some((val: any) => val > 0);
+        
+        if (hasValidData) {
+          setSnapshotData(parsed);
+        } else {
+          // 비정상 캐시(전부 0)인 경우 삭제 후 재생성 대기
+          localStorage.removeItem('snapshot0905_data_v2');
+          setSnapshotData({});
+        }
       } else {
         // 오늘자 스냅샷이 없으면 현재 상태를 9시 5분 상태로 간주하고 저장
-        const newData: Record<string, number> = {};
-        computedStocks.forEach(s => {
-          newData[s.ticker] = s.foreignRatio;
-        });
-        setSnapshotData(newData);
-        localStorage.setItem('snapshot0905_date_v2', todayStr);
-        localStorage.setItem('snapshot0905_data_v2', JSON.stringify(newData));
+        // 단, 백엔드 데이터 수집 전이어서 모두 0일 경우는 제외
+        const hasData = computedStocks.some(s => s.foreignRatio > 0);
+        if (hasData) {
+          const newData: Record<string, number> = {};
+          computedStocks.forEach(s => {
+            newData[s.ticker] = s.foreignRatio;
+          });
+          setSnapshotData(newData);
+          localStorage.setItem('snapshot0905_date_v2', todayStr);
+          localStorage.setItem('snapshot0905_data_v2', JSON.stringify(newData));
+        }
       }
     }
   }, [computedStocks]);

@@ -58,7 +58,7 @@ def job_910_buy():
             
             if acml_vol > 0:
                 ratio = (frgn_ntby_qty / acml_vol) * 100
-                if ratio >= 20.0:
+                if ratio >= 10.0:
                     print(f"조건 만족 포착: {stock['name']}({ticker}) - 외국계 순매수 {ratio:.2f}% (수량: {frgn_ntby_qty})")
                     target_stocks.append(stock)
         
@@ -66,7 +66,7 @@ def job_910_buy():
         time.sleep(0.1)
         
     if not target_stocks:
-        print("외국계 순매수 20% 이상 종목을 찾지 못했습니다.")
+        print("외국계 순매수 10% 이상 종목을 찾지 못했습니다.")
         return
         
     print(f"총 {len(target_stocks)}개 종목 매수 진행...")

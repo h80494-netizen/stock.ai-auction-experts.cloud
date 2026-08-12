@@ -3,6 +3,7 @@ import os
 import requests
 import time
 import pandas as pd
+import yfinance as yf
 from datetime import datetime, timedelta
 
 FINNHUB_API_KEY = "d9s7iihr01qopv4616vgd9s7iihr01qopv461700"
@@ -44,30 +45,22 @@ def update_etf_data():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=730)
-    end_unix = int(end_date.timestamp())
-    start_unix = int(start_date.timestamp())
-    
     for ticker in ETF_TARGETS.keys():
         try:
-            url = f"https://finnhub.io/api/v1/stock/candle?symbol={ticker}&resolution=D&from={start_unix}&to={end_unix}&token={FINNHUB_API_KEY}"
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("s") == "ok":
-                    times = data.get("t", [])
-                    closes = data.get("c", [])
-                    for i in range(len(times)):
-                        date_str = datetime.utcfromtimestamp(times[i]).strftime('%Y-%m-%d')
-                        close_val = closes[i]
-                        c.execute('''
-                            INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
-                            VALUES (?, ?, ?)
-                        ''', (ticker, date_str, float(close_val)))
-            time.sleep(1) # Prevent 429 Too Many Requests
+            ticker_obj = yf.Ticker(ticker)
+            df = ticker_obj.history(period="2y")
+            
+            if not df.empty:
+                for date, row in df.iterrows():
+                    date_str = date.strftime('%Y-%m-%d')
+                    close_val = row['Close']
+                    c.execute('''
+                        INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
+                        VALUES (?, ?, ?)
+                    ''', (ticker, date_str, float(close_val)))
+            time.sleep(0.5)
         except Exception as e:
-            print(f"Failed to fetch ETF data for {ticker} from Finnhub: {e}")
+            print(f"Failed to fetch ETF data for {ticker} from yfinance: {e}")
             
     conn.commit()
     conn.close()
@@ -83,7 +76,7 @@ def check_and_update_etf_data():
             last_time_str = f.read().strip()
             try:
                 last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
-                if (datetime.now() - last_time).total_seconds() < 12 * 3600:
+                if (datetime.now() - last_time).total_seconds() < 2 * 3600:
                     needs_update = False
             except:
                 pass
@@ -353,20 +346,25 @@ def run_bulk_simulation(criteria="momentum"):
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
             
+        def sanitize_float(val):
+            if pd.isna(val) or val == float('inf') or val == float('-inf'):
+                return 0.0
+            return float(val)
+            
         models.append({
             "model": f"Model {i+1}",
             "weights": {"w1": w1_pct, "w5": w5_pct, "w20": w20_pct},
-            "ret_3m": ret_3m,
-            "ret_6m": ret_6m,
-            "ret_1y": ret_1y,
-            "total_ret": total_ret,
-            "sharpe": sharpe_ratio,
-            "mdd": mdd,
-            "win_rate": win_rate,
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
+            "ret_3m": sanitize_float(ret_3m),
+            "ret_6m": sanitize_float(ret_6m),
+            "ret_1y": sanitize_float(ret_1y),
+            "total_ret": sanitize_float(total_ret),
+            "sharpe": sanitize_float(sharpe_ratio),
+            "mdd": sanitize_float(mdd),
+            "win_rate": sanitize_float(win_rate),
+            "avg_win": sanitize_float(avg_win),
+            "avg_loss": sanitize_float(avg_loss),
             "dates": dates,
-            "strategy": strategy,
+            "strategy": [sanitize_float(s) for s in strategy],
             "selected_etf": selected_etf
         })
         
