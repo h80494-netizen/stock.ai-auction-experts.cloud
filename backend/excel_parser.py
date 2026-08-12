@@ -60,6 +60,8 @@ def update_kospi_prices_bg():
                                 all_stocks[tk]["categories"].append(c)
                                 
             merged_list = list(all_stocks.values())
+            _kospi_cache = merged_list  # 즉시 캐시에 할당하여 서버 시작 시 빈 배열이 반환되는 현상 방지
+            
             # Preserve ratio from scraper
 
 
