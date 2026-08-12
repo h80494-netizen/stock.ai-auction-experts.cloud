@@ -185,9 +185,9 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     
     # Calculate ETF individual normalized base 100
     for ticker in pivot.columns:
-        base_price = pivot[ticker].iloc[0]
+        base_price = float(pivot[ticker].iloc[0])
         for i, date in enumerate(dates):
-            etf_normalized[ticker][i] = (pivot[ticker].iloc[i] / base_price) * 100.0
+            etf_normalized[ticker][i] = float((pivot[ticker].iloc[i] / base_price) * 100.0)
             
     # Simulation Logic
     current_target = None
@@ -236,12 +236,12 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
         
         # Apply return from current_target (which was selected at i-1)
         if current_target and current_target in pivot.columns:
-            prev_p = pivot[current_target].iloc[i-1]
-            curr_p = pivot[current_target].iloc[i]
+            prev_p = float(pivot[current_target].iloc[i-1])
+            curr_p = float(pivot[current_target].iloc[i])
             daily_ret = (curr_p - prev_p) / prev_p
-            strategy_returns[i] = strategy_returns[i-1] * (1 + daily_ret)
+            strategy_returns[i] = float(strategy_returns[i-1] * (1 + daily_ret))
         else:
-            strategy_returns[i] = strategy_returns[i-1]
+            strategy_returns[i] = float(strategy_returns[i-1])
             
         # Update target for next day
         current_target = best_ticker
