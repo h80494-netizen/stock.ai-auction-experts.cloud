@@ -17,9 +17,11 @@ import TrendingStocksView from '@/components/TrendingStocksView';
 import GlobalNewsRankingView from '@/components/GlobalNewsRankingView';
 import ETFStrategyView from '@/components/ETFStrategyView';
 import ETFSimulationHistoryView from '@/components/ETFSimulationHistoryView';
+import TetrisScreenerView from '@/components/TetrisScreenerView';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris'>('search');
+  const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
   const [globalData, setGlobalData] = useState<any>({ indices: [], stocks: [] });
@@ -209,6 +211,16 @@ export default function Home() {
           >
             DB크롤링 스캐너
           </button>
+          <button
+            onClick={() => setActiveTab('tetris')}
+            className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'tetris' 
+                ? 'bg-purple-900/30 border-purple-700 text-purple-400' 
+                : 'bg-transparent border-transparent text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            종목 필터링 (Tetris)
+          </button>
           <button 
             onClick={() => setActiveTab('etf')} 
             className={`px-4 py-3 font-bold transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf' ? 'text-white border-b-2 border-indigo-500' : 'text-gray-400 hover:text-white'}`}
@@ -304,15 +316,17 @@ export default function Home() {
         ) : activeTab === 'etf' ? (
           <ETFView />
         ) : activeTab === 'etf_strategy' ? (
-          <ETFStrategyView />
+          <ETFStrategyView etfWeights={etfWeights} setEtfWeights={setEtfWeights} />
         ) : activeTab === 'etf_history' ? (
-          <ETFSimulationHistoryView />
+          <ETFSimulationHistoryView etfWeights={etfWeights} setEtfWeights={setEtfWeights} />
         ) : activeTab === 'derivatives' ? (
           <DerivativesView />
         ) : activeTab === 'scanner' ? (
           <MarketScannerView />
         ) : activeTab === 'globalnews' ? (
           <GlobalNewsRankingView onNavigateToSearch={(ticker) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} />
+        ) : activeTab === 'tetris' ? (
+          <TetrisScreenerView setGlobalSearchTicker={(ticker: string) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} globalStocks={globalData?.stocks || []} stocks={stocks} />
         ) : (
           <HeatmapView />
         )}

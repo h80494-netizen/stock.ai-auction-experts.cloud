@@ -56,29 +56,7 @@ function KISChart({ data, symbol, fundamentals, currentPrice, changePct }: { dat
         
         if (uniqueData.length > 0) {
           candlestickSeries.setData(uniqueData);
-          
-          if (fundamentals) {
-            if (fundamentals.targetHigh && fundamentals.targetHigh > 0) {
-              candlestickSeries.createPriceLine({ price: fundamentals.targetHigh, color: '#FF5252', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: '최고목표가' });
-            }
-            if (fundamentals.targetMean && fundamentals.targetMean > 0) {
-              candlestickSeries.createPriceLine({ price: fundamentals.targetMean, color: '#FFB74D', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '평균목표가' });
-            }
-            if (fundamentals.targetLow && fundamentals.targetLow > 0) {
-              candlestickSeries.createPriceLine({ price: fundamentals.targetLow, color: '#64B5F6', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: '최저목표가' });
-            }
-            if (fundamentals.target_history && fundamentals.target_history.length > 0) {
-              const validMarkers = [...fundamentals.target_history]
-                .filter((m: any) => m.time && m.time.length >= 10)
-                .sort((a: any, b: any) => new Date(a.time).getTime() - new Date(b.time).getTime())
-                .filter((v: any, i: number, a: any[]) => i === 0 || v.time !== a[i-1].time);
-              if (validMarkers.length > 0) {
-                try {
-                  createSeriesMarkers(candlestickSeries, validMarkers);
-                } catch(e) { console.error("Marker error", e); }
-              }
-            }
-          }
+          // Target overlays removed per user request
         }
       } catch (err) {
         console.error("Chart data formatting error:", err);

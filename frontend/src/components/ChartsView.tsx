@@ -53,7 +53,7 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
   }, [ticker, period]);
 
   // 동적으로 주가에 맞춰 밴드와 이론가를 생성합니다.
-  const latestPrice = chartData && chartData.length > 0 ? chartData[chartData.length - 1].close : (stockDetails?.stock?.price || 50000);
+  const latestPrice = (chartData && chartData.length > 0) ? chartData[chartData.length - 1].close : (stockDetails?.stock?.currentPrice || stockDetails?.stock?.price || 50000);
   
   // Real Financial Multiples
   const bps = stockDetails?.stock?.bps || (latestPrice / 1.2);
@@ -138,23 +138,14 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
 
   return (
     <div className="flex flex-col gap-4 lg:h-full">
-      {/* Top: Theoretical Models */}
+      {/* Top: TradingView Chart */}
       <div className="bg-[#111] border border-gray-800 rounded p-4 flex flex-col min-h-[300px] lg:h-1/2">
-        <h3 className="font-bold text-gray-300 mb-2">이론가 추정 차트 (RIM/DDM/EPS) (AI 목표가)</h3>
+        <div className="flex justify-between items-center mb-2">
+          <h3 className="font-bold text-gray-300">주가 차트</h3>
+        </div>
         <div className="flex-1 min-h-[250px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={mockModelData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="year" stroke="#888" fontSize={10} />
-              <YAxis stroke="#888" fontSize={10} tickFormatter={(val) => `${val/1000}k`} />
-              <Tooltip contentStyle={{ backgroundColor: '#111', borderColor: '#333' }} />
-              <Legend wrapperStyle={{ fontSize: '10px' }} />
-              <Line type="monotone" dataKey="price" stroke="#fff" strokeWidth={3} dot={{ r: 3 }} name="현재주가" />
-              <Line type="monotone" dataKey="rim" stroke="#8884d8" strokeWidth={2} name="초과이익모델(RIM)" />
-              <Line type="monotone" dataKey="ddm" stroke="#82ca9d" strokeWidth={2} name="배당할인모형(DDM)" />
-              <Line type="monotone" dataKey="eps" stroke="#ffc658" strokeWidth={2} name="EPS모델" />
-            </LineChart>
-          </ResponsiveContainer>
+          {loading ? <div className="flex items-center justify-center h-full text-gray-500">Loading Chart...</div> : 
+          <TradingViewWidget symbol={ticker} defaultInterval={period} />}
         </div>
       </div>
 
@@ -181,17 +172,23 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
           </div>
         </div>
 
-        {/* Top: KIS Chart swapped to Bottom Right */}
+        {/* Bottom Right: Theoretical Models */}
         <div className="bg-[#111] border border-gray-800 rounded p-4 flex-1 flex flex-col min-h-[250px]">
-          <div className="flex justify-between items-center mb-2">
-            <h3 className="font-bold text-gray-300">주가 차트</h3>
-            <div className="flex gap-2">
-              {/* The interval buttons were moved inside TradingViewWidget to work correctly. */}
-            </div>
-          </div>
+          <h3 className="font-bold text-gray-300 mb-2">이론가 추정 차트 (RIM/DDM/EPS) (AI 목표가)</h3>
           <div className="flex-1 min-h-[200px]">
-            {loading ? <div className="flex items-center justify-center h-full text-gray-500">Loading Chart...</div> : 
-            <TradingViewWidget symbol={ticker} defaultInterval={period} />}
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={mockModelData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                <XAxis dataKey="year" stroke="#888" fontSize={10} />
+                <YAxis stroke="#888" fontSize={10} tickFormatter={(val) => `${val/1000}k`} />
+                <Tooltip contentStyle={{ backgroundColor: '#111', borderColor: '#333' }} />
+                <Legend wrapperStyle={{ fontSize: '10px' }} />
+                <Line type="monotone" dataKey="price" stroke="#fff" strokeWidth={3} dot={{ r: 3 }} name="현재주가" />
+                <Line type="monotone" dataKey="rim" stroke="#8884d8" strokeWidth={2} name="초과이익모델(RIM)" />
+                <Line type="monotone" dataKey="ddm" stroke="#82ca9d" strokeWidth={2} name="배당할인모형(DDM)" />
+                <Line type="monotone" dataKey="eps" stroke="#ffc658" strokeWidth={2} name="EPS모델" />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
         </div>
 

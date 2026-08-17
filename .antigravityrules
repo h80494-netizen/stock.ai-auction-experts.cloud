@@ -1,0 +1,12 @@
+# Auto GitHub Push & AWS Deploy Rule
+
+1. **자동 배포 트리거**: 코드 수정, 버그 수정, 기능 추가 등이 완료되면 재확인 없이 즉시 아래 과정을 순차적으로 실행하세요.
+2. **Git Commit & Push**:
+   - `git add .`
+   - `git commit -m "feat/fix: 작업 내용 요약"`
+   - `git push origin main` (프로젝트 기본 브랜치 지정)
+3. **AWS 서버 동기화**:
+   - SSH를 통해 AWS 서버로 접속하여 최신 코드를 받아오고 애플리케이션을 재실행합니다.
+   - 예시 명령어:
+     `ssh -i ~/keys/your-key.pem ubuntu@YOUR_AWS_IP "cd /var/www/your-app && git pull origin main && pm2 restart all"`
+4. **결과 보고**: 완료 후 푸시된 커밋 메시지와 AWS 서버 반영 성공 여부를 1~2줄로 요약해 알립니다.

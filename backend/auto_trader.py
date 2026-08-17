@@ -2,8 +2,12 @@ import time
 from typing import List
 from datetime import datetime
 from trader import BrokerageAPI
+import os
+from dotenv import load_dotenv
 from excel_parser import load_kospi_data
 import database as db
+
+load_dotenv()
 
 TOTAL_CAPITAL = 100000000 # 1억원
 CAPITAL_PER_STOCK = TOTAL_CAPITAL * 0.05 # 종목당 500만원
@@ -11,9 +15,9 @@ CAPITAL_PER_STOCK = TOTAL_CAPITAL * 0.05 # 종목당 500만원
 # 전역 Broker 객체 (실제 운영 시에는 환경변수 사용 권장)
 try:
     BROKER = BrokerageAPI(
-        account_no="44790516-01", 
-        api_key="PS7qebWyCKOenh2K32vrFUzuFLNguRPtJad2",
-        app_secret="X4uheemKo6gRCwa6aZjCVcanJlok52HJCLi7yXpAyGMIYZV9ueUcuXT0HKftn4Sx64fdN+/pSOJEiQzei0oi6eM7MpzOYpXIvp2lUqftn60497mGsWaNh5Noe3M4lxrV4qfJ9wChBIKoiyOshWPi2pNFdossVKkP6k80I1GhPXLDN7GJmsQ=",
+        account_no=os.environ.get("KIS_ACCOUNT_NO"), 
+        api_key=os.environ.get("KIS_API_KEY"),
+        app_secret=os.environ.get("KIS_APP_SECRET"),
         is_mock=False
     )
 except Exception as e:
@@ -75,28 +79,27 @@ def job_910_buy():
         ticker = stock["ticker"]
         name = stock["name"]
         
-        # 3매도호가 조회
-        orderbook = BROKER.client.get_orderbook(ticker)
-        # askp3 : 3매도호가
-        ask_price_str = orderbook.get("askp3", "0")
-        ask_price = int(ask_price_str)
+        # 현재가 조회 (수량 계산을 위한 기준가 용도)
+        current_price = BROKER.client.get_current_price(ticker)
         
-        if ask_price <= 0:
-            print(f"{name} 호가 데이터 오류 또는 상한가. 매수 생략.")
+        if current_price <= 0:
+            print(f"{name} 현재가 데이터 오류. 매수 생략.")
             continue
             
-        qty = int(CAPITAL_PER_STOCK // ask_price)
+        # 기준가로 살 수 있는 수량 계산
+        qty = int(CAPITAL_PER_STOCK // current_price)
         
         if qty > 0:
-            print(f"[{name}] 3매도호가({ask_price}원)에 {qty}주 매수 주문")
-            success = BROKER.client.order_buy(ticker, qty, ask_price)
+            print(f"[{name}] 기준가({current_price}원) 바탕으로 {qty}주 시장가 매수 주문")
+            # price를 0으로 넘기면 '시장가(01)'로 주문이 들어감
+            success = BROKER.client.order_buy(ticker, qty, 0)
             if success:
-                # DB 업데이트
-                db.update_holding(ticker, name, qty, ask_price)
+                # DB 업데이트 (시장가 매수이므로 예상 체결가인 current_price 기록)
+                db.update_holding(ticker, name, qty, current_price)
         else:
             print(f"[{name}] 단가가 너무 높아 500만원으로 1주도 살 수 없습니다.")
 
-def job_1525_sell():
+def job_1525_sell_order():
     print(f"[{datetime.now()}] 15:25 PM 자동매도 스케줄러 실행 시작...")
     if not BROKER:
         return
@@ -110,9 +113,6 @@ def job_1525_sell():
         print("현재 보유 중인 종목이 없습니다.")
         return
         
-    total_buy = 0.0
-    total_sell = 0.0
-    
     for h in holdings:
         ticker = h['ticker']
         name = h.get('name', ticker)
@@ -122,10 +122,32 @@ def job_1525_sell():
             continue
             
         # 시장가 매도 (price = 0)
-        print(f"[{name}] 보유수량 {qty}주 시장가 전량 매도 주문")
+        print(f"[{name}] 보유수량 {qty}주 15:25 동시호가 시장가 매도 주문 (15:30 종가 체결 예정)")
         success = BROKER.client.order_sell(ticker, qty, 0)
         
-        # DB 정산을 위한 현재가 조회 (시장가 체결가로 가정)
+def job_1531_ledger_record():
+    print(f"[{datetime.now()}] 15:31 PM 자동매도 종가 체결 정산 및 장부 기록...")
+    if not BROKER:
+        return
+        
+    if not BROKER.client.is_market_open():
+        return
+        
+    holdings = db.get_holdings()
+    if not holdings:
+        return
+        
+    total_buy = 0.0
+    total_sell = 0.0
+    
+    for h in holdings:
+        ticker = h['ticker']
+        qty = h['qty']
+        
+        if qty <= 0:
+            continue
+            
+        # 15:30 이후이므로 get_current_price는 최종 종가를 반환함
         current_price = BROKER.get_current_price(ticker)
         buy_price = h.get('buyPrice', h.get('buy_price', 0))
         
@@ -141,7 +163,7 @@ def job_1525_sell():
         
         today_str = datetime.now().strftime("%Y-%m-%d")
         db.add_ledger_record(today_str, total_buy, total_sell, fees, tax, net_pnl, return_rate)
-        print(f"일괄 매도 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
+        print(f"15:30 최종 종가 기준 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
         
     db.clear_holdings()
 

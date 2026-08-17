@@ -1,0 +1,61 @@
+<table class="tb_type1" summary="��ъ�����蹂� 留ㅻℓ������ �����몄��蹂댁�� ������ ��� 以� 嫄곕����� ���蹂�(留ㅻ��������, 留ㅼ��������, 嫄곕�����)瑜� ���怨듯�⑸�����.">
+<caption>嫄곕����� ���蹂�</caption>
+<colgroup><col/><col width="80"/><col width="90"/><col width="80"/></colgroup>
+<thead>
+<tr>
+<th class="h_th th_sale_top" scope="col"><span>留ㅻ��������</span></th>
+<th class="h_th th_deal_amount" scope="col"><span>嫄곕�����</span></th>
+<th class="h_th th_buy_top" scope="col"><span>留ㅼ��������</span></th>
+<th class="h_th th_deal_amount" scope="col"><span>嫄곌�����</span></th>
+</tr>
+</thead>
+<tfoot>
+<tr>
+<td class="left"><strong>��멸뎅怨�異�������</strong></td>
+<td>
+<em class="f_down">281,277</em>
+</td>
+<td class="left">
+<em class="f_up">
+				+467,476
+				</em>
+</td>
+<td>
+<em class="f_up">748,753</em>
+</td>
+</tr>
+</tfoot>
+<tbody>
+<tr><td class="space"></td></tr>
+<tr>
+<td class="left">誘몃��������利�沅�</td>
+<td><em>407,423</em></td>
+<td class="left">KB利�沅�</td>
+<td><em>289,461</em></td>
+</tr>
+<tr>
+<td class="left">���援���ъ��利�沅�</td>
+<td><em>382,417</em></td>
+<td class="left"><span class="f_up">硫�由대┛移�</span></td>
+<td><em class="f_up">267,746</em></td>
+</tr>
+<tr>
+<td class="left"><span class="f_down">�����댄�쇰え媛�</span></td>
+<td><em class="f_down">281,277</em></td>
+<td class="left">���援���ъ��利�沅�</td>
+<td><em>214,780</em></td>
+</tr>
+<tr>
+<td class="left">��ㅼ��利�沅�</td>
+<td><em>243,860</em></td>
+<td class="left">誘몃��������利�沅�</td>
+<td><em>213,235</em></td>
+</tr>
+<tr>
+<td class="left">��쇱�깆��沅�</td>
+<td><em>222,141</em></td>
+<td class="left">��쇱�깆��沅�</td>
+<td><em>192,524</em></td>
+</tr>
+</tbody>
+</table>

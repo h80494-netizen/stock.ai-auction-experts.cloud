@@ -27,13 +27,29 @@ const ETF_COLORS: Record<string, string> = {
   CASH: "#9ca3af", // gray
 };
 
-export default function ETFStrategyView() {
+export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeights?: any, setEtfWeights?: any }) {
   const [data, setData] = useState<any[]>([]);
   const [simData, setSimData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>('YTD(26.01~)');
   const [criteria, setCriteria] = useState<string>('sharpe');
-  const [activeWeights, setActiveWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
+  // Use props if available, otherwise fallback to local state (for standalone usage if any)
+  const [localWeights, setLocalWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
+  
+  const [showModelSwap, setShowModelSwap] = useState(false);
+  const [modelsList, setModelsList] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (showModelSwap && modelsList.length === 0) {
+      fetch(`/api/etf/simulation-models?criteria=${criteria}`)
+        .then(res => res.json())
+        .then(json => setModelsList(json))
+        .catch(err => console.error(err));
+    }
+  }, [showModelSwap, criteria, modelsList.length]);
+  
+  const activeWeights = etfWeights || localWeights;
+  const updateWeights = setEtfWeights || setLocalWeights;
 
   useEffect(() => {
     let isMounted = true;
@@ -171,7 +187,10 @@ export default function ETFStrategyView() {
 
   const simMetrics = useMemo(() => {
     if (!simData || !simData.dates || simData.dates.length === 0) {
-      return { totalReturn: 0, tradeCount: 0, totalFee: 0, netReturn: 0 };
+      return { 
+        totalReturn: 0, tradeCount: 0, totalFee: 0, netReturn: 0,
+        hittingRatio: 0, mddPct: 0, calmarRatio: 0, sortinoRatio: 0, dailyAvgPct: 0, sharpeRatio: 0
+      };
     }
 
     let startDate = '1900-01-01';
@@ -205,7 +224,10 @@ export default function ETFStrategyView() {
     }
 
     if (filtered.length < 2) {
-      return { totalReturn: 0, tradeCount: 0, totalFee: 0, netReturn: 0 };
+      return { 
+        totalReturn: 0, tradeCount: 0, totalFee: 0, netReturn: 0,
+        hittingRatio: 0, mddPct: 0, calmarRatio: 0, sortinoRatio: 0, dailyAvgPct: 0, sharpeRatio: 0
+      };
     }
 
     const startVal = filtered[0].strategy;
@@ -213,9 +235,25 @@ export default function ETFStrategyView() {
     const totalReturn = startVal > 0 ? ((endVal / startVal) - 1) * 100 : 0;
 
     let tradeCount = 0;
+    let winCount = 0;
+    
+    let peak = startVal;
+    let mdd = 0;
+    const dailyReturns = [];
+
     for (let i = 1; i < filtered.length; i++) {
       if (filtered[i].selected !== filtered[i - 1].selected && filtered[i - 1].selected !== 'Waiting') {
         tradeCount++;
+      }
+      
+      if (filtered[i].strategy > peak) peak = filtered[i].strategy;
+      const drawdown = peak > 0 ? (peak - filtered[i].strategy) / peak : 0;
+      if (drawdown > mdd) mdd = drawdown;
+      
+      if (filtered[i-1].strategy > 0) {
+        const dRet = (filtered[i].strategy - filtered[i-1].strategy) / filtered[i-1].strategy;
+        dailyReturns.push(dRet);
+        if (dRet > 0) winCount++;
       }
     }
 
@@ -223,7 +261,29 @@ export default function ETFStrategyView() {
     const totalFee = tradeCount * feeRatePerTrade;
     const netReturn = totalReturn - totalFee;
 
-    return { totalReturn, tradeCount, totalFee, netReturn };
+    // Advanced Metrics
+    const avgDailyReturn = dailyReturns.length > 0 ? dailyReturns.reduce((a,b) => a+b, 0) / dailyReturns.length : 0;
+    const stdDev = dailyReturns.length > 0 ? Math.sqrt(dailyReturns.reduce((sq, val) => sq + Math.pow(val - avgDailyReturn, 2), 0) / dailyReturns.length) : 0;
+    
+    const annRet = avgDailyReturn * 252;
+    const annStdDev = stdDev * Math.sqrt(252);
+    
+    const sharpeRatio = annStdDev > 0 ? annRet / annStdDev : 0; 
+    
+    const negativeReturns = dailyReturns.filter(r => r < 0);
+    const downsideStdDev = negativeReturns.length > 0 ? Math.sqrt(negativeReturns.reduce((sq, val) => sq + Math.pow(val - avgDailyReturn, 2), 0) / negativeReturns.length) : 0;
+    const annDownsideStdDev = downsideStdDev * Math.sqrt(252);
+    const sortinoRatio = annDownsideStdDev > 0 ? annRet / annDownsideStdDev : 0;
+    
+    const calmarRatio = mdd > 0 ? annRet / mdd : 0;
+    const hittingRatio = dailyReturns.length > 0 ? (winCount / dailyReturns.length) * 100 : 0;
+    const mddPct = mdd * 100;
+    const dailyAvgPct = avgDailyReturn * 100;
+
+    return { 
+      totalReturn, tradeCount, totalFee, netReturn,
+      hittingRatio, mddPct, calmarRatio, sortinoRatio, dailyAvgPct, sharpeRatio
+    };
   }, [simData, period]);
 
   if (loading) return <div className="p-4 animate-pulse text-xl font-bold">ETF 전략 분석 및 백테스트 실행 중...</div>;
@@ -335,12 +395,83 @@ export default function ETFStrategyView() {
             </div>
           </div>
         </div>
+
+        {/* 고급 성과 지표 (Advanced Metrics) */}
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5 sm:gap-4">
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">일평균수익률</div>
+            <div className={`text-base sm:text-lg font-extrabold font-mono mt-1 ${simMetrics.dailyAvgPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {simMetrics.dailyAvgPct > 0 ? '+' : ''}{simMetrics.dailyAvgPct.toFixed(2)}%
+            </div>
+          </div>
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">승률 (Hitting Ratio)</div>
+            <div className="text-base sm:text-lg font-extrabold font-mono text-blue-400 mt-1">
+              {simMetrics.hittingRatio.toFixed(1)}%
+            </div>
+          </div>
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">MDD (최대낙폭)</div>
+            <div className="text-base sm:text-lg font-extrabold font-mono text-red-400 mt-1">
+              -{simMetrics.mddPct.toFixed(2)}%
+            </div>
+          </div>
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">샤프 지수 (Sharpe)</div>
+            <div className="text-base sm:text-lg font-extrabold font-mono text-purple-400 mt-1">
+              {simMetrics.sharpeRatio.toFixed(2)}
+            </div>
+          </div>
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">소르티노 (Sortino)</div>
+            <div className="text-base sm:text-lg font-extrabold font-mono text-indigo-400 mt-1">
+              {simMetrics.sortinoRatio.toFixed(2)}
+            </div>
+          </div>
+          <div className="bg-gray-900/70 p-2 sm:p-3 rounded-lg border border-gray-700/60">
+            <div className="text-[10px] sm:text-xs text-gray-400 font-medium">칼마 지수 (Calmar)</div>
+            <div className="text-base sm:text-lg font-extrabold font-mono text-pink-400 mt-1">
+              {simMetrics.calmarRatio.toFixed(2)}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="p-4 sm:p-6 bg-gradient-to-r from-blue-900 to-indigo-900 rounded-lg shadow-lg border border-blue-500">
-        <h2 className="text-lg sm:text-2xl font-bold mb-2 break-keep">
-          🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? `1일 ${Math.round(activeWeights.w1*100)}%, 5일 ${Math.round(activeWeights.w5*100)}%, 20일 ${Math.round(activeWeights.w20*100)}% 가중 합산` : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
-        </h2>
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-2">
+          <h2 className="text-lg sm:text-2xl font-bold break-keep">
+            🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? `1일 ${Math.round(activeWeights.w1*100)}%, 5일 ${Math.round(activeWeights.w5*100)}%, 20일 ${Math.round(activeWeights.w20*100)}% 가중 합산` : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
+          </h2>
+          <div className="relative mt-2 md:mt-0 w-full md:w-auto">
+            <button 
+              onClick={() => setShowModelSwap(!showModelSwap)}
+              className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-sm font-bold shadow transition-colors flex items-center justify-center gap-1"
+            >
+              🔄 모델 교체 (리밸런싱)
+            </button>
+            {showModelSwap && (
+              <div className="absolute right-0 mt-1 w-full md:w-64 max-h-60 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-2xl z-50">
+                {modelsList.length > 0 ? (
+                  modelsList.map((m, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        updateWeights(m.weights);
+                        setShowModelSwap(false);
+                      }}
+                      className="w-full text-left px-3 py-2 hover:bg-gray-700 text-sm border-b border-gray-700/50 last:border-0"
+                    >
+                      <div className="font-bold text-blue-300">모델 {idx + 1}</div>
+                      <div className="text-xs text-gray-400">1일:{m.weights.w1*100}% 5일:{m.weights.w5*100}% 20일:{m.weights.w20*100}%</div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="p-3 text-sm text-gray-400 text-center">데이터를 불러오는 중...</div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
         <div className="text-3xl sm:text-4xl font-extrabold text-yellow-400 my-3 sm:my-4">
           {isCash ? (
             <span className="text-gray-300 text-xl sm:text-4xl">CASH <span className="text-sm sm:text-2xl text-gray-400 block sm:inline mt-1 sm:mt-0">(추천 스코어 0.5 이하 - 현금 방어)</span></span>

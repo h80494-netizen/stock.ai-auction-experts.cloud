@@ -366,7 +366,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         
         <div className="flex justify-between items-center mb-2 px-2">
           <div className="flex items-center gap-3">
-            <h2 className="text-xl font-bold text-red-500 flex-shrink-0">🚨 매수주문 (외국인 순매수 {threshold}%↑)</h2>
+            <h2 className="text-xl font-bold text-red-500 flex-shrink-0">🚨 매수주문 (외국계 창구 순매수 {threshold}%↑)</h2>
             <div className="flex items-center gap-1">
               <input 
                 type="number" 
@@ -382,7 +382,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                   if (typeof window !== 'undefined') {
                     localStorage.setItem('orderThreshold', val.toString());
                   }
-                  alert(`외국인 순매수 기준이 ${val}%로 확정되었습니다.`);
+                  alert(`외국계 창구 순매수 기준이 ${val}%로 확정되었습니다.`);
                 }}
                 className="bg-red-700 hover:bg-red-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
               >
@@ -540,7 +540,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               }) : (
                 <tr>
                   <td colSpan={11} className="px-3 py-8 text-center text-gray-500">
-                    현재 외국계 순매수 비중 20% 이상 종목이 없습니다.
+                    현재 외국계 창구 순매수 비중 {threshold}% 이상 종목이 없습니다.
                   </td>
                 </tr>
               )}

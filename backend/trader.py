@@ -1,6 +1,10 @@
 import datetime
+import os
 from typing import List, Dict
+from dotenv import load_dotenv
 from kis_api import KISApiClient
+
+load_dotenv()
 
 class BrokerageAPI:
     """
@@ -77,9 +81,9 @@ if __name__ == "__main__":
     
     # KIS API 계좌 및 토큰 세팅 (모의투자)
     my_broker = BrokerageAPI(
-        account_no="44790516-01", 
-        api_key="PS7qebWyCKOenh2K32vrFUzuFLNguRPtJad2",
-        app_secret="X4uheemKo6gRCwa6aZjCVcanJlok52HJCLi7yXpAyGMIYZV9ueUcuXT0HKftn4Sx64fdN+/pSOJEiQzei0oi6eM7MpzOYpXIvp2lUqftn60497mGsWaNh5Noe3M4lxrV4qfJ9wChBIKoiyOshWPi2pNFdossVKkP6k80I1GhPXLDN7GJmsQ=",
+        account_no=os.environ.get("KIS_ACCOUNT_NO"), 
+        api_key=os.environ.get("KIS_API_KEY"),
+        app_secret=os.environ.get("KIS_APP_SECRET"),
         is_mock=True
     )
     TOTAL_CAPITAL = 10000000 

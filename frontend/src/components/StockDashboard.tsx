@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import ChartsView from './ChartsView';
 import AutocompleteSearch from './AutocompleteSearch';
+import FundamentalAnalysisView from './FundamentalAnalysisView';
 
 interface StockDashboardProps {
   stocks?: any[];
@@ -24,8 +25,12 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
     if (combined.length === 0) return;
     const fetchLivePrices = async () => {
       try {
-        const topStocks = combined.slice(0, 50).map(s => s.ticker).join(',');
-        const res = await fetch(`/api/realtime-prices?tickers=${encodeURIComponent(topStocks)}`);
+        const topTickers = new Set(combined.slice(0, 50).map(s => s.ticker));
+        if (selectedStock && selectedStock.ticker) {
+          topTickers.add(selectedStock.ticker);
+        }
+        const tickersStr = Array.from(topTickers).join(',');
+        const res = await fetch(`/api/realtime-prices?tickers=${encodeURIComponent(tickersStr)}`);
         if (!res.ok) {
           console.error('Failed to fetch live prices:', res.status);
           return;
@@ -39,7 +44,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
     fetchLivePrices();
     const interval = setInterval(fetchLivePrices, 15000);
     return () => clearInterval(interval);
-  }, [stocks, globalStocks]);
+  }, [stocks, globalStocks, selectedStock]);
   
   // Separate domestic and foreign lists
   const domesticList = stocks.filter((s, idx, self) => 
@@ -261,7 +266,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                   <div className="text-right">매수잔량</div>
                 </div>
                 {Array.from({length: 5}, (_, i) => {
-                  const p = stockDetails.stock.price || 50000;
+                  const p = livePrices[stockDetails.stock.ticker] || stockDetails.stock.price || 50000;
                   const tick = p >= 500000 ? 1000 : p >= 100000 ? 500 : p >= 50000 ? 100 : p >= 10000 ? 50 : 10;
                   const price = p + tick * (5 - i);
                   return (
@@ -274,11 +279,11 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                 })}
                 <div className="grid grid-cols-3 my-1 border-y border-gray-800 py-1 font-bold">
                   <div className="text-left"></div>
-                  <div className="text-center text-white">{(stockDetails.stock.price || 0).toLocaleString()}</div>
+                  <div className="text-center text-white">{(livePrices[stockDetails.stock.ticker] || stockDetails.stock.price || 0).toLocaleString()}</div>
                   <div className="text-right"></div>
                 </div>
                 {Array.from({length: 5}, (_, i) => {
-                  const p = stockDetails.stock.price || 50000;
+                  const p = livePrices[stockDetails.stock.ticker] || stockDetails.stock.price || 50000;
                   const tick = p >= 500000 ? 1000 : p >= 100000 ? 500 : p >= 50000 ? 100 : p >= 10000 ? 50 : 10;
                   const price = p - tick * (i + 1);
                   return (
@@ -357,13 +362,14 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
 
           {/* Right panel: Charts */}
           <div className="w-full lg:w-2/3 flex flex-col gap-4">
+            <ChartsView ticker={stockDetails.stock.ticker} stockDetails={stockDetails} />
             {businessSummary && (
               <div className="bg-[#111] border border-gray-800 p-4 rounded text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">
                 <h3 className="text-white font-bold mb-2">종목 요약 (Naver)</h3>
                 {businessSummary}
               </div>
             )}
-            <ChartsView ticker={stockDetails.stock.ticker} stockDetails={stockDetails} />
+            <FundamentalAnalysisView ticker={stockDetails.stock.ticker} />
           </div>
 
         </div>

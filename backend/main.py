@@ -13,7 +13,7 @@ from utils.retry_util import with_retry
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 
 # Global executor for yfinance to prevent OOM
-yf_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+yf_executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -52,7 +52,8 @@ def start_scheduler():
     threading.Thread(target=update_etf_data, daemon=True).start()
     
     scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
-    scheduler.add_job(auto_trader.job_1525_sell, CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_1525_sell_order, CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_1531_ledger_record, CronTrigger(hour=15, minute=31, day_of_week='mon-fri', timezone='Asia/Seoul'))
     
     # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
     scheduler.add_job(update_etf_data, CronTrigger(hour=8, minute=0, timezone='Asia/Seoul'))
@@ -85,6 +86,39 @@ def read_root():
 import database as db
 from database import get_db_connection
 
+from typing import Dict, Any
+
+@app.post("/api/dart/screener")
+def dart_screener(conditions: Dict[str, Any]):
+    try:
+        tickers = db.get_dart_screener_results(conditions)
+        return {"success": True, "tickers": tickers}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/dart/fundamentals/{ticker}")
+def get_dart_fundamentals(ticker: str):
+    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
+    clean_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
+    
+    financials = db.get_dart_financials(clean_ticker)
+    
+    # If not found in DB, try to fetch it live (for demonstration or fallback)
+    if not financials:
+        from ingestion.scrapers.dart_scraper import dart_scraper
+        current_year = "2023" # Fallback year
+        data = dart_scraper.get_financials(clean_ticker, current_year, "11011")
+        if data:
+            db.insert_dart_financials(
+                clean_ticker, data["year"], data["quarter"],
+                data["assets"], data["equity"], data["liabilities"],
+                data["revenue"], data["operating_profit"], data["net_profit"]
+            )
+            financials = db.get_dart_financials(clean_ticker)
+            
+    return {"ticker": clean_ticker, "financials": financials}
+
+
 @app.get("/api/db/search/{query}")
 def search_db_stock(query: str):
     conn = db.get_db_connection()
@@ -96,7 +130,9 @@ def search_db_stock(query: str):
 
 @app.get("/api/db/stock/{ticker}")
 def get_db_stock_info(ticker: str):
-    raw_stock = db.get_stock(ticker)
+    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
+    pure_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
+    raw_stock = db.get_stock(pure_ticker) or db.get_stock(f"KRX:{pure_ticker}") or db.get_stock(ticker)
     if not raw_stock:
         stock = {
             "ticker": ticker,
@@ -566,13 +602,45 @@ def api_get_market_top50(market: str):
 def api_get_realtime_prices(tickers: str = ""):
     """
     Returns real-time prices for the requested tickers (comma-separated).
-    Uses Naver Finance Scraper.
+    Uses yfinance instead of naver scraper for stability.
     """
     if not tickers: return {}
-    from naver_finance_scraper import naver_scraper
+    import yfinance as yf
     
     ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    return naver_scraper.get_realtime_prices(ticker_list)
+    results = {}
+    yf_tickers = []
+    ticker_map = {}
+    
+    for t in ticker_list:
+        clean = t
+        if clean.startswith("KRX:") or clean.startswith("KOSPI:"):
+            clean = clean.split(":")[-1] + ".KS"
+        elif clean.startswith("KOSDAQ:"):
+            clean = clean.split(":")[-1] + ".KQ"
+        elif clean.isdigit() and len(clean) == 6:
+            clean = clean + ".KS"
+        
+        yf_tickers.append(clean)
+        ticker_map[clean] = t
+        
+    try:
+        data = yf.Tickers(" ".join(yf_tickers))
+        for yf_t, original_t in ticker_map.items():
+            try:
+                # Using history for reliable real-time/latest price
+                hist = data.tickers[yf_t].history(period="1d")
+                if not hist.empty:
+                    results[original_t] = float(hist['Close'].iloc[-1])
+                else:
+                    results[original_t] = 0
+            except Exception as inner_e:
+                print(f"Error fetching {original_t}: {inner_e}")
+                results[original_t] = 0
+    except Exception as e:
+        print(f"yfinance bulk error: {e}")
+        
+    return results
 
 @app.get("/api/indices")
 def get_indices():
@@ -816,7 +884,7 @@ def get_analyst_report(ticker: str):
     pure_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
     
     # 1. Get stock info
-    stock = get_stock(ticker)
+    stock = get_stock(pure_ticker) or get_stock(f"KRX:{pure_ticker}") or get_stock(ticker)
     is_krx = ticker.startswith('KRX:') or pure_ticker.isdigit()
     
     if not stock:
@@ -882,6 +950,18 @@ def get_analyst_report(ticker: str):
                     bps_val = ems[5].get_text(strip=True).replace(",", "")
                     if bps_val and bps_val.replace("-", "").isdigit():
                         stock['bps'] = float(bps_val)
+            
+            # 최근 뉴스/보고서 요약 추출
+            recent_news = []
+            news_items = soup.select(".sub_section.news_section ul li a")
+            for item in news_items:
+                title = item.get_text(strip=True)
+                if title and title not in recent_news:
+                    recent_news.append(title)
+                    if len(recent_news) >= 5:
+                        break
+            if recent_news:
+                stock['recent_news'] = recent_news
         except:
             pass
 
@@ -1195,6 +1275,18 @@ def api_competitor_sectors():
 
 @app.get("/api/competitors/sector-details")
 def api_competitor_sector_details(sector: str):
+    import os
+    import json
+    data_path = os.path.join(os.path.dirname(__file__), "data", "sector_details.json")
+    if os.path.exists(data_path):
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                cached_data = json.load(f)
+                if sector in cached_data:
+                    return cached_data[sector]
+        except Exception as e:
+            print(f"Error reading cached sector_details.json: {e}")
+            
     from competitor_analyzer import get_sector_details
     return get_sector_details(sector)
 
@@ -1356,6 +1448,77 @@ def api_get_sector_analysis():
     """
     import sector_parser
     return sector_parser.get_sectors_data()
+
+@app.get("/api/pairs-trading")
+def api_pairs_trading(ticker1: str, ticker2: str):
+    """
+    Fetch 1-year historical prices for two tickers, run linear regression (T1 = beta * T2 + alpha),
+    and return the spread with mean and sigma lines for pairs trading analysis.
+    """
+    import yfinance as yf
+    import numpy as np
+    import pandas as pd
+    
+    try:
+        def format_ticker(t):
+            if t.startswith("KRX:"): return t.replace("KRX:", "") + ".KS"
+            if t.startswith("KOSDAQ:"): return t.replace("KOSDAQ:", "") + ".KQ"
+            clean = t.replace("KRX:", "").replace("KOSDAQ:", "")
+            if clean.isdigit() and len(clean) == 6: return f"{clean}.KS"
+            return clean
+            
+        t1 = format_ticker(ticker1)
+        t2 = format_ticker(ticker2)
+        
+        def fetch_pairs():
+            d1 = yf.download(t1, period="1y", progress=False)["Close"]
+            d2 = yf.download(t2, period="1y", progress=False)["Close"]
+            return d1, d2
+            
+        try:
+            future = yf_executor.submit(fetch_pairs)
+            df1, df2 = future.result(timeout=6)
+        except Exception as e:
+            print("Pairs trading download timeout/error:", e)
+            return {"error": "Failed to fetch data (timeout)"}
+            
+        if isinstance(df1, pd.DataFrame): df1 = df1.iloc[:, 0]
+        if isinstance(df2, pd.DataFrame): df2 = df2.iloc[:, 0]
+        
+        df = pd.concat([df1, df2], axis=1).dropna()
+        df.columns = ["T1", "T2"]
+        
+        if df.empty or len(df) < 5:
+            return {"error": "Not enough data"}
+            
+        beta, alpha = np.polyfit(df["T2"], df["T1"], 1)
+        
+        df["Spread"] = df["T1"] - (beta * df["T2"])
+        mean_spread = float(df["Spread"].mean())
+        std_spread = float(df["Spread"].std())
+        
+        chart_data = []
+        for idx, row in df.iterrows():
+            chart_data.append({
+                "time": idx.strftime("%Y-%m-%d"),
+                "value": float(row["Spread"])
+            })
+            
+        return {
+            "beta": float(beta),
+            "alpha": float(alpha),
+            "mean": mean_spread,
+            "sigma_1_up": mean_spread + std_spread,
+            "sigma_2_up": mean_spread + (2 * std_spread),
+            "sigma_1_down": mean_spread - std_spread,
+            "sigma_2_down": mean_spread - (2 * std_spread),
+            "chart_data": chart_data
+        }
+    except Exception as e:
+        import traceback
+        print("Pairs Trading Error:", e)
+        traceback.print_exc()
+        return {"error": str(e)}
 
 @app.get("/api/fundamentals/{ticker}")
 def api_get_fundamentals(ticker: str):

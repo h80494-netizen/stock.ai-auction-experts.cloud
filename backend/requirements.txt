@@ -10,3 +10,4 @@ yfinance
 pandas
 apscheduler
 matplotlib
+openpyxl

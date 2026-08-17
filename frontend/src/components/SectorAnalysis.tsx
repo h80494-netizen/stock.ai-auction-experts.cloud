@@ -7,6 +7,8 @@ export default function SectorAnalysis() {
   const [selectedStocks, setSelectedStocks] = useState<any[]>([]);
   const [fundamentalsData, setFundamentalsData] = useState<any>({});
   const [loading, setLoading] = useState(false);
+  const [pairsData, setPairsData] = useState<any>(null);
+  const [pairsLoading, setPairsLoading] = useState(false);
   
   const chartsCache = useRef<any>({});
 
@@ -38,19 +40,59 @@ export default function SectorAnalysis() {
         if (prev[stock.ticker]) return prev;
         
         // Start fetch
-        fetch(`/api/fundamentals/${stock.ticker}`)
-          .then(res => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
-          .then(data => {
+        const loadData = async () => {
+          try {
+            const res = await fetch(`/api/fundamentals/${stock.ticker}`);
+            let data = res.ok ? await res.json() : null;
+            if (!data || data.error) {
+              const fallbackRes = await fetch(`/api/db/stock/${stock.ticker}`);
+              if (!fallbackRes.ok) throw new Error("Fallback failed");
+              const dbData = await fallbackRes.json();
+              if (dbData.error) throw new Error(dbData.error);
+              
+              const pbr = dbData.financials?.find((f: any) => f.pbr)?.pbr || 'N/A';
+              const per = dbData.financials?.find((f: any) => f.per)?.per || 'N/A';
+              const roe = dbData.financials?.find((f: any) => f.roe)?.roe || 'N/A';
+              const eps = dbData.financials?.find((f: any) => f.eps)?.eps || 'N/A';
+              
+              data = {
+                per, pbr, roe, eps,
+                price_chart: [], rs_chart: [], eps_trend: [], targetHigh: 0, target_history: []
+              };
+            }
             setFundamentalsData((p: any) => ({ ...p, [stock.ticker]: data }));
-          })
-          .catch(err => {
+          } catch (err) {
             setFundamentalsData((p: any) => ({ ...p, [stock.ticker]: { error: 'Failed to fetch' } }));
-          });
+          }
+        };
+        loadData();
           
         // Mark as loading
         return { ...prev, [stock.ticker]: { loading: true } };
       });
     });
+  }, [selectedStocks]);
+
+  // Fetch Pairs Trading data
+  useEffect(() => {
+    if (selectedStocks.length === 2) {
+      setPairsLoading(true);
+      setPairsData(null);
+      const t1 = selectedStocks[0].ticker;
+      const t2 = selectedStocks[1].ticker;
+      fetch(`/api/pairs-trading?ticker1=${t1}&ticker2=${t2}`)
+        .then(res => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
+        .then(data => {
+          if (!data.error) setPairsData(data);
+          setPairsLoading(false);
+        })
+        .catch(err => {
+          console.error(err);
+          setPairsLoading(false);
+        });
+    } else {
+      setPairsData(null);
+    }
   }, [selectedStocks]);
 
   const handleSelectStock = (stock: any) => {
@@ -179,16 +221,29 @@ export default function SectorAnalysis() {
         ))}
       </div>
 
-      {/* Main Content (Split View if 2 stocks) */}
-      <div className="flex-1 flex flex-col lg:flex-row bg-[#050505] overflow-y-auto lg:overflow-x-auto min-h-[600px] lg:min-h-0">
-        {selectedStocks.length > 0 ? (
-          selectedStocks.map((stock, i) => (
-            <div key={stock.ticker} className={`flex-1 p-4 overflow-y-auto lg:border-l ${i > 0 ? 'border-t lg:border-t-0 border-gray-800' : 'border-transparent'}`}>
-              {renderStockView(stock)}
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col bg-[#050505] overflow-y-auto lg:overflow-x-hidden min-h-[600px] lg:min-h-0">
+        <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+          {selectedStocks.length > 0 ? (
+            selectedStocks.map((stock, i) => (
+              <div key={stock.ticker} className={`flex-1 p-4 overflow-y-auto lg:border-l ${i > 0 ? 'border-t lg:border-t-0 border-gray-800' : 'border-transparent'}`}>
+                {renderStockView(stock)}
+              </div>
+            ))
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-gray-600 text-lg">좌측에서 종목을 선택해주세요.</div>
+          )}
+        </div>
+        
+        {/* Spread Chart Area for Pairs Trading */}
+        {selectedStocks.length === 2 && (
+          <div className="h-[400px] border-t border-gray-800 p-4 shrink-0 flex flex-col">
+            <h3 className="text-lg font-bold text-gray-200 mb-2">페어트레이딩 (스프레드 및 회귀분석)</h3>
+            <div className="flex-1 relative">
+              {pairsLoading && <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/50 text-gray-400">회귀분석 및 스프레드 계산 중...</div>}
+              {pairsData && <PairsChartRenderer data={pairsData} t1={selectedStocks[0].name} t2={selectedStocks[1].name} />}
             </div>
-          ))
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-600 text-lg">좌측에서 종목을 선택해주세요.</div>
+          </div>
         )}
       </div>
     </div>
@@ -268,4 +323,100 @@ function ChartRenderer({ id, data, type, fundamentals }: { id: string, data: any
   if (!data || data.length === 0) return <div className="flex h-full items-center justify-center text-gray-600">데이터 없음</div>;
   
   return <div ref={containerRef} className="absolute inset-0" />;
+}
+
+function PairsChartRenderer({ data, t1, t2 }: { data: any, t1: string, t2: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || !data.chart_data || data.chart_data.length === 0) return;
+
+    const chartOptions = {
+      layout: { background: { type: ColorType.Solid, color: '#000000' }, textColor: '#d1d4dc' },
+      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+    };
+
+    const chart = createChart(containerRef.current, { 
+      ...chartOptions, 
+      width: containerRef.current.clientWidth, 
+      height: containerRef.current.clientHeight 
+    });
+
+    const spreadSeries = chart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
+    spreadSeries.setData(data.chart_data);
+
+    // Add Mean Line
+    spreadSeries.createPriceLine({
+      price: data.mean,
+      color: '#9E9E9E',
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'Mean',
+    });
+
+    // Add +1 Sigma
+    spreadSeries.createPriceLine({
+      price: data.sigma_1_up,
+      color: '#FBC02D',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: '+1σ',
+    });
+
+    // Add -1 Sigma
+    spreadSeries.createPriceLine({
+      price: data.sigma_1_down,
+      color: '#FBC02D',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: '-1σ',
+    });
+
+    // Add +2 Sigma
+    spreadSeries.createPriceLine({
+      price: data.sigma_2_up,
+      color: '#D32F2F',
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: '+2σ',
+    });
+
+    // Add -2 Sigma
+    spreadSeries.createPriceLine({
+      price: data.sigma_2_down,
+      color: '#1976D2',
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: '-2σ',
+    });
+
+    chart.timeScale().fitContent();
+
+    const handleResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.remove();
+    };
+  }, [data]);
+
+  if (data.error) return <div className="flex h-full items-center justify-center text-red-500">오류: {data.error}</div>;
+  if (!data.chart_data || data.chart_data.length === 0) return <div className="flex h-full items-center justify-center text-gray-600">데이터 없음</div>;
+  
+  return (
+    <>
+      <div className="absolute top-2 left-4 z-10 text-xs text-gray-400 bg-black/70 p-1 rounded">
+        <span className="font-bold text-gray-300">Regression:</span> {t1} = {data.beta.toFixed(3)} × {t2} + {data.alpha.toFixed(3)}
+      </div>
+      <div ref={containerRef} className="absolute inset-0 pt-8" />
+    </>
+  );
 }

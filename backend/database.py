@@ -55,6 +55,23 @@ def init_db():
         )
     ''')
     
+    # DART 재무 정보 테이블
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS dart_financials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            year TEXT,
+            quarter TEXT,
+            assets REAL,
+            equity REAL,
+            liabilities REAL,
+            revenue REAL,
+            operating_profit REAL,
+            net_profit REAL,
+            UNIQUE(ticker, year, quarter)
+        )
+    ''')
+    
     # 일자별 실현손익 테이블
     c.execute('''
         CREATE TABLE IF NOT EXISTS pnl_history (
@@ -169,6 +186,53 @@ def get_financials(ticker):
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO dart_financials (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, year, quarter) DO UPDATE SET
+            assets=excluded.assets,
+            equity=excluded.equity,
+            liabilities=excluded.liabilities,
+            revenue=excluded.revenue,
+            operating_profit=excluded.operating_profit,
+            net_profit=excluded.net_profit
+    ''', (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit))
+    conn.commit()
+    conn.close()
+
+def get_dart_financials(ticker):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM dart_financials WHERE ticker = ? ORDER BY year ASC, quarter ASC', (ticker,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+    
+def get_dart_screener_results(conditions: dict):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # 간단한 조건부 필터링 쿼리 예시
+    # 실제로는 조건을 바탕으로 동적 쿼리를 생성해야 합니다.
+    query = 'SELECT DISTINCT ticker FROM dart_financials WHERE 1=1'
+    params = []
+    
+    # 임시 조건 예시
+    if 'min_roe' in conditions:
+        # ROE = net_profit / equity * 100
+        query += ' AND (net_profit / equity * 100) >= ?'
+        params.append(conditions['min_roe'])
+        
+    c.execute(query, params)
+    rows = c.fetchall()
+    tickers = [row['ticker'] for row in rows]
+    conn.close()
+    
+    return tickers
 
 def add_realized_pnl(date: str, amount: float):
     conn = get_db_connection()

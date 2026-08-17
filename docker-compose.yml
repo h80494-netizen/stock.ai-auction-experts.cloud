@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stock_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/database.db:/app/database.db
+      - ./backend/market_data.db:/app/market_data.db
+      - ./backend/quant.db:/app/quant.db
+      - ./backend/stock_data.sqlite3:/app/stock_data.sqlite3
+      - ./backend/stocks.db:/app/stocks.db
+    environment:
+      - TZ=Asia/Seoul
+    
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stock_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - TZ=Asia/Seoul
+
+  nginx:
+    image: nginx:alpine
+    container_name: stock_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend

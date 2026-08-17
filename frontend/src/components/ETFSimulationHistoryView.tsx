@@ -43,7 +43,7 @@ const ETF_NAMES: Record<string, string> = {
   Waiting: "대기중"
 };
 
-export default function ETFSimulationHistoryView() {
+export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: { etfWeights?: any, setEtfWeights?: any }) {
   const [simData, setSimData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [criteria, setCriteria] = useState<string>('sharpe');
@@ -53,6 +53,12 @@ export default function ETFSimulationHistoryView() {
   const [models, setModels] = useState<any[]>([]);
   const [runningSimulator, setRunningSimulator] = useState(false);
   const [selectedModelIdx, setSelectedModelIdx] = useState<number>(-1);
+
+  useEffect(() => {
+    if (selectedModelIdx !== -1 && models[selectedModelIdx] && setEtfWeights) {
+      setEtfWeights(models[selectedModelIdx].weights);
+    }
+  }, [selectedModelIdx, models, setEtfWeights]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -69,6 +75,7 @@ export default function ETFSimulationHistoryView() {
       }
     };
     fetchData();
+    handleRunSimulator();
   }, [criteria]);
 
   const handleRunSimulator = async () => {
@@ -380,27 +387,53 @@ export default function ETFSimulationHistoryView() {
       </div>
 
       {/* 21개 모델 다중 차트 영역 */}
-      {(models.length > 0 || runningSimulator) && (
-        <div className="bg-gray-800 p-4 rounded-lg shadow-lg border border-teal-500/50 space-y-4">
+      <div className="bg-gray-800 p-4 rounded-lg shadow-lg border border-teal-500/50 space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-xl font-bold text-teal-300">📈 21개 모델 {period} 누적 수익률 비교 차트 (Base = 100)</h3>
             
             {!runningSimulator && filteredModels.length > 0 && (
-              <button 
-                onClick={() => {
-                  const sorted = [...filteredModels].sort((a, b) => {
-                    if (b.mdd !== a.mdd) return b.mdd - a.mdd; // Highest MDD (closest to 0)
-                    if (b.win_rate !== a.win_rate) return b.win_rate - a.win_rate; // Highest Win Rate
-                    return b.total_ret - a.total_ret; // Highest Return
-                  });
-                  const bestModelStr = sorted[0].model;
-                  const idx = models.findIndex(m => m.model === bestModelStr);
-                  if (idx !== -1) setSelectedModelIdx(idx);
-                }}
-                className="bg-pink-600 hover:bg-pink-500 text-white text-sm px-3 py-1.5 rounded shadow font-bold"
-              >
-                ✨ MDD 방어 최적 모델 추천
-              </button>
+              <div className="flex gap-2 items-center flex-wrap">
+                <div className="flex gap-2 items-center bg-gray-900 px-3 py-1.5 rounded border border-gray-700">
+                  <span className="text-sm text-gray-400">선택 모델 비중(1/5/20일):</span>
+                  <input type="text" readOnly value={selectedModelIdx !== -1 ? models[selectedModelIdx]?.weights?.w1 : '-'} className="w-8 bg-transparent text-white text-center font-bold outline-none" />
+                  <span className="text-gray-600">/</span>
+                  <input type="text" readOnly value={selectedModelIdx !== -1 ? models[selectedModelIdx]?.weights?.w5 : '-'} className="w-8 bg-transparent text-white text-center font-bold outline-none" />
+                  <span className="text-gray-600">/</span>
+                  <input type="text" readOnly value={selectedModelIdx !== -1 ? models[selectedModelIdx]?.weights?.w20 : '-'} className="w-8 bg-transparent text-white text-center font-bold outline-none" />
+                </div>
+                
+                <button 
+                  onClick={() => {
+                    const sorted = [...filteredModels].sort((a, b) => b.total_ret - a.total_ret); // Highest Return
+                    if(sorted.length > 0) {
+                      const bestModelStr = sorted[0].model;
+                      const idx = models.findIndex(m => m.model === bestModelStr);
+                      if (idx !== -1) setSelectedModelIdx(idx);
+                    }
+                  }}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-white text-sm px-3 py-1.5 rounded shadow font-bold"
+                >
+                  ✨ 최고 수익률 모델 선택
+                </button>
+
+                <button 
+                  onClick={() => {
+                    const sorted = [...filteredModels].sort((a, b) => {
+                      if (b.mdd !== a.mdd) return b.mdd - a.mdd; // Highest MDD (closest to 0)
+                      if (b.win_rate !== a.win_rate) return b.win_rate - a.win_rate; // Highest Win Rate
+                      return b.total_ret - a.total_ret; // Highest Return
+                    });
+                    if(sorted.length > 0) {
+                      const bestModelStr = sorted[0].model;
+                      const idx = models.findIndex(m => m.model === bestModelStr);
+                      if (idx !== -1) setSelectedModelIdx(idx);
+                    }
+                  }}
+                  className="bg-pink-600 hover:bg-pink-500 text-white text-sm px-3 py-1.5 rounded shadow font-bold"
+                >
+                  ✨ MDD 방어 최적 모델 추천
+                </button>
+              </div>
             )}
           </div>
           
@@ -425,7 +458,7 @@ export default function ETFSimulationHistoryView() {
                       dataKey={`model_${idx}`}
                       name={m.model}
                       stroke={getLineColor(idx)}
-                      strokeWidth={selectedModelIdx === idx ? 4 : 1.5}
+                      strokeWidth={selectedModelIdx === idx ? 5 : 1.5}
                       dot={false}
                       opacity={selectedModelIdx === -1 || selectedModelIdx === idx ? 1 : 0.2}
                       isAnimationActive={false}
@@ -434,7 +467,13 @@ export default function ETFSimulationHistoryView() {
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full w-full flex items-center justify-center text-gray-500">데이터가 없습니다.</div>
+              <div className="h-full w-full flex flex-col items-center justify-center text-gray-500">
+                <span className="text-3xl mb-3">🧪</span>
+                <p className="mb-2">우측 상단의 '21개 모델 시뮬레이션' 버튼을 클릭하여 시뮬레이션을 실행하세요.</p>
+                <button onClick={handleRunSimulator} className="mt-2 bg-teal-600 hover:bg-teal-500 text-white px-4 py-2 rounded shadow font-bold">
+                  시뮬레이션 시작하기
+                </button>
+              </div>
             )}
           </div>
           
@@ -481,7 +520,6 @@ export default function ETFSimulationHistoryView() {
             </table>
           </div>
         </div>
-      )}
 
       {/* 기본 단일 시뮬레이션 히스토리 표 */}
       <div className="bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden">

@@ -51,7 +51,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
   
   if (tvSymbol.startsWith("US:")) tvSymbol = tvSymbol.replace("US:", "");
 
-  const safeContainerId = `tv_${tvSymbol.replace(/[^a-zA-Z0-9]/g, '_')}_${interval}`;
+  const [containerId] = useState(() => `tv_${Math.random().toString(36).substring(7)}`);
 
   useEffect(() => {
     if (shouldRenderNaver) return; // Don't load TradingView script if using Naver image
@@ -75,7 +75,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
           "hide_top_toolbar": true,
           "hide_legend": true,
           "save_image": false,
-          "container_id": safeContainerId
+          "container_id": containerId
         });
       }
     };
@@ -91,7 +91,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
     } else {
       loadWidget();
     }
-  }, [symbolStr, interval, shouldRenderNaver, tvSymbol, safeContainerId]);
+  }, [symbolStr, interval, shouldRenderNaver, tvSymbol, containerId]);
 
   const intervals = [
     { label: '분봉', value: '1' },
@@ -152,7 +152,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
           </div>
         ) : (
           <div className="tradingview-widget-container" style={{ height: "100%", width: "100%" }}>
-            <div id={`tv_${tvSymbol.replace(/[^a-zA-Z0-9]/g, '_')}_${interval}`} ref={container} className="tradingview-widget-container__widget" style={{ height: "100%", width: "100%" }}></div>
+            <div id={containerId} ref={container} className="tradingview-widget-container__widget" style={{ height: "100%", width: "100%" }}></div>
           </div>
         )}
       </div>

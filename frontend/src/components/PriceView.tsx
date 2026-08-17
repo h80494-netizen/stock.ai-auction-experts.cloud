@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import KISChart from './KISChart';
+import { createChart, ColorType, LineSeries } from 'lightweight-charts';
 import AutocompleteSearch from './AutocompleteSearch';
 
 interface PriceViewProps {
@@ -18,6 +18,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
   const [chartData, setChartData] = useState<any[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
   const targetChartRef = useRef<HTMLDivElement>(null);
+  const chartInstanceRef = useRef<any>(null);
   const [indices, setIndices] = useState<any[]>([]);
   const [realtimeNews, setRealtimeNews] = useState<any[]>(news);
   const [fetchedAdditionalStocks, setFetchedAdditionalStocks] = useState<any[]>([]);
@@ -212,6 +213,50 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
     };
   }, [selectedStock, period]);
 
+  useEffect(() => {
+    if (!targetChartRef.current || chartData.length === 0) return;
+
+    if (chartInstanceRef.current) {
+      chartInstanceRef.current.remove();
+    }
+
+    const chartOptions = {
+      layout: { background: { type: ColorType.Solid, color: '#000000' }, textColor: '#d1d4dc' },
+      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+      width: targetChartRef.current.clientWidth,
+      height: targetChartRef.current.clientHeight,
+    };
+
+    targetChartRef.current.innerHTML = '';
+    const chart = createChart(targetChartRef.current, chartOptions);
+    chartInstanceRef.current = chart;
+    const priceSeries = chart.addSeries(LineSeries, { color: '#E0E0E0', lineWidth: 2 });
+    
+    const sortedData = [...chartData].sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
+    const uniqueData = sortedData.filter((item, index, arr) => index === 0 || item.time !== arr[index - 1].time);
+
+    const lineData = uniqueData.map((d: any) => ({
+      time: d.time,
+      value: d.close !== undefined ? d.close : (d.value !== undefined ? d.value : d.open)
+    }));
+    priceSeries.setData(lineData);
+    chart.timeScale().fitContent();
+
+    const handleResize = () => {
+      if (targetChartRef.current && chartInstanceRef.current) {
+        chartInstanceRef.current.applyOptions({ width: targetChartRef.current.clientWidth });
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (chartInstanceRef.current) {
+        chartInstanceRef.current.remove();
+        chartInstanceRef.current = null;
+      }
+    };
+  }, [chartData]);
 
 
   return (
@@ -415,13 +460,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
                   {loadingChart ? (
                     <div className="text-gray-500">차트 데이터 로딩 중...</div>
                   ) : chartData.length > 0 ? (
-                    <KISChart 
-                      data={chartData} 
-                      symbol={selectedStock.name} 
-                      fundamentals={fundamentals} 
-                      currentPrice={fundamentals?.currentPrice || selectedStock.price} 
-                      changePct={selectedStock.changePct} 
-                    />
+                    <div ref={targetChartRef} className="w-full h-full absolute inset-0" />
                   ) : (
                     <div className="text-gray-500">데이터가 없습니다.</div>
                   )}

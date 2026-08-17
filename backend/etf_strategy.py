@@ -5,8 +5,11 @@ import time
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-FINNHUB_API_KEY = "d9s7iihr01qopv4616vgd9s7iihr01qopv461700"
+load_dotenv()
+
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 DB_PATH = os.path.join(DATA_DIR, 'etf_strategy.db')
@@ -45,6 +48,7 @@ def update_etf_data():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
+    success_count = 0
     for ticker in ETF_TARGETS.keys():
         try:
             ticker_obj = yf.Ticker(ticker)
@@ -58,6 +62,7 @@ def update_etf_data():
                         INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
                         VALUES (?, ?, ?)
                     ''', (ticker, date_str, float(close_val)))
+                success_count += 1
             time.sleep(0.5)
         except Exception as e:
             print(f"Failed to fetch ETF data for {ticker} from yfinance: {e}")
@@ -65,8 +70,9 @@ def update_etf_data():
     conn.commit()
     conn.close()
     
-    with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
-        f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    if success_count > 0:
+        with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
+            f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 def check_and_update_etf_data():
     last_update_file = os.path.join(DATA_DIR, 'last_update.txt')
@@ -154,27 +160,43 @@ def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
     return results
 
-def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def get_cached_etf_pivot(criteria_dummy=None):
     check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
-    
     try:
         df = pd.read_sql_query("SELECT * FROM etf_daily_prices ORDER BY date ASC", conn)
     except:
         conn.close()
-        return {}
+        return None
     conn.close()
     
     if df.empty:
-        return {}
+        return None
         
     df = df[df['ticker'].isin(ETF_TARGETS.keys())]
-        
-    # Pivot so index=date, columns=ticker, values=close
     pivot = df.pivot(index='date', columns='ticker', values='close')
     pivot = pivot.ffill().dropna()
+    return pivot
+
+def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
+    check_and_update_etf_data()
     
+    # Use last_update time as cache key so we don't cache stale data
+    try:
+        with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
+            cache_key = f.read().strip()
+    except:
+        cache_key = "0"
+        
+    pivot = get_cached_etf_pivot(cache_key)
+    
+    if pivot is None:
+        return {}
+        
     dates = pivot.index.tolist()
     if len(dates) < 6:
         return {}
@@ -188,7 +210,15 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
         base_price = float(pivot[ticker].iloc[0])
         for i, date in enumerate(dates):
             etf_normalized[ticker][i] = float((pivot[ticker].iloc[i] / base_price) * 100.0)
-            
+    ret_1d_df = pivot.pct_change(1) * 100
+    ret_5d_df = pivot.pct_change(5) * 100
+    ret_20d_df = pivot.pct_change(20) * 100
+    
+    if criteria == "sharpe":
+        # 21-day rolling standard deviation of daily returns
+        daily_rets = pivot.pct_change() * 100
+        rolling_std_df = daily_rets.rolling(window=21).std()
+    
     # Simulation Logic
     current_target = None
     
@@ -204,21 +234,18 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
         
         for ticker in pivot.columns:
             try:
-                curr_p = pivot[ticker].iloc[i]
-                prev_1d_p = pivot[ticker].iloc[i-1]
-                prev_5d_p = pivot[ticker].iloc[i-5]
-                prev_20d_p = pivot[ticker].iloc[i-20]
+                r1 = ret_1d_df[ticker].iloc[i]
+                r5 = ret_5d_df[ticker].iloc[i]
+                r20 = ret_20d_df[ticker].iloc[i]
                 
-                ret_1d = ((curr_p - prev_1d_p) / prev_1d_p) * 100
-                ret_5d = ((curr_p - prev_5d_p) / prev_5d_p) * 100
-                ret_20d = ((curr_p - prev_20d_p) / prev_20d_p) * 100
-                score = (ret_1d * w1) + (ret_5d * w5) + (ret_20d * w20)
-                
+                if pd.isna(r1) or pd.isna(r5) or pd.isna(r20):
+                    continue
+                    
+                score = (r1 * w1) + (r5 * w5) + (r20 * w20)
                 final_score = score
+                
                 if criteria == "sharpe":
-                    slice_20 = pivot[ticker].iloc[i-20:i+1]
-                    daily_rets = slice_20.pct_change() * 100
-                    std_dev = daily_rets.std()
+                    std_dev = rolling_std_df[ticker].iloc[i]
                     if not pd.isna(std_dev) and std_dev > 0:
                         final_score = score / std_dev
                 
