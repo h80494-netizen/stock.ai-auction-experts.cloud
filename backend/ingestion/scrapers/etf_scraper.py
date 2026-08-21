@@ -6,8 +6,9 @@ class EtfScraper:
     @staticmethod
     def get_etf_list():
         url = "https://finance.naver.com/api/sise/etfItemList.nhn"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         try:
-            res = requests.get(url, timeout=5)
+            res = requests.get(url, headers=headers, timeout=5)
             data = res.json()
             if data.get("resultCode") == "success":
                 # etfTabCode: 1(국내시장지수), 2(국내업종/테마), 3(국내파생), 4(해외주식), 5(원자재), 6(채권), 7(기타)
@@ -19,8 +20,9 @@ class EtfScraper:
     @staticmethod
     def get_etn_list():
         url = "https://finance.naver.com/api/sise/etnItemList.nhn"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         try:
-            res = requests.get(url, timeout=5)
+            res = requests.get(url, headers=headers, timeout=5)
             data = res.json()
             if data.get("resultCode") == "success":
                 return data["result"]["etnItemList"]

@@ -131,9 +131,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
 
     const fetchData = () => {
       if (!selectedStock) return;
-      if (!pollInterval) setLoadingChart(true);
-      
-      const isGlobal = selectedStock.categories?.some((c: string) => c.includes("Global Major") || (c.includes("Top 50") && !c.includes("KR")));
+      const isGlobal = selectedStock.categories?.some((c: string) => c.includes("Global Major") || c.includes("Global Search") || (c.includes("Top 50") && !c.includes("KR")));
       let cleanTicker = selectedStock.ticker;
       let excd = "";
       
@@ -166,10 +164,10 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
       };
 
       Promise.all([
-        safeFetch(`/api/kis/chart/${cleanTicker}${query}`),
-        safeFetch(`/api/fundamentals/${selectedStock.ticker}`),
-        safeFetch(`/api/stock_news/${cleanTicker}?name=${encodeURIComponent(selectedStock.name)}&market=${market}`),
-        safeFetch(`/api/stock/${cleanTicker}/summary`)
+        safeFetch(`/api/kis/chart/${cleanTicker}${query}`).catch(e => { console.error("Chart fetch error", e); return []; }),
+        safeFetch(`/api/fundamentals/${selectedStock.ticker}`).catch(e => { console.error("Fund fetch error", e); return { error: true }; }),
+        safeFetch(`/api/stock_news/${cleanTicker}?name=${encodeURIComponent(selectedStock.name)}&market=${market}`).catch(e => { console.error("News fetch error", e); return []; }),
+        safeFetch(`/api/stock/${cleanTicker}/summary`).catch(e => { console.error("Summary fetch error", e); return null; })
       ])
         .then(([chartDataRes, fundData, newsData, summaryData]) => {
           if (!isMounted) return;

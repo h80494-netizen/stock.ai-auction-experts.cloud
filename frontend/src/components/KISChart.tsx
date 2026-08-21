@@ -56,7 +56,52 @@ function KISChart({ data, symbol, fundamentals, currentPrice, changePct }: { dat
         
         if (uniqueData.length > 0) {
           candlestickSeries.setData(uniqueData);
-          // Target overlays removed per user request
+          
+          if (fundamentals && fundamentals.target_history && fundamentals.target_history.length > 0) {
+            const availableTimes = uniqueData.map(d => d.time);
+            const targetLineData: any[] = [];
+            
+            // Map target history to specific times and create a line series
+            fundamentals.target_history.forEach((marker: any) => {
+              if (marker.value && !isNaN(marker.value)) {
+                let matchTime = null;
+                const exactMatch = availableTimes.find(t => t === marker.time);
+                if (exactMatch) {
+                   matchTime = exactMatch;
+                } else {
+                   const targetTime = typeof marker.time === 'string' ? new Date(marker.time).getTime() : marker.time * 1000;
+                   let closestTime = null;
+                   for (let i = availableTimes.length - 1; i >= 0; i--) {
+                     const dataTime = typeof availableTimes[i] === 'string' ? new Date(availableTimes[i]).getTime() : availableTimes[i] * 1000;
+                     if (dataTime <= targetTime) {
+                        closestTime = availableTimes[i];
+                        break;
+                     }
+                   }
+                   if (closestTime) matchTime = closestTime;
+                }
+                
+                if (matchTime) {
+                   // Ensure no duplicate times for line series
+                   if (!targetLineData.find(d => d.time === matchTime)) {
+                      targetLineData.push({ time: matchTime, value: marker.value });
+                   }
+                }
+              }
+            });
+            
+            if (targetLineData.length > 0) {
+               targetLineData.sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
+               // Create Line Series for Target Prices
+               const targetSeries = chart.addLineSeries({
+                   color: '#ff9800',
+                   lineWidth: 2,
+                   lineStyle: 1, // Dotted
+                   title: '목표가',
+               });
+               targetSeries.setData(targetLineData);
+            }
+          }
         }
       } catch (err) {
         console.error("Chart data formatting error:", err);

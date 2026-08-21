@@ -372,9 +372,25 @@ def api_get_etf_us_sectors():
                 
             return {"sectors": {"categories": merged_categories}}
         else:
-            return {"error": f"HTTP {res.status_code}"}
+            raise Exception(f"HTTP {res.status_code}")
     except Exception as e:
-        return {"error": str(e)}
+        print(f"Fallback for US ETF sectors due to error: {e}")
+        # Fallback static list of popular US ETFs
+        fallback_categories = [
+            {"label": "Technology", "symbols": [{"symbol": "XLK", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VGT", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "QQQ", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Financials", "symbols": [{"symbol": "XLF", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VFH", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Healthcare", "symbols": [{"symbol": "XLV", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VHT", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Energy", "symbols": [{"symbol": "XLE", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VDE", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Consumer Discretionary", "symbols": [{"symbol": "XLY", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VCR", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Consumer Staples", "symbols": [{"symbol": "XLP", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VDC", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Industrials", "symbols": [{"symbol": "XLI", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VIS", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Utilities", "symbols": [{"symbol": "XLU", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VPU", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Real Estate", "symbols": [{"symbol": "XLRE", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VNQ", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Materials", "symbols": [{"symbol": "XLB", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VAW", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Communication Services", "symbols": [{"symbol": "XLC", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "VOX", "lastPriceValue": 0, "changeRate": 0}]},
+            {"label": "Commodities", "symbols": [{"symbol": "GLD", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "SLV", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "USO", "lastPriceValue": 0, "changeRate": 0}, {"symbol": "PDBC", "lastPriceValue": 0, "changeRate": 0}]}
+        ]
+        return {"sectors": {"categories": fallback_categories}}
 
 @app.get("/api/etf/us/{ticker}/details")
 def api_get_etf_us_details(ticker: str):
@@ -1547,16 +1563,15 @@ def api_get_fundamentals(ticker: str):
         targetMean = 0
         is_krx = yf_ticker.endswith(".KS") or yf_ticker.endswith(".KQ")
         
-        if not is_krx:
-            try:
-                def get_info():
-                    from utils.yf_util import get_yf_ticker
-                    return get_yf_ticker(yf_ticker).info
-                future = yf_executor.submit(get_info)
-                info = future.result(timeout=3)
-                targetMean = info.get("targetMeanPrice", 0) or 0
-            except Exception as e:
-                print("yfinance info fetch error/timeout:", e)
+        try:
+            def get_info():
+                from utils.yf_util import get_yf_ticker
+                return get_yf_ticker(yf_ticker).info
+            future = yf_executor.submit(get_info)
+            info = future.result(timeout=3)
+            targetMean = info.get("targetMeanPrice", 0) or 0
+        except Exception as e:
+            print("yfinance info fetch error/timeout:", e)
         
         # Generate target price history for chart markers
         target_history = []
@@ -1633,7 +1648,12 @@ def api_get_fundamentals(ticker: str):
         if not is_krx:
             try:
                 if not eps_trend:
-                    financials = yf.Ticker(yf_ticker).financials
+                    def get_financials():
+                        return yf.Ticker(yf_ticker).financials
+                    
+                    future = yf_executor.submit(get_financials)
+                    financials = future.result(timeout=3)
+                    
                     if not financials.empty:
                         for idx in financials.index:
                             if 'EPS' in idx or 'Eps' in idx or 'Basic EPS' in idx or 'Diluted EPS' in idx:
@@ -1644,7 +1664,7 @@ def api_get_fundamentals(ticker: str):
                                 break
                         eps_trend.sort(key=lambda x: x["time"])
             except Exception as e:
-                print("Error fetching financials:", e)
+                print("Error fetching financials (timeout):", e)
 
         # Relative Strength Chart (6 months) & Price Chart (1 month)
         rs_chart = []
@@ -1748,9 +1768,22 @@ def api_get_fundamentals(ticker: str):
         except:
             pass
 
+        # Add DB Fallback for name and price
+        db_fallback_name = None
+        db_fallback_price = 0
+        try:
+            from database import get_stock
+            clean_code = yf_ticker.replace('.KS', '').replace('.KQ', '')
+            db_s = get_stock(clean_code)
+            if db_s:
+                db_fallback_name = db_s.get('name')
+                db_fallback_price = db_s.get('price') or 0
+        except:
+            pass
+
         return {
             "ticker": ticker,
-            "name": info.get("shortName", yf_ticker),
+            "name": info.get("shortName") or db_fallback_name or yf_ticker,
             "par_value": nv_fund.get("par_value", 0) if nv_fund else 0,
             "per": nv_fund.get("per", "N/A") if nv_fund and nv_fund.get("per") != "N/A" else round(info.get("trailingPE", 0) or 0, 2),
             "per_next": nv_fund.get("per_next", "N/A"),
@@ -1766,7 +1799,7 @@ def api_get_fundamentals(ticker: str):
             "marketCap": info.get("marketCap") or (krx_price * nv_fund.get("shares", 0) if krx_price else 0),
             "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", 0),
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", 0),
-            "currentPrice": info.get("currentPrice") or info.get("previousClose") or krx_price,
+            "currentPrice": info.get("currentPrice") or info.get("previousClose") or krx_price or db_fallback_price,
             "analyst_count": info.get("numberOfAnalystOpinions", 0),
             "price_chart": price_chart,
             "rs_chart": rs_chart,
@@ -1776,7 +1809,7 @@ def api_get_fundamentals(ticker: str):
             "shares": nv_fund.get("shares", info.get("sharesOutstanding", 0)),
             "target_history": target_history,
             "financials": financials,
-            "price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or krx_price,
+            "price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or krx_price or db_fallback_price,
             "change": info.get("regularMarketChange", 0) or (info.get("currentPrice", krx_price) - info.get("previousClose", krx_price) if info.get("currentPrice", krx_price) and info.get("previousClose", krx_price) else 0),
             "changePct": info.get("regularMarketChangePercent", 0) or 0,
             "currency": info.get("currency", "KRW" if is_krx else "USD")

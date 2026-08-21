@@ -16,7 +16,7 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
   
   // For KRX, TradingView free widget does not support intraday ('1' min) charts and falls back to a US stock.
   // We must use Naver Image automatically if interval is '1' for KRX stocks.
-  const [useNaverForKrx, setUseNaverForKrx] = useState<boolean>(false);
+  const [useNaverForKrx, setUseNaverForKrx] = useState<boolean>(true);
 
   const shouldRenderNaver = isKrx && useNaverForKrx;
 
@@ -35,11 +35,12 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
   let tvSymbol = symbolStr.toUpperCase();
   if (tvSymbol.endsWith(".KS") || tvSymbol.endsWith(".KQ")) {
     tvSymbol = "KRX:" + tvSymbol.split(".")[0];
+  } else if (/^\d{6}$/.test(tvSymbol)) {
+    // Default 6-digit tickers to KRX
+    tvSymbol = "KRX:" + tvSymbol;
   } else if (/^\d{4}$/.test(tvSymbol)) {
     // TradingView generally uses TSE for Tokyo Stock Exchange, but it can be ambiguous
     tvSymbol = "TSE:" + tvSymbol;
-  } else if (/^\d{6}$/.test(tvSymbol)) {
-    tvSymbol = tvSymbol.startsWith('6') ? "SSE:" + tvSymbol : "SZSE:" + tvSymbol;
   } else if (tvSymbol.endsWith(".SS")) tvSymbol = "SSE:" + tvSymbol.replace(".SS", "");
   else if (tvSymbol.endsWith(".SZ")) tvSymbol = "SZSE:" + tvSymbol.replace(".SZ", "");
   else if (tvSymbol.endsWith(".T")) tvSymbol = "TSE:" + tvSymbol.replace(".T", ""); // Tokyo Stock Exchange
@@ -86,10 +87,22 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
       script.src = "https://s3.tradingview.com/tv.js";
       script.type = "text/javascript";
       script.async = true;
-      script.onload = loadWidget;
+      script.onload = () => {
+         window.dispatchEvent(new Event('tradingview-loaded'));
+         loadWidget();
+      };
       document.head.appendChild(script);
     } else {
-      loadWidget();
+      if (typeof (window as any).TradingView !== 'undefined') {
+        loadWidget();
+      } else {
+        const handleScriptLoad = () => {
+           loadWidget();
+           window.removeEventListener('tradingview-loaded', handleScriptLoad);
+        };
+        window.addEventListener('tradingview-loaded', handleScriptLoad);
+        return () => window.removeEventListener('tradingview-loaded', handleScriptLoad);
+      }
     }
   }, [symbolStr, interval, shouldRenderNaver, tvSymbol, containerId]);
 
