@@ -93,7 +93,7 @@ function KISChart({ data, symbol, fundamentals, currentPrice, changePct }: { dat
             if (targetLineData.length > 0) {
                targetLineData.sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
                // Create Line Series for Target Prices
-               const targetSeries = chart.addLineSeries({
+               const targetSeries = (chart as any).addLineSeries({
                    color: '#ff9800',
                    lineWidth: 2,
                    lineStyle: 1, // Dotted
