@@ -11,3 +11,5 @@ pandas
 apscheduler
 matplotlib
 openpyxl
+dartlab
+feedparser

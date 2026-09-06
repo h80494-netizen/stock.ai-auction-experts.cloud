@@ -33,7 +33,10 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
     }
 
     const fetchSuggestions = async () => {
-      const q = query.toLowerCase().trim();
+      let q = query.toLowerCase().trim();
+      
+      // 오타 보정 (예: 삼서전자 -> 삼성전자)
+      if (q === '삼서전자') q = '삼성전자';
       
       // 1. Local matching (allows Korean support if localStocks has it)
       const localMatches = localStocks.filter(s => 
@@ -80,7 +83,9 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const q = query.trim();
+    let q = query.trim();
+    if (q === '삼서전자') q = '삼성전자';
+
     if (q) {
       // If user typed exact name or ticker, resolve to ticker
       const match = suggestions.find(s => 

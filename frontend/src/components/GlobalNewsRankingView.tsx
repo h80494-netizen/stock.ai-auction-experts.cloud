@@ -110,7 +110,12 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
               <div className="flex justify-between items-center mb-3">
                 <div 
                     className="flex items-center gap-3 cursor-pointer hover:bg-gray-800/50 p-1 rounded transition-colors flex-1"
-                    onClick={() => onNavigateToSearch && onNavigateToSearch(stock.ticker)}
+                    onClick={() => {
+                      if (onNavigateToSearch) {
+                        const searchTicker = stock.ticker.endsWith('.KS') || stock.ticker.endsWith('.KQ') ? stock.ticker.split('.')[0] : stock.ticker;
+                        onNavigateToSearch(searchTicker);
+                      }
+                    }}
                   >
                   <div className={`w-10 h-10 flex items-center justify-center rounded font-black text-xl ${idx < 3 ? 'bg-yellow-600/20 text-yellow-500 border border-yellow-600/50' : 'bg-gray-800 text-gray-400'}`}>
                     {idx + 1}
@@ -155,7 +160,8 @@ export default function GlobalNewsRankingView({ onNavigateToSearch }: GlobalNews
                           onClick={(e) => {
                             if (onNavigateToSearch) {
                               e.preventDefault();
-                              onNavigateToSearch(stock.ticker);
+                              const searchTicker = stock.ticker.endsWith('.KS') || stock.ticker.endsWith('.KQ') ? stock.ticker.split('.')[0] : stock.ticker;
+                              onNavigateToSearch(searchTicker);
                             }
                           }}
                           className="font-bold text-blue-400 hover:underline flex-1 pr-4 text-left cursor-pointer"

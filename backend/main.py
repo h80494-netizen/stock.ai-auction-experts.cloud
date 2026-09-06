@@ -119,6 +119,17 @@ def get_dart_fundamentals(ticker: str):
     return {"ticker": clean_ticker, "financials": financials}
 
 
+@app.get("/api/dartlab/financials/{ticker}")
+def get_dartlab_financial_analysis(ticker: str):
+    try:
+        import dartlab_service
+        data = dartlab_service.get_dartlab_analysis(ticker)
+        return {"success": True, "data": data}
+    except Exception as e:
+        logging.error(f"Error fetching DartLab data for {ticker}: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/api/db/search/{query}")
 def search_db_stock(query: str):
     conn = db.get_db_connection()

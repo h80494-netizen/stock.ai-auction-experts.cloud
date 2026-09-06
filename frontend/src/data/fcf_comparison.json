@@ -1,0 +1,22 @@
+[
+  {
+    "period": "2022",
+    "samsung_krw": 9054614000000,
+    "nvidia_usd": 3808000000
+  },
+  {
+    "period": "2023",
+    "samsung_krw": -16396740000000,
+    "nvidia_usd": 27021000000
+  },
+  {
+    "period": "2024",
+    "samsung_krw": 19240982000000,
+    "nvidia_usd": 60853000000
+  },
+  {
+    "period": "2025",
+    "samsung_krw": 33161999000000,
+    "nvidia_usd": 96676000000
+  }
+]

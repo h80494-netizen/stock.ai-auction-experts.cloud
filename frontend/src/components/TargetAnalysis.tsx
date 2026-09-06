@@ -324,9 +324,6 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
     };
   }, [selectedStock]);
 
-    // KISChart is used now, no need for manual lightweight-charts initialization here
-  }, [chartData, selectedStock]);
-
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
       {/* Left Sidebar: Data Table */}

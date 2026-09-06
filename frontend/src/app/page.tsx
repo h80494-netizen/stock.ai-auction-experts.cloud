@@ -18,9 +18,11 @@ import GlobalNewsRankingView from '@/components/GlobalNewsRankingView';
 import ETFStrategyView from '@/components/ETFStrategyView';
 import ETFSimulationHistoryView from '@/components/ETFSimulationHistoryView';
 import TetrisScreenerView from '@/components/TetrisScreenerView';
+import FCFComparisonView from '@/components/FCFComparisonView';
+import DartLabFinancialView from '@/components/DartLabFinancialView';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
@@ -202,6 +204,16 @@ export default function Home() {
             시세/차트 (Prices)
           </button>
           <button
+            onClick={() => setActiveTab('dartlab')}
+            className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'dartlab' 
+                ? 'bg-indigo-900/40 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-900/30' 
+                : 'bg-transparent border-transparent text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            📊 재무분석 (DartLab)
+          </button>
+          <button
             onClick={() => setActiveTab('scanner')}
             className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
               activeTab === 'scanner' 
@@ -273,6 +285,16 @@ export default function Home() {
             경쟁업체 분석 (Competitors)
           </button>
           <button
+            onClick={() => setActiveTab('fcf_compare')}
+            className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'fcf_compare' 
+                ? 'bg-emerald-900/30 border-emerald-700 text-emerald-400' 
+                : 'bg-transparent border-transparent text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            FCF 비교 (SEC vs NVDA)
+          </button>
+          <button
             onClick={() => setActiveTab('global')}
             className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
               activeTab === 'global' 
@@ -327,6 +349,10 @@ export default function Home() {
           <GlobalNewsRankingView onNavigateToSearch={(ticker) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} />
         ) : activeTab === 'tetris' ? (
           <TetrisScreenerView setGlobalSearchTicker={(ticker: string) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} globalStocks={globalData?.stocks || []} stocks={stocks} />
+        ) : activeTab === 'fcf_compare' ? (
+          <FCFComparisonView />
+        ) : activeTab === 'dartlab' ? (
+          <DartLabFinancialView initialTicker={globalSearchTicker || "005930"} onSelectTicker={(tk) => setGlobalSearchTicker(tk)} />
         ) : (
           <HeatmapView />
         )}
