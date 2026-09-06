@@ -763,29 +763,88 @@ def api_kis_chart(ticker: str, period: str = "D", is_overseas: bool = False, exc
 
 @app.get("/api/stock/autocomplete")
 def autocomplete_global_stock(q: str):
+    import sqlite3
     import requests
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=10"
-        res = requests.get(url, headers=headers, timeout=5)
-        data = res.json()
+    
+    clean_q = (q or "").strip()
+    if not clean_q:
+        return []
         
-        results = []
-        quotes = data.get("quotes", [])
-        for quote in quotes:
-            symbol = quote.get("symbol")
-            shortname = quote.get("shortname", quote.get("longname", ""))
-            exch = quote.get("exchDisp", "")
-            if symbol:
+    results = []
+    seen = set()
+    
+    # 1. 국내 상장사 로컬 SQLite DB 우선 검색 (초고속 1~2ms)
+    try:
+        db_path = os.path.join(os.path.dirname(__file__), "stock_data.sqlite3")
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            like_pattern = f"%{clean_q}%"
+            starts_pattern = f"{clean_q}%"
+            
+            cur.execute("""
+                SELECT ticker, name, market_cap 
+                FROM stocks 
+                WHERE name LIKE ? OR ticker LIKE ?
+                ORDER BY 
+                    CASE 
+                        WHEN ticker = ? THEN 1
+                        WHEN name = ? THEN 2
+                        WHEN ticker LIKE ? THEN 3
+                        WHEN name LIKE ? THEN 4
+                        ELSE 5
+                    END,
+                    market_cap DESC
+                LIMIT 20
+            """, (like_pattern, like_pattern, clean_q, clean_q, starts_pattern, starts_pattern))
+            
+            for row in cur.fetchall():
+                raw_ticker, name, mcap = row[0], row[1], row[2]
+                pure_ticker = str(raw_ticker).replace("KRX:", "").replace("KOSPI:", "").replace("KOSDAQ:", "").strip()
+                if not pure_ticker or pure_ticker in seen:
+                    continue
+                seen.add(pure_ticker)
+                
+                exch = "KOSPI" if pure_ticker.isdigit() and len(pure_ticker) == 6 else "KRX"
                 results.append({
-                    "ticker": symbol,
-                    "name": shortname,
+                    "ticker": pure_ticker,
+                    "name": name or pure_ticker,
                     "exchange": exch
                 })
-        return results
+                if len(results) >= 10:
+                    break
+            conn.close()
     except Exception as e:
-        print("Autocomplete error:", e)
-        return []
+        print("Local stock autocomplete error:", e)
+        
+    # 2. 글로벌 해외 주식 또는 추가 종목 병합 (Yahoo Finance)
+    if len(results) < 8:
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={requests.utils.quote(clean_q)}&quotesCount=8"
+            res = requests.get(url, headers=headers, timeout=2.5)
+            if res.status_code == 200:
+                data = res.json()
+                quotes = data.get("quotes", [])
+                for quote in quotes:
+                    symbol = quote.get("symbol")
+                    shortname = quote.get("shortname", quote.get("longname", ""))
+                    exch = quote.get("exchDisp", "")
+                    if symbol:
+                        clean_sym = symbol.split(".")[0] if symbol.endswith((".KS", ".KQ")) else symbol
+                        if symbol not in seen and clean_sym not in seen:
+                            seen.add(symbol)
+                            results.append({
+                                "ticker": clean_sym if symbol.endswith((".KS", ".KQ")) else symbol,
+                                "name": shortname or symbol,
+                                "exchange": exch or "Global"
+                            })
+                    if len(results) >= 12:
+                        break
+        except Exception as e:
+            print("Global autocomplete error:", e)
+            
+    return results[:12]
 
 @app.get("/api/stock/search/{ticker}")
 def search_global_stock(ticker: str):

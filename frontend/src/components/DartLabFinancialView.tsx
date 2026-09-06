@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -34,6 +34,12 @@ const TOP_STOCKS = [
   { ticker: '373220', name: 'LG에너지솔루션' }
 ];
 
+interface StockSuggestion {
+  ticker: string;
+  name: string;
+  exchange: string;
+}
+
 export default function DartLabFinancialView({ initialTicker = '005930', onSelectTicker }: DartLabFinancialViewProps) {
   const [ticker, setTicker] = useState<string>(initialTicker);
   const [searchInput, setSearchInput] = useState<string>(initialTicker);
@@ -41,6 +47,13 @@ export default function DartLabFinancialView({ initialTicker = '005930', onSelec
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>('');
   
+  // Autocomplete states
+  const [suggestions, setSuggestions] = useState<StockSuggestion[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+  const [showDropdown, setShowDropdown] = useState<boolean>(false);
+  const [selectedIndex, setSelectedIndex] = useState<number>(-1);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+
   // Sub-tab selection: 'statements' | 'ratios' | 'credit' | 'valuation' | 'story' | 'filings'
   const [activeTab, setActiveTab] = useState<'statements' | 'ratios' | 'credit' | 'valuation' | 'story' | 'filings'>('statements');
   const [statementType, setStatementType] = useState<'is' | 'bs' | 'cf'>('is');
@@ -52,6 +65,53 @@ export default function DartLabFinancialView({ initialTicker = '005930', onSelec
       setSearchInput(initialTicker);
     }
   }, [initialTicker]);
+
+  // Click outside listener to close dropdown
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(event.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Debounced autocomplete fetch
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) {
+      setSuggestions([]);
+      setShowDropdown(false);
+      return;
+    }
+
+    let isSubscribed = true;
+    const timer = setTimeout(async () => {
+      try {
+        setIsSearching(true);
+        const res = await fetch(`/api/stock/autocomplete?q=${encodeURIComponent(trimmed)}`);
+        if (!res.ok) throw new Error('Search failed');
+        const list = await res.json();
+        if (isSubscribed) {
+          setSuggestions(Array.isArray(list) ? list : []);
+          setSelectedIndex(-1);
+          setShowDropdown(true);
+        }
+      } catch (err) {
+        if (isSubscribed) setSuggestions([]);
+      } finally {
+        if (isSubscribed) setIsSearching(false);
+      }
+    }, 200);
+
+    return () => {
+      isSubscribed = false;
+      clearTimeout(timer);
+    };
+  }, [searchInput]);
 
   useEffect(() => {
     let isMounted = true;
@@ -79,19 +139,52 @@ export default function DartLabFinancialView({ initialTicker = '005930', onSelec
     return () => { isMounted = false; };
   }, [ticker]);
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
+  const selectStock = (targetTicker: string, targetName?: string) => {
+    const clean = targetTicker.trim().toUpperCase();
+    setTicker(clean);
+    setSearchInput(clean);
+    setShowDropdown(false);
+    setSelectedIndex(-1);
+    if (onSelectTicker) onSelectTicker(clean);
+  };
+
+  const handleSearch = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (selectedIndex >= 0 && suggestions[selectedIndex]) {
+      selectStock(suggestions[selectedIndex].ticker, suggestions[selectedIndex].name);
+      return;
+    }
     if (searchInput.trim()) {
-      const clean = searchInput.trim().toUpperCase();
-      setTicker(clean);
-      if (onSelectTicker) onSelectTicker(clean);
+      selectStock(searchInput);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showDropdown || suggestions.length === 0) {
+      if (e.key === 'Enter') handleSearch(e);
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev <= 0 ? suggestions.length - 1 : prev - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (selectedIndex >= 0 && suggestions[selectedIndex]) {
+        selectStock(suggestions[selectedIndex].ticker, suggestions[selectedIndex].name);
+      } else {
+        handleSearch(e);
+      }
+    } else if (e.key === 'Escape') {
+      setShowDropdown(false);
     }
   };
 
   const selectQuickStock = (tk: string) => {
-    setSearchInput(tk);
-    setTicker(tk);
-    if (onSelectTicker) onSelectTicker(tk);
+    selectStock(tk);
   };
 
   // Format monetary value
@@ -183,17 +276,99 @@ export default function DartLabFinancialView({ initialTicker = '005930', onSelec
             </h2>
           </div>
 
-          {/* Search Box */}
-          <form onSubmit={handleSearch} className="flex items-center gap-2 w-full md:w-auto">
-            <div className="relative w-full md:w-64">
-              <input
-                type="text"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="종목코드/티커 (예: 005930)"
-                className="w-full bg-[#121826] border border-gray-700 rounded-lg px-3.5 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 font-mono transition-all"
-              />
+          {/* Search Box with Autocomplete Dropdown */}
+          <form onSubmit={handleSearch} className="flex items-center gap-2 w-full md:w-auto relative">
+            <div ref={searchContainerRef} className="relative w-full md:w-80">
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  onFocus={() => {
+                    if (suggestions.length > 0) setShowDropdown(true);
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder="종목명 또는 코드 검색 (예: 삼성, 005930)"
+                  className="w-full bg-[#121826] border border-gray-700 hover:border-gray-600 focus:border-indigo-500 rounded-lg pl-3.5 pr-8 py-2 text-sm text-white placeholder-gray-500 focus:outline-none transition-all shadow-inner"
+                />
+                {isSearching ? (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <svg className="animate-spin h-4 w-4 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                    </svg>
+                  </div>
+                ) : searchInput ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchInput('');
+                      setSuggestions([]);
+                      setShowDropdown(false);
+                    }}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white text-xs px-1 rounded hover:bg-gray-800"
+                  >
+                    ✕
+                  </button>
+                ) : null}
+              </div>
+
+              {/* Autocomplete Dropdown List */}
+              {showDropdown && (
+                <div className="absolute left-0 right-0 top-full mt-1.5 z-50 bg-[#0d1424]/95 backdrop-blur-xl border border-indigo-500/30 rounded-xl shadow-2xl overflow-hidden divide-y divide-gray-800/80 animate-in fade-in slide-in-from-top-1 duration-150">
+                  <div className="px-3 py-1.5 bg-gray-900/80 flex items-center justify-between text-[11px] text-gray-400 font-medium">
+                    <span>후보 종목 리스트 ({suggestions.length}건)</span>
+                    <span className="text-[10px] text-gray-500">↑↓ 이동 · Enter 선택</span>
+                  </div>
+
+                  {suggestions.length > 0 ? (
+                    <ul className="max-h-72 overflow-y-auto divide-y divide-gray-800/40">
+                      {suggestions.map((item, idx) => {
+                        const isSelected = selectedIndex === idx;
+                        const isKospi = item.exchange === 'KOSPI' || item.ticker.startsWith('00') || item.ticker.startsWith('01');
+                        return (
+                          <li
+                            key={`${item.ticker}-${idx}`}
+                            onClick={() => selectStock(item.ticker, item.name)}
+                            onMouseEnter={() => setSelectedIndex(idx)}
+                            className={`px-3.5 py-2.5 flex items-center justify-between cursor-pointer transition-colors ${
+                              isSelected
+                                ? 'bg-indigo-600/30 border-l-4 border-indigo-500 pl-2.5 text-white'
+                                : 'hover:bg-gray-800/50 text-gray-300'
+                            }`}
+                          >
+                            <div className="flex flex-col">
+                              <span className="font-bold text-sm text-white flex items-center gap-1.5">
+                                {item.name}
+                              </span>
+                              <span className="text-xs font-mono text-cyan-400/90 tracking-wide">
+                                {item.ticker}
+                              </span>
+                            </div>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                isKospi
+                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                  : item.exchange === 'KOSDAQ'
+                                  ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+                                  : 'bg-blue-500/10 text-blue-300 border-blue-500/30'
+                              }`}
+                            >
+                              {item.exchange || 'KRX'}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : !isSearching ? (
+                    <div className="px-4 py-3 text-xs text-gray-400 text-center">
+                      일치하는 관련 종목이 없습니다.
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
+
             <button
               type="submit"
               className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer whitespace-nowrap"

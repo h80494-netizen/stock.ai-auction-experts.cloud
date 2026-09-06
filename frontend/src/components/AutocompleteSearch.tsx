@@ -11,6 +11,7 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -29,6 +30,7 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
     if (!query.trim()) {
       setSuggestions([]);
       setIsOpen(false);
+      setSelectedIndex(-1);
       return;
     }
 
@@ -51,6 +53,7 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
 
       // 2. Global matching
       try {
+        setIsSearching(true);
         const res = await fetch(`/api/stock/autocomplete?q=${encodeURIComponent(q)}`);
         if (!res.ok) throw new Error(res.statusText || 'API Error');
         const globalMatches = await res.json();
@@ -66,25 +69,65 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
           }
         }
         
-        setSuggestions(merged.slice(0, 8));
+        setSuggestions(merged.slice(0, 10));
+        setSelectedIndex(-1);
         setIsOpen(true);
       } catch (e) {
         setSuggestions(localMatches);
+        setSelectedIndex(-1);
         setIsOpen(true);
+      } finally {
+        setIsSearching(false);
       }
     };
 
     const debounceId = setTimeout(() => {
       fetchSuggestions();
-    }, 300);
+    }, 200);
 
     return () => clearTimeout(debounceId);
   }, [query, localStocks]);
+
+  const handleSelect = (ticker: string) => {
+    onSelect(ticker);
+    setQuery("");
+    setIsOpen(false);
+    setSelectedIndex(-1);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!isOpen || suggestions.length === 0) {
+      if (e.key === 'Enter') handleSubmit(e);
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev <= 0 ? suggestions.length - 1 : prev - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (selectedIndex >= 0 && suggestions[selectedIndex]) {
+        handleSelect(suggestions[selectedIndex].ticker);
+      } else {
+        handleSubmit(e);
+      }
+    } else if (e.key === 'Escape') {
+      setIsOpen(false);
+    }
+  };
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     let q = query.trim();
     if (q === '삼서전자') q = '삼성전자';
+
+    if (selectedIndex >= 0 && suggestions[selectedIndex]) {
+      handleSelect(suggestions[selectedIndex].ticker);
+      return;
+    }
 
     if (q) {
       // If user typed exact name or ticker, resolve to ticker
@@ -98,12 +141,10 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
       );
       
       if (match) {
-        onSelect(match.ticker || match.symbol);
+        handleSelect(match.ticker || match.symbol);
       } else {
-        onSelect(q); // Fallback to raw query if no exact match found
+        handleSelect(q); // Fallback to raw query if no exact match found
       }
-      setIsOpen(false);
-      setQuery("");
     }
   };
 
@@ -121,6 +162,7 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
           onFocus={() => {
             if (suggestions.length > 0) setIsOpen(true);
           }}
+          onKeyDown={handleKeyDown}
           className="flex-1 bg-black border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none focus:border-blue-500"
         />
         <button 
@@ -132,24 +174,28 @@ export default function AutocompleteSearch({ localStocks = [], onSelect, placeho
       </form>
 
       {isOpen && suggestions.length > 0 && (
-        <ul className="absolute z-50 top-full left-0 mt-1 w-[250px] max-h-60 overflow-y-auto bg-[#1a1a1a] border border-gray-700 rounded shadow-lg">
-          {suggestions.map((s, idx) => (
-            <li 
-              key={`${s.ticker}-${idx}`}
-              onClick={() => {
-                onSelect(s.ticker);
-                setQuery("");
-                setIsOpen(false);
-              }}
-              className="px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 cursor-pointer border-b border-gray-800 last:border-0 flex justify-between items-center"
-            >
-              <div className="flex flex-col">
-                <span className="font-bold text-white">{s.ticker}</span>
-                <span className="text-gray-400 max-w-[150px] truncate">{s.name}</span>
-              </div>
-              <span className="text-[10px] text-gray-500 bg-black px-1 rounded truncate max-w-[60px]">{s.exchange}</span>
-            </li>
-          ))}
+        <ul className="absolute z-50 top-full left-0 mt-1 w-full min-w-[280px] max-h-72 overflow-y-auto bg-[#131926] border border-gray-700 rounded-lg shadow-2xl divide-y divide-gray-800">
+          {suggestions.map((s, idx) => {
+            const isSelected = selectedIndex === idx;
+            return (
+              <li 
+                key={`${s.ticker}-${idx}`}
+                onClick={() => handleSelect(s.ticker)}
+                onMouseEnter={() => setSelectedIndex(idx)}
+                className={`px-3 py-2 text-xs cursor-pointer flex justify-between items-center transition-colors ${
+                  isSelected ? 'bg-blue-900/60 text-white' : 'text-gray-300 hover:bg-gray-800'
+                }`}
+              >
+                <div className="flex flex-col">
+                  <span className="font-bold text-white text-xs">{s.name || s.ticker}</span>
+                  <span className="text-cyan-400 font-mono text-[11px]">{s.ticker}</span>
+                </div>
+                <span className="text-[10px] text-gray-400 bg-black/60 px-1.5 py-0.5 rounded border border-gray-800 truncate max-w-[70px]">
+                  {s.exchange}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
