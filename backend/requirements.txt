@@ -13,3 +13,4 @@ matplotlib
 openpyxl
 dartlab
 feedparser
+pdfplumber>=0.10.0

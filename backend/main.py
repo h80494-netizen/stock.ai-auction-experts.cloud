@@ -37,6 +37,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from routers import reports
+app.include_router(reports.router)
+
+@app.post("/api/ai/summarize", tags=["AI"])
+def proxy_ai_summarize(req: reports.SummarizeRequest):
+    return reports.summarize_report(req)
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import auto_trader

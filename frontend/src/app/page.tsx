@@ -20,9 +20,10 @@ import ETFSimulationHistoryView from '@/components/ETFSimulationHistoryView';
 import TetrisScreenerView from '@/components/TetrisScreenerView';
 import FCFComparisonView from '@/components/FCFComparisonView';
 import DartLabFinancialView from '@/components/DartLabFinancialView';
+import AnalystReportsView from '@/components/AnalystReportsView';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
+  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
@@ -214,6 +215,16 @@ export default function Home() {
             📊 재무분석 (DartLab)
           </button>
           <button
+            onClick={() => setActiveTab('reports')}
+            className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'reports' 
+                ? 'bg-indigo-900/50 border-indigo-500 text-indigo-200 shadow-md shadow-indigo-900/40' 
+                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            📑 증권사 리포트 요약
+          </button>
+          <button
             onClick={() => setActiveTab('scanner')}
             className={`px-4 py-1 font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
               activeTab === 'scanner' 
@@ -353,6 +364,8 @@ export default function Home() {
           <FCFComparisonView />
         ) : activeTab === 'dartlab' ? (
           <DartLabFinancialView initialTicker={globalSearchTicker || "005930"} onSelectTicker={(tk) => setGlobalSearchTicker(tk)} />
+        ) : activeTab === 'reports' ? (
+          <AnalystReportsView />
         ) : (
           <HeatmapView />
         )}

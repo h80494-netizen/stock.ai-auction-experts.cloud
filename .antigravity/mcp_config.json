@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stock-analyst-reports": {
+      "command": "python",
+      "args": ["consensus_mcp_server.py"],
+      "cwd": "backend",
+      "env": {
+        "PYTHONPATH": "backend"
+      }
+    }
+  }
+}
