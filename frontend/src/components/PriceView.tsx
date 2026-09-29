@@ -131,26 +131,31 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
 
     const fetchData = () => {
       if (!selectedStock) return;
-      const isGlobal = selectedStock.categories?.some((c: string) => c.includes("Global Major") || c.includes("Global Search") || (c.includes("Top 50") && !c.includes("KR")));
-      let cleanTicker = selectedStock.ticker;
+      const rawTicker = String(selectedStock.ticker || "");
+      const cleanUpper = rawTicker.toUpperCase().trim();
+      const pureCode = cleanUpper.replace(/^KRX:/, '').replace(/\.KS$/, '').replace(/\.KQ$/, '');
+      const isKR = /^\d{6}$/.test(pureCode) || cleanUpper.endsWith('.KS') || cleanUpper.endsWith('.KQ') || cleanUpper.startsWith('KRX:');
+      
+      const isGlobal = !isKR && selectedStock.categories?.some((c: string) => c.includes("Global Major") || c.includes("Global Search") || (c.includes("Top 50") && !c.includes("KR")));
+      let cleanTicker = isKR ? pureCode : (rawTicker.split(':').pop() || rawTicker);
       let excd = "";
       
       if (isGlobal) {
         if (cleanTicker.includes(".T") || cleanTicker === "7203" || cleanTicker === "9984") excd = "TSE";
         else if (cleanTicker.includes(".HK") || cleanTicker === "0700") excd = "HKS";
-        else if (cleanTicker.includes(".SS") || cleanTicker === ".SZ") excd = "SHS";
+        else if (cleanTicker.includes(".SS") || cleanTicker.includes(".SZ")) excd = "SHS";
         else if (cleanTicker === "BABA") excd = "NYS";
         else excd = "NAS";
-      } else {
-        cleanTicker = cleanTicker.split(':').pop() || cleanTicker;
       }
       
       const query = isGlobal ? `?is_overseas=true&excd=${excd}&period=${period}` : `?period=${period}`;
       
       let market = "KR";
-      if (selectedStock.categories?.includes("US Top 50") || selectedStock.name.includes("(US)")) market = "US";
-      if (selectedStock.categories?.includes("JP Top 50") || selectedStock.name.includes("(JP)")) market = "JP";
-      if (selectedStock.categories?.includes("CN Top 50") || selectedStock.name.includes("(CN)")) market = "CN";
+      if (!isKR) {
+        if (selectedStock.categories?.includes("US Top 50") || selectedStock.name?.includes("(US)")) market = "US";
+        if (selectedStock.categories?.includes("JP Top 50") || selectedStock.name?.includes("(JP)")) market = "JP";
+        if (selectedStock.categories?.includes("CN Top 50") || selectedStock.name?.includes("(CN)")) market = "CN";
+      }
 
       const safeFetch = async (url: string) => {
         const res = await fetch(url);
@@ -176,8 +181,19 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
           } else {
             setChartData([]);
           }
-          if (!fundData.error) setFundamentals(fundData);
-          else setFundamentals(null);
+          if (!fundData.error) {
+            setFundamentals(fundData);
+            if (fundData.currentPrice) {
+              setSelectedStock((prev: any) => prev ? {
+                ...prev,
+                price: fundData.currentPrice,
+                ...(fundData.changePct !== undefined ? { changePct: fundData.changePct } : {}),
+                ...(fundData.change !== undefined ? { change: fundData.change } : {})
+              } : prev);
+            }
+          } else {
+            setFundamentals(null);
+          }
           
           if (Array.isArray(newsData)) setStockNews(newsData);
           else setStockNews([]);
@@ -351,8 +367,8 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
           {filteredStocks.map((stock, i) => {
             const isSelected = selectedStock?.ticker === stock.ticker;
-            const isUp = stock.change > 0;
-            const isDown = stock.change < 0;
+            const isUp = (stock.change !== undefined && stock.change !== 0) ? stock.change > 0 : (stock.changePct > 0);
+            const isDown = (stock.change !== undefined && stock.change !== 0) ? stock.change < 0 : (stock.changePct < 0);
             
             return (
               <div 

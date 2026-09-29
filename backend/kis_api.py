@@ -2,7 +2,11 @@ import requests
 import json
 import time
 import os
+import sys
 import threading
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.ticker_util import to_kis_ticker
 
 class RateLimiter:
     def __init__(self, calls_per_second=15):
@@ -140,6 +144,7 @@ class KISApiClient:
 
     def get_current_price(self, ticker: str) -> int:
         """현재가 조회 (국내주식)"""
+        ticker = to_kis_ticker(ticker)
         cache_key = f"get_current_price_{ticker}"
         cached = self.api_cache.get(cache_key)
         if cached is not None:
@@ -175,6 +180,7 @@ class KISApiClient:
 
     def get_current_price_detail(self, ticker: str) -> dict:
         """현재가, 등락, 등락률 상세 조회 (국내주식)"""
+        ticker = to_kis_ticker(ticker)
         cache_key = f"get_current_price_detail_{ticker}"
         cached = self.api_cache.get(cache_key)
         if cached is not None:
@@ -210,6 +216,7 @@ class KISApiClient:
 
     def order_buy(self, ticker: str, qty: int, price: int = 0):
         """현금 매수 주문 (모의투자/실전투자)"""
+        ticker = to_kis_ticker(ticker)
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
         tr_id = "VTTC0802U" if self.is_mock else "TTTC0802U"
         headers = self.get_headers(tr_id)
@@ -242,6 +249,7 @@ class KISApiClient:
 
     def order_sell(self, ticker: str, qty: int, price: int = 0):
         """현금 매도 주문 (모의투자/실전투자)"""
+        ticker = to_kis_ticker(ticker)
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
         tr_id = "VTTC0801U" if self.is_mock else "TTTC0801U"
         headers = self.get_headers(tr_id)
@@ -314,6 +322,7 @@ class KISApiClient:
 
     def get_domestic_chart(self, ticker: str, period: str = "D"):
         """국내주식 차트 (분봉, 일/주/월봉)"""
+        ticker = to_kis_ticker(ticker)
         cache_key = f"dom_chart_{ticker}_{period}"
         cached = self.api_cache.get(cache_key)
         if cached is not None:
@@ -334,10 +343,10 @@ class KISApiClient:
                 "FID_PW_DATA_INCU_YN": "N"
             }
         else:
-            # 일/주/월봉
+            # 일/주/월
             url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
             headers = self.get_headers("FHKST03010100")
-            start = now - datetime.timedelta(days=365) if period in ["W", "M"] else now - datetime.timedelta(days=100)
+            start = now - datetime.timedelta(days=365)
             params = {
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": ticker,
@@ -400,6 +409,7 @@ class KISApiClient:
 
     def get_orderbook(self, ticker: str) -> dict:
         """국내주식 호가 조회"""
+        ticker = to_kis_ticker(ticker)
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
         headers = self.get_headers("FHKST01010200")
         params = {
@@ -424,8 +434,24 @@ class KISApiClient:
             print(f"호가 조회 예외 ({ticker}): {e}")
             return {}
 
+    def get_ask_price_1(self, ticker: str) -> int:
+        """매도 1호가 조회"""
+        ob = self.get_orderbook(ticker)
+        if ob and "askp1" in ob:
+            return int(ob["askp1"])
+        return self.get_current_price(ticker)
+        
+    def get_ask_price_3(self, ticker: str) -> int:
+        """매도 3호가 조회"""
+        ob = self.get_orderbook(ticker)
+        if ob and "askp3" in ob:
+            return int(ob["askp3"])
+        # fallback to current price if orderbook fails
+        return self.get_current_price(ticker)
+
     def get_investor_trend(self, ticker: str) -> dict:
         """국내주식 종목별 투자자 동향 (당일 가집계 또는 전일 동향)"""
+        ticker = to_kis_ticker(ticker)
         # FHKST01010900: 주식현재가 투자자
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
         headers = self.get_headers("FHKST01010900")
@@ -449,6 +475,35 @@ class KISApiClient:
             return {}
         except Exception as e:
             print(f"투자자 동향 예외 ({ticker}): {e}")
+            return {}
+
+    def get_foreign_broker_trend(self, ticker: str) -> dict:
+        """외국계 창구(증권사) 매매 동향 (주식현재가 회원사 FHKST01010600)"""
+        ticker = to_kis_ticker(ticker)
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-member"
+        headers = self.get_headers("FHKST01010600")
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker
+        }
+        cache_key = f"foreign_broker_trend_{ticker}"
+        cached = self.api_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            self.rate_limiter.wait()
+            res = requests.get(url, headers=headers, params=params, timeout=3)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("rt_cd") == "0":
+                    # output is a list of 1 dictionary usually
+                    out = data.get("output", [])
+                    result = out[0] if isinstance(out, list) and len(out) > 0 else {}
+                    self.api_cache.set(cache_key, result)
+                    return result
+            return {}
+        except Exception as e:
+            print(f"외국계 창구 동향 예외 ({ticker}): {e}")
             return {}
 
     def is_market_open(self) -> bool:

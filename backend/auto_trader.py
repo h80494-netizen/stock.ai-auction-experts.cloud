@@ -121,10 +121,13 @@ def job_1525_sell_order():
         if qty <= 0:
             continue
             
-        # 시장가 매도 (price = 0)
-        print(f"[{name}] 보유수량 {qty}주 15:25 동시호가 시장가 매도 주문 (15:30 종가 체결 예정)")
-        success = BROKER.client.order_sell(ticker, qty, 0)
-        
+        # 15:25 시장가(동시호가) 매도 주문 시도 (100% 보유 수량)
+        print(f"[{name}] 보유수량 {qty}주 15:25 동시호가 시장가 매도 주문 전송 (15:30 종가 체결 예정)")
+        try:
+            BROKER.client.order_sell(ticker, qty, 0)
+        except Exception as e:
+            print(f"[{name}] 매도 주문 API 호출 중 예외 발생 (15:30 종가 강제 정산 예정): {e}")
+
 def job_1531_ledger_record():
     print(f"[{datetime.now()}] 15:31 PM 자동매도 종가 체결 정산 및 장부 기록...")
     if not BROKER:
@@ -139,6 +142,7 @@ def job_1531_ledger_record():
         
     total_buy = 0.0
     total_sell = 0.0
+    today_str = datetime.now().strftime("%Y-%m-%d")
     
     for h in holdings:
         ticker = h['ticker']
@@ -151,20 +155,27 @@ def job_1531_ledger_record():
         current_price = BROKER.get_current_price(ticker)
         buy_price = h.get('buyPrice', h.get('buy_price', 0))
         
+        if current_price <= 0:
+            current_price = buy_price
+            
         total_buy += qty * buy_price
         total_sell += qty * current_price
         
-    # 손익 계산 및 장부 기록
+    # 손익 계산 및 장부 기록 (100% 보유수량 종가 매도 확정)
     if total_buy > 0:
         fees = (total_buy + total_sell) * 0.00015
         tax = total_sell * 0.0020
         net_pnl = total_sell - total_buy - fees - tax
         return_rate = (net_pnl / total_buy) * 100
         
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        # 1) 상세 매매원장 기록 (trade_ledger)
         db.add_ledger_record(today_str, total_buy, total_sell, fees, tax, net_pnl, return_rate)
-        print(f"15:30 최종 종가 기준 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
+        # 2) 일별 실현손익 기록 (pnl_history) 동기화
+        db.add_realized_pnl(today_str, net_pnl)
         
+        print(f"15:30 최종 종가 기준 100% 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
+        
+    # 보유 잔고 100% 비우기 (다음날 잔여 수량 이월 방지)
     db.clear_holdings()
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
   const [simData, setSimData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [criteria, setCriteria] = useState<string>('sharpe');
+  const [topN, setTopN] = useState<number>(1);
   const [period, setPeriod] = useState<string>('YTD(26.01~)');
   
   // 21 Models Simulator States
@@ -60,46 +61,48 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     }
   }, [selectedModelIdx, models, setEtfWeights]);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const res = await fetch(`/api/etf/simulation?criteria=${criteria}`);
-        if (!res.ok) throw new Error('API Error');
-        const json = await res.json();
-        setSimData(json);
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
-    handleRunSimulator();
-  }, [criteria]);
-
-  const handleRunSimulator = async () => {
+  const handleRunSimulator = async (currentTopN = topN, currentCriteria = criteria) => {
     setRunningSimulator(true);
     setModels([]);
     setSelectedModelIdx(-1);
     try {
-      const res = await fetch(`/api/etf/simulation-models?criteria=${criteria}`);
+      const res = await fetch(`/api/etf/simulation-models?criteria=${currentCriteria}&top_n=${currentTopN}`);
       if (res.ok) {
         const json = await res.json();
         setModels(json);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Simulator fetch error:', e);
+    } finally {
+      setRunningSimulator(false);
     }
-    setRunningSimulator(false);
   };
+
+  useEffect(() => {
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/etf/simulation?criteria=${criteria}&top_n=${topN}`);
+        if (!res.ok) throw new Error('API Error');
+        const json = await res.json();
+        setSimData(json);
+      } catch (err) {
+        console.error('Simulation fetch error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+    handleRunSimulator(topN, criteria);
+  }, [criteria, topN]);
 
   // Helper to get start date based on period
   const getStartDate = () => {
     let startDate = '1900-01-01';
     const today = new Date();
-    if (period === 'YTD(26.01~)') {
-      startDate = '2026-01-02';
+    if (period === 'YTD(26.01~)' || period === 'YTD') {
+      const year = today.getFullYear();
+      startDate = `${year}-01-01`;
     } else if (period === '3개월') {
       const d = new Date(today);
       d.setMonth(d.getMonth() - 3);
@@ -112,11 +115,13 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
       const d = new Date(today);
       d.setFullYear(d.getFullYear() - 1);
       startDate = d.toISOString().split('T')[0];
+    } else if (period === '전체') {
+      startDate = '1900-01-01';
     }
     return startDate;
   };
 
-  // 1. 단일 모델(메인) 히스토리 계산 (기간 무관/해당 기간만 필터링 가능, 일단 기간 필터 적용)
+  // 1. 단일 모델(메인) 히스토리 계산 (기간 필터 및 리베이싱 적용)
   const historyRows = useMemo(() => {
     if (!simData || !simData.dates || simData.dates.length === 0) return [];
     
@@ -124,40 +129,50 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     const { dates, strategy, selected_etf, etfs } = simData;
     const startDate = getStartDate();
 
+    let startIdx = 0;
     for (let i = 0; i < dates.length; i++) {
-      if (dates[i] < startDate) continue;
+      if (dates[i] >= startDate) {
+        startIdx = i;
+        break;
+      }
+    }
+    if (startIdx >= dates.length) startIdx = 0;
 
+    const baseStrategyVal = (strategy && strategy[startIdx] > 0) ? strategy[startIdx] : 100;
+
+    for (let i = startIdx; i < dates.length; i++) {
       let action = "Hold";
       if (selected_etf[i] === "Waiting") {
         action = "Wait";
-      } else if (i > 0 && selected_etf[i] !== selected_etf[i-1] && selected_etf[i-1] !== "Waiting") {
+      } else if (i > startIdx && selected_etf[i] !== selected_etf[i-1] && selected_etf[i-1] !== "Waiting") {
         if (selected_etf[i] === "CASH") {
           action = "Sell (Cash)";
         } else {
           action = "Buy (Switch)";
         }
-      } else if (i > 0 && selected_etf[i-1] === "Waiting" && selected_etf[i] !== "Waiting") {
+      } else if (i > startIdx && selected_etf[i-1] === "Waiting" && selected_etf[i] !== "Waiting") {
         action = "Buy (Entry)";
-      } else if (i === 0) {
+      } else if (i === startIdx) {
         action = "Buy (Entry)";
       }
 
-      const cumReturn = strategy[i] - 100;
+      const rebasedVal = (strategy[i] / baseStrategyVal) * 100;
+      const cumReturn = rebasedVal - 100;
       let dailyReturn = 0;
       if (i > 0 && strategy[i-1] > 0) {
         dailyReturn = ((strategy[i] - strategy[i-1]) / strategy[i-1]) * 100;
       }
 
-      const currentEtfBase = (selected_etf[i] !== "CASH" && selected_etf[i] !== "Waiting" && etfs[selected_etf[i]]) 
+      const currentEtfBase = (selected_etf[i] !== "CASH" && selected_etf[i] !== "Waiting" && etfs && etfs[selected_etf[i]]) 
                              ? etfs[selected_etf[i]][i] : 100;
 
       rows.push({
         date: dates[i],
-        selected: selected_etf[i],
+        selected: selected_etf[i] || "CASH",
         action,
         etfIndex: currentEtfBase,
-        dailyReturn,
-        cumReturn
+        dailyReturn: isNaN(dailyReturn) ? 0 : dailyReturn,
+        cumReturn: isNaN(cumReturn) ? 0 : cumReturn
       });
     }
 
@@ -166,8 +181,8 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
 
   // 2. 다중 차트 데이터 생성 (선택된 기간에 맞추어 리베이싱)
   const multiChartData = useMemo(() => {
-    if (models.length === 0) return [];
-    const firstModel = models.find(m => m.dates && m.dates.length > 0);
+    if (!models || models.length === 0) return [];
+    const firstModel = models.find(m => m && m.dates && m.dates.length > 0);
     if (!firstModel) return [];
 
     const startDate = getStartDate();
@@ -181,15 +196,16 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
       }
     }
     
-    // If startDate is beyond all data, just use the last point or empty
-    if (startIdx >= firstModel.dates.length) return [];
+    if (startIdx >= firstModel.dates.length) startIdx = 0;
 
     const data = [];
     for (let i = startIdx; i < firstModel.dates.length; i++) {
       const row: any = { date: firstModel.dates[i] };
       models.forEach((m, idx) => {
-        if (m.strategy && m.strategy.length > i && m.strategy[startIdx] > 0) {
-          row[`model_${idx}`] = (m.strategy[i] / m.strategy[startIdx]) * 100; // Base 100
+        if (m && m.strategy && m.strategy.length > i) {
+          const baseVal = m.strategy[startIdx] || 1;
+          const currVal = m.strategy[i] || baseVal;
+          row[`model_${idx}`] = baseVal > 0 ? (currVal / baseVal) * 100 : 100; // Base 100
         } else {
           row[`model_${idx}`] = 100;
         }
@@ -201,11 +217,13 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
 
   // 3. 21개 모델의 기간별 지표 동적 계산
   const filteredModels = useMemo(() => {
-    if (models.length === 0) return [];
+    if (!models || models.length === 0) return [];
     
     const startDate = getStartDate();
 
     return models.map((m) => {
+      if (!m || !m.dates || m.dates.length === 0) return m;
+
       // Find start index
       let startIdx = 0;
       for (let i = 0; i < m.dates.length; i++) {
@@ -214,13 +232,14 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
           break;
         }
       }
+      if (startIdx >= m.dates.length) startIdx = 0;
 
-      const strategy = m.strategy.slice(startIdx);
+      const strategy = (m.strategy || []).slice(startIdx);
       const selected_etf = m.selected_etf ? m.selected_etf.slice(startIdx) : [];
 
       // Calculate Total Return for this period
-      const startVal = strategy.length > 0 ? strategy[0] : 1;
-      const endVal = strategy.length > 0 ? strategy[strategy.length - 1] : 1;
+      const startVal = strategy.length > 0 && strategy[0] > 0 ? strategy[0] : 1;
+      const endVal = strategy.length > 0 ? strategy[strategy.length - 1] : startVal;
       const total_ret = startVal > 0 ? ((endVal / startVal) - 1) * 100 : 0;
 
       // Calculate Sharpe for this period
@@ -249,9 +268,11 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
         if (strategy[i] > peak) {
           peak = strategy[i];
         }
-        const drawdown = (strategy[i] - peak) / peak;
-        if (drawdown < mdd) {
-          mdd = drawdown;
+        if (peak > 0) {
+          const drawdown = (strategy[i] - peak) / peak;
+          if (drawdown < mdd) {
+            mdd = drawdown;
+          }
         }
       }
       mdd = mdd * 100;
@@ -263,11 +284,11 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
       
       if (selected_etf.length > 0) {
         const trades_returns = [];
-        let entry_value = strategy[0];
+        let entry_value = strategy[0] || 1;
         
         for (let j = 1; j < selected_etf.length; j++) {
           if (selected_etf[j] !== selected_etf[j-1]) {
-            const exit_value = strategy[j];
+            const exit_value = strategy[j] || entry_value;
             if (entry_value > 0 && selected_etf[j-1] !== "Waiting" && selected_etf[j-1] !== "CASH" && selected_etf[j-1] !== "") {
               trades_returns.push(((exit_value - entry_value) / entry_value) * 100);
             }
@@ -277,7 +298,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
         
         // Last open position
         if (selected_etf[selected_etf.length - 1] !== "Waiting" && selected_etf[selected_etf.length - 1] !== "CASH" && selected_etf[selected_etf.length - 1] !== "" && entry_value > 0) {
-          const exit_value = strategy[strategy.length - 1];
+          const exit_value = strategy[strategy.length - 1] || entry_value;
           trades_returns.push(((exit_value - entry_value) / entry_value) * 100);
         }
         
@@ -291,12 +312,12 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
 
       return {
         ...m,
-        total_ret,
-        sharpe: sharpe_ratio,
-        mdd,
-        win_rate,
-        avg_win,
-        avg_loss
+        total_ret: isNaN(total_ret) ? 0 : total_ret,
+        sharpe: isNaN(sharpe_ratio) ? 0 : sharpe_ratio,
+        mdd: isNaN(mdd) ? 0 : mdd,
+        win_rate: isNaN(win_rate) ? 0 : win_rate,
+        avg_win: isNaN(avg_win) ? 0 : avg_win,
+        avg_loss: isNaN(avg_loss) ? 0 : avg_loss
       };
     });
   }, [models, period]);
@@ -315,11 +336,26 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     return <span className="px-2 py-1 bg-gray-800 text-gray-500 rounded text-xs">{action}</span>;
   };
 
+  const renderSelectedEtfs = (selectedStr: string) => {
+    if (!selectedStr) return null;
+    const list = selectedStr.split(',').map(s => s.trim());
+    return (
+      <div className="flex flex-wrap items-center gap-1.5">
+        {list.map((item, idx) => (
+          <span key={idx} className="flex items-center gap-1 bg-gray-900/80 px-2 py-0.5 rounded border border-gray-700 text-xs font-bold">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: ETF_COLORS[item] || '#888' }} />
+            <span style={{ color: ETF_COLORS[item] || '#fff' }}>{item}</span>
+            <span className="text-gray-400 font-sans text-[11px]">({ETF_NAMES[item] || item})</span>
+          </span>
+        ))}
+      </div>
+    );
+  };
+
   const getLineColor = (idx: number) => {
     if (selectedModelIdx !== -1) {
       return selectedModelIdx === idx ? '#f472b6' : '#374151'; // Highlight selected, dim others
     }
-    // Gradient of colors if none selected
     const hue = (idx * (360 / 21)) % 360;
     return `hsl(${hue}, 70%, 60%)`;
   };
@@ -330,41 +366,61 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
 
   return (
     <div className="p-4 h-full overflow-y-auto space-y-4">
-      <div className="flex flex-col lg:flex-row justify-between items-center bg-gray-800 p-4 rounded-lg shadow-lg border border-gray-700">
+      <div className="flex flex-col lg:flex-row justify-between items-center bg-gray-800 p-4 rounded-lg shadow-lg border border-gray-700 gap-4">
         <div>
           <h2 className="text-2xl font-bold text-white">🗓️ 시뮬레이션 히스토리 & 성과 분석</h2>
           <p className="text-sm text-gray-400 mt-1">일자별 선택된 ETF 기록 및 21개 다중 가중치 모델의 성과 비교</p>
         </div>
         
-        <div className="flex flex-col sm:flex-row gap-4 mt-4 lg:mt-0">
+        <div className="flex flex-col sm:flex-row gap-3 items-center flex-wrap">
+          {/* ETF 선택 개수 (1개, 2개, 3개, 4개) 선택기 */}
+          <div className="bg-gray-900 px-3 py-1.5 rounded-lg flex items-center gap-2 border border-gray-700">
+            <span className="text-xs font-bold text-teal-400">🎯 ETF 선택 개수:</span>
+            {[1, 2, 3, 4].map(n => (
+              <button
+                key={n}
+                onClick={() => setTopN(n)}
+                className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${
+                  topN === n
+                    ? 'bg-teal-600 text-white shadow'
+                    : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
+                }`}
+              >
+                {n}개
+              </button>
+            ))}
+          </div>
+
+          {/* 선택 기준 토글 */}
           <div className="bg-gray-900 p-1 rounded-lg flex border border-gray-700">
             <button
               onClick={() => setCriteria('momentum')}
-              className={`px-4 py-2 rounded-md text-sm font-bold transition-colors ${
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
                 criteria === 'momentum' 
                   ? 'bg-blue-600 text-white shadow' 
                   : 'text-gray-400 hover:text-white hover:bg-gray-800'
               }`}
             >
-              🔥 모멘텀 중심
+              🔥 모멘텀(단순수익률)
             </button>
             <button
               onClick={() => setCriteria('sharpe')}
-              className={`px-4 py-2 rounded-md text-sm font-bold transition-colors ${
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
                 criteria === 'sharpe' 
                   ? 'bg-purple-600 text-white shadow' 
                   : 'text-gray-400 hover:text-white hover:bg-gray-800'
               }`}
             >
-              🛡️ 샤프 지수 중심
+              🛡️ 샤프지수(위험조정)
             </button>
           </div>
+
           <button
-            onClick={handleRunSimulator}
-            className="bg-teal-600 hover:bg-teal-500 text-white px-4 py-2 rounded-lg shadow border border-teal-500 font-bold flex items-center justify-center gap-2"
+            onClick={() => handleRunSimulator(topN, criteria)}
+            className="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded-lg shadow border border-teal-500 text-xs font-bold flex items-center justify-center gap-2"
           >
             <span>🧪 21개 모델 시뮬레이션</span>
-            {runningSimulator && <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></span>}
+            {runningSimulator && <span className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-white border-t-transparent"></span>}
           </button>
         </div>
       </div>
@@ -470,7 +526,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
               <div className="h-full w-full flex flex-col items-center justify-center text-gray-500">
                 <span className="text-3xl mb-3">🧪</span>
                 <p className="mb-2">우측 상단의 '21개 모델 시뮬레이션' 버튼을 클릭하여 시뮬레이션을 실행하세요.</p>
-                <button onClick={handleRunSimulator} className="mt-2 bg-teal-600 hover:bg-teal-500 text-white px-4 py-2 rounded shadow font-bold">
+                <button onClick={() => handleRunSimulator()} className="mt-2 bg-teal-600 hover:bg-teal-500 text-white px-4 py-2 rounded shadow font-bold">
                   시뮬레이션 시작하기
                 </button>
               </div>
@@ -544,13 +600,8 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
                   <tr key={`${row.date}-${idx}`} className="hover:bg-gray-700/50 border-b border-gray-800 transition-colors">
                     <td className="p-3 text-gray-300">{row.date}</td>
                     <td className="p-3 text-center">{renderActionBadge(row.action)}</td>
-                    <td className="p-3 font-bold flex items-center gap-2">
-                      <div 
-                        className="w-3 h-3 rounded-full" 
-                        style={{ backgroundColor: ETF_COLORS[row.selected] || '#888' }}
-                      />
-                      <span style={{ color: ETF_COLORS[row.selected] || '#fff' }}>{row.selected}</span>
-                      <span className="text-gray-500 font-sans text-xs">({ETF_NAMES[row.selected] || row.selected})</span>
+                    <td className="p-3">
+                      {renderSelectedEtfs(row.selected)}
                     </td>
                     <td className="p-3 text-right text-gray-300">
                       {row.etfIndex !== 100 ? row.etfIndex.toFixed(2) : '-'}

@@ -33,6 +33,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>('YTD(26.01~)');
   const [criteria, setCriteria] = useState<string>('sharpe');
+  const [topN, setTopN] = useState<number>(1);
+  
   // Use props if available, otherwise fallback to local state (for standalone usage if any)
   const [localWeights, setLocalWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   
@@ -41,12 +43,12 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
   useEffect(() => {
     if (showModelSwap && modelsList.length === 0) {
-      fetch(`/api/etf/simulation-models?criteria=${criteria}`)
+      fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}`)
         .then(res => res.json())
         .then(json => setModelsList(json))
         .catch(err => console.error(err));
     }
-  }, [showModelSwap, criteria, modelsList.length]);
+  }, [showModelSwap, criteria, topN, modelsList.length]);
   
   const activeWeights = etfWeights || localWeights;
   const updateWeights = setEtfWeights || setLocalWeights;
@@ -59,7 +61,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
       if (!pollInterval) setLoading(true);
       try {
         const ts = Date.now();
-        const query = `?criteria=${criteria}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&t=${ts}`;
+        const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&t=${ts}`;
         const [stratRes, simRes] = await Promise.all([
           fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }),
           fetch(`/api/etf/simulation${query}`, { cache: 'no-store' })
@@ -92,7 +94,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [criteria, activeWeights]);
+  }, [criteria, topN, activeWeights]);
 
 
 
@@ -319,27 +321,46 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   return (
     <div className="p-4 h-full overflow-y-auto space-y-6">
       
-      <div className="flex flex-col sm:flex-row justify-center items-center gap-4 mb-4 sm:mb-6">
+      <div className="flex flex-col sm:flex-row justify-center items-center gap-3 mb-4 sm:mb-6 flex-wrap">
+        {/* ETF 선택 개수 (1개, 2개, 3개, 4개) 선택기 */}
+        <div className="bg-gray-800 p-1.5 rounded-lg flex items-center gap-2 shadow-lg border border-gray-700">
+          <span className="text-xs sm:text-sm font-bold text-teal-400 ml-1">🎯 ETF 선택 개수:</span>
+          {[1, 2, 3, 4].map(n => (
+            <button
+              key={n}
+              onClick={() => setTopN(n)}
+              className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded-md transition-colors ${
+                topN === n
+                  ? 'bg-teal-600 text-white shadow'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-700'
+              }`}
+            >
+              {n}개
+            </button>
+          ))}
+        </div>
+
+        {/* 선택 기준 토글 */}
         <div className="bg-gray-800 p-1 rounded-lg flex flex-col sm:flex-row shadow-lg border border-gray-700 w-full sm:w-auto">
           <button
             onClick={() => setCriteria('momentum')}
-            className={`w-full sm:w-auto px-4 sm:px-6 py-2.5 sm:py-2 mb-1 sm:mb-0 rounded-md text-sm sm:text-base font-bold transition-colors ${
+            className={`w-full sm:w-auto px-4 sm:px-5 py-2 rounded-md text-xs sm:text-sm font-bold transition-colors ${
               criteria === 'momentum' 
                 ? 'bg-blue-600 text-white shadow' 
                 : 'text-gray-400 hover:text-white hover:bg-gray-700'
             }`}
           >
-            🔥 수익률(모멘텀) 중심
+            🔥 단순수익률(모멘텀)
           </button>
           <button
             onClick={() => setCriteria('sharpe')}
-            className={`w-full sm:w-auto px-4 sm:px-6 py-2.5 sm:py-2 rounded-md text-sm sm:text-base font-bold transition-colors ${
+            className={`w-full sm:w-auto px-4 sm:px-5 py-2 rounded-md text-xs sm:text-sm font-bold transition-colors ${
               criteria === 'sharpe' 
                 ? 'bg-purple-600 text-white shadow' 
                 : 'text-gray-400 hover:text-white hover:bg-gray-700'
             }`}
           >
-            🛡️ 샤프 지수(안정성) 중심
+            🛡️ 위험조정수익률(샤프지수)
           </button>
         </div>
       </div>
@@ -472,43 +493,69 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
             )}
           </div>
         </div>
-        <div className="text-3xl sm:text-4xl font-extrabold text-yellow-400 my-3 sm:my-4">
-          {isCash ? (
-            <span className="text-gray-300 text-xl sm:text-4xl">CASH <span className="text-sm sm:text-2xl text-gray-400 block sm:inline mt-1 sm:mt-0">(추천 스코어 0.5 이하 - 현금 방어)</span></span>
-          ) : (
-            <>{topETF.ticker} <span className="text-xl sm:text-2xl text-gray-300">({topETF.name})</span></>
-          )}
-        </div>
-        {!isCash && (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4 mt-4 text-base sm:text-lg">
-            <div className="bg-blue-950/40 p-2 sm:p-0 rounded sm:bg-transparent">
-              <div className="text-blue-300 text-xs sm:text-sm uppercase">현재가</div>
-              <div className="font-mono">${topETF.current_price.toFixed(2)}</div>
-            </div>
-            <div className="bg-blue-950/40 p-2 sm:p-0 rounded sm:bg-transparent">
-              <div className="text-blue-300 text-xs sm:text-sm uppercase">1일 수익률</div>
-              <div className={`font-mono font-bold ${topETF.return_1d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {topETF.return_1d > 0 ? '+' : ''}{topETF.return_1d.toFixed(2)}%
-              </div>
-            </div>
-            <div className="bg-blue-950/40 p-2 sm:p-0 rounded sm:bg-transparent">
-              <div className="text-blue-300 text-xs sm:text-sm uppercase">5일 수익률</div>
-              <div className={`font-mono font-bold ${topETF.return_5d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {topETF.return_5d > 0 ? '+' : ''}{topETF.return_5d.toFixed(2)}%
-              </div>
-            </div>
-            <div className="bg-blue-950/40 p-2 sm:p-0 rounded sm:bg-transparent">
-              <div className="text-blue-300 text-xs sm:text-sm uppercase">20일 수익률</div>
-              <div className={`font-mono font-bold ${topETF.return_20d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {topETF.return_20d > 0 ? '+' : ''}{topETF.return_20d?.toFixed(2)}%
-              </div>
-            </div>
-            <div className="bg-blue-950/40 p-2 sm:p-0 rounded sm:bg-transparent col-span-2 md:col-span-1">
-              <div className="text-blue-300 text-xs sm:text-sm uppercase">{criteria === 'sharpe' ? '샤프 지수' : '모멘텀 총점'}</div>
-              <div className="font-mono text-yellow-300 font-bold text-lg sm:text-base">{topETF.final_score.toFixed(2)}</div>
-            </div>
+        {/* 상위 Top N 추천 포트폴리오 리스트 */}
+        <div className="my-4">
+          <div className="text-sm font-bold text-blue-200 mb-2 flex items-center gap-2">
+            <span>🎯 상위 {topN}개 분산 투자 추천 포트폴리오</span>
+            <span className="text-xs text-blue-300 font-normal">(동등 비중 각 {(100 / topN).toFixed(1)}%)</span>
           </div>
-        )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            {data.slice(0, topN).map((item: any, idx: number) => {
+              const isItemCash = item.final_score <= 0.5;
+              return (
+                <div key={item.ticker || idx} className="bg-gray-900/90 border border-blue-400/40 p-3.5 rounded-lg shadow space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold px-2 py-0.5 rounded bg-blue-600 text-white">
+                      RANK #{idx + 1} ({isItemCash ? '0.0%' : `${(100 / topN).toFixed(1)}%`})
+                    </span>
+                    <span className="text-xs font-mono text-purple-300 font-bold">
+                      {criteria === 'sharpe' ? `Sharpe: ${item.sharpe_ratio.toFixed(2)}` : `Score: ${item.momentum_score.toFixed(2)}`}
+                    </span>
+                  </div>
+
+                  <div className="text-2xl font-extrabold text-yellow-400 flex items-center gap-2">
+                    {isItemCash ? (
+                      <span className="text-gray-400 text-lg">CASH <span className="text-xs text-gray-500 font-normal">(현금 방어)</span></span>
+                    ) : (
+                      <>
+                        <span>{item.ticker}</span>
+                        <span className="text-xs font-normal text-gray-300">({item.name})</span>
+                      </>
+                    )}
+                  </div>
+
+                  {!isItemCash && (
+                    <div className="grid grid-cols-2 gap-2 text-xs font-mono pt-1 border-t border-gray-800">
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">현재가</span>
+                        <span className="text-white font-bold">${item.current_price.toFixed(2)}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">1일 수익률</span>
+                        <span className={`font-bold ${item.return_1d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {item.return_1d > 0 ? '+' : ''}{item.return_1d.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">5일 수익률</span>
+                        <span className={`font-bold ${item.return_5d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {item.return_5d > 0 ? '+' : ''}{item.return_5d.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">20일 수익률</span>
+                        <span className={`font-bold ${item.return_20d >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {item.return_20d > 0 ? '+' : ''}{item.return_20d.toFixed(2)}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

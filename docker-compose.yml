@@ -17,6 +17,7 @@ services:
       - ./backend/stocks.db:/app/stocks.db
     environment:
       - TZ=Asia/Seoul
+      - PROXY_URL=${PROXY_URL} # Proxy URL for bypassing AWS Naver block
     
   frontend:
     build:

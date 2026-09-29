@@ -299,7 +299,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
 
     const fetchData = async () => {
       try {
-        const res = await fetch(`/api/kis/chart/${selectedStock.ticker}?period=D&is_overseas=${selectedStock.country !== 'KR'}`);
+        const res = await fetch(`/api/kis/chart/${selectedStock.ticker}?period=6M&is_overseas=${selectedStock.country !== 'KR'}`);
         if (!res.ok) throw new Error(res.statusText || 'API Error');
         const freshData = await res.json();
         if (freshData && freshData.length > 0) {

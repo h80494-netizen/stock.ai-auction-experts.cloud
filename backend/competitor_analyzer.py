@@ -216,9 +216,9 @@ def get_sector_details(sector_name: str):
             div_yield = t_info.get("dividendYield", "N/A")
             return_1y = t_info.get("52WeekChange", "N/A")
             
-            is_korean = ticker.startswith("KRX:") or ticker.endswith(".KS") or ticker.endswith(".KQ")
+            is_korean = ticker.startswith("KRX:") or ticker.endswith(".KS") or ticker.endswith(".KQ") or (ticker.isdigit() and len(ticker) == 6)
             if is_korean:
-                code = ticker.split(":")[-1].split(".")[0]
+                code = ticker.split(":")[-1].replace(".KS", "").replace(".KQ", "").strip()
                 try:
                     from naver_finance_scraper import naver_scraper
                     rt_detail = naver_scraper.get_current_price_detail(code)
@@ -360,9 +360,9 @@ def get_ticker_fundamentals(ticker: str):
         roe_next = 'N/A'
         eps_next = 'N/A'
         
-        if ticker.endswith(".KS") or ticker.endswith(".KQ") or ticker.isdigit():
-            code = ticker.split('.')[0]
-            if ticker.isdigit(): code = ticker
+        is_korean = ticker.endswith(".KS") or ticker.endswith(".KQ") or (ticker.isdigit() and len(ticker) == 6)
+        if is_korean:
+            code = ticker.split(":")[-1].replace(".KS", "").replace(".KQ", "").strip()
             from ingestion.scrapers.naver_scraper import get_naver_fundamentals
             from database import get_analyst_target_history
             target_history = get_analyst_target_history(code)

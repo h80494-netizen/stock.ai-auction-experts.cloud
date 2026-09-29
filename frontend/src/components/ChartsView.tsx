@@ -21,19 +21,21 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
     const fetchChart = async () => {
       setLoading(true);
       try {
-        const cleanTicker = ticker.split(':').pop() || ticker;
-        const isOverseas = !cleanTicker.endsWith('.KS') && !cleanTicker.endsWith('.KQ') && !/^\d{6}$/.test(cleanTicker);
+        const rawTicker = ticker.split(':').pop() || ticker;
+        const upper = rawTicker.toUpperCase().trim();
+        const pureCode = upper.replace(/\.KS$/, '').replace(/\.KQ$/, '');
+        const isKorean = /^\d{6}$/.test(pureCode) || upper.endsWith('.KS') || upper.endsWith('.KQ');
+        const isOverseas = !isKorean;
         
         let excd = 'NYS';
-        const upperTicker = cleanTicker.toUpperCase();
-        if (upperTicker.endsWith('.T')) excd = 'TSE';
-        else if (upperTicker.endsWith('.SS')) excd = 'SHS';
-        else if (upperTicker.endsWith('.SZ')) excd = 'SZS';
-        else if (upperTicker.endsWith('.HK')) excd = 'HKS';
+        if (upper.endsWith('.T')) excd = 'TSE';
+        else if (upper.endsWith('.SS')) excd = 'SHS';
+        else if (upper.endsWith('.SZ')) excd = 'SZS';
+        else if (upper.endsWith('.HK')) excd = 'HKS';
 
         const url = isOverseas 
-          ? `/api/kis/chart/${cleanTicker.split('.')[0]}?is_overseas=true&excd=${excd}&period=${period}`
-          : `/api/kis/chart/${cleanTicker}?period=${period}`;
+          ? `/api/kis/chart/${rawTicker.split('.')[0]}?is_overseas=true&excd=${excd}&period=${period}`
+          : `/api/kis/chart/${pureCode}?period=${period}`;
           
         const res = await fetch(url);
         if (!res.ok) {

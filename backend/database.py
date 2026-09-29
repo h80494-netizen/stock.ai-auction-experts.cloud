@@ -137,8 +137,61 @@ def init_db():
         )
     ''')
     
+
+    # Analyst Reports Cache
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS analyst_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            title TEXT,
+            item_code TEXT,
+            item_name TEXT,
+            target_price TEXT,
+            opinion TEXT,
+            broker TEXT,
+            pdf_url TEXT,
+            UNIQUE(date, title)
+        )
+    ''')
+    # Trading Ledger
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS trading_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date TEXT,
+            ticker TEXT,
+            name TEXT,
+            buy_price REAL,
+            sell_price REAL,
+            qty INTEGER,
+            pnl REAL,
+            status TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
+
+def insert_analyst_report(date, title, item_code, item_name, target_price, opinion, broker, pdf_url):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR IGNORE INTO analyst_reports (date, title, item_code, item_name, target_price, opinion, broker, pdf_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (date, title, item_code, item_name, target_price, opinion, broker, pdf_url))
+    conn.commit()
+    conn.close()
+
+def get_analyst_reports_from_db(keyword: str, start_date: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT * FROM analyst_reports 
+        WHERE (item_code = ? OR item_name = ?) AND date >= ? 
+        ORDER BY date DESC
+    ''', (keyword, keyword, start_date))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 def insert_stock(ticker, name, price, outstanding_shares, par_value, capital, market_cap=None, volume=None, foreign_net_buy=None, dividend=None, description=None):
     conn = get_db_connection()
@@ -316,6 +369,17 @@ def get_ledger_history():
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT * FROM trade_ledger ORDER BY date DESC')
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_detailed_trading_ledger(date_str: str = None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    if date_str:
+        c.execute('SELECT * FROM trading_ledger WHERE trade_date = ? ORDER BY id DESC', (date_str,))
+    else:
+        c.execute('SELECT * FROM trading_ledger ORDER BY trade_date DESC, id DESC')
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]

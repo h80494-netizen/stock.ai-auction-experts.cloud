@@ -10,6 +10,7 @@ import concurrent.futures
 from datetime import datetime, timedelta
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils.retry_util import with_retry
+from utils.ticker_util import is_korean_stock, to_pure_ticker, to_yf_ticker, to_kis_ticker, to_naver_code
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 
 # Global executor for yfinance to prevent OOM
@@ -22,11 +23,27 @@ import pandas as pd
 import tempfile
 from excel_parser import load_kospi_data, get_spot_news
 from global_aggregator import get_global_data, get_aggregated_news
-from trader import execute_equal_weight_buy, BrokerageAPI
+from trader import execute_morning_buy, BrokerageAPI
 from valuation import ValuationRequest, calculate_rim
 from competitor_analyzer import get_sectors, get_sector_news, get_ticker_fundamentals
 
 app = FastAPI(title="AI Stock Analyst API")
+
+import asyncio
+
+@app.on_event("startup")
+async def startup_event():
+    from routers.reports import sync_reports_task
+    async def periodic_sync():
+        while True:
+            try:
+                print("[Scheduler] Running daily report sync...")
+                await asyncio.to_thread(sync_reports_task, 15)
+            except Exception as e:
+                print("[Scheduler] Periodic sync error:", e)
+            await asyncio.sleep(86400) # 24 hours
+            
+    asyncio.create_task(periodic_sync())
 
 # Setup CORS to allow Next.js frontend to communicate
 app.add_middleware(
@@ -39,6 +56,24 @@ app.add_middleware(
 
 from routers import reports
 app.include_router(reports.router)
+
+# Background Sync Task for Reports
+import threading
+import time
+
+def background_report_sync():
+    time.sleep(10) # wait for server to start
+    from routers.reports import sync_reports_task
+    while True:
+        try:
+            print("[Background] Running daily report sync...")
+            sync_reports_task(50) # fetch last 50 pages daily
+            print("[Background] Daily report sync completed.")
+        except Exception as e:
+            print(f"[Background] Report sync error: {e}")
+        time.sleep(12 * 3600) # run every 12 hours
+
+threading.Thread(target=background_report_sync, daemon=True).start()
 
 @app.post("/api/ai/summarize", tags=["AI"])
 def proxy_ai_summarize(req: reports.SummarizeRequest):
@@ -105,9 +140,7 @@ def dart_screener(conditions: Dict[str, Any]):
 
 @app.get("/api/dart/fundamentals/{ticker}")
 def get_dart_fundamentals(ticker: str):
-    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
-    clean_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
-    
+    clean_ticker = to_pure_ticker(ticker)
     financials = db.get_dart_financials(clean_ticker)
     
     # If not found in DB, try to fetch it live (for demonstration or fallback)
@@ -148,12 +181,12 @@ def search_db_stock(query: str):
 
 @app.get("/api/db/stock/{ticker}")
 def get_db_stock_info(ticker: str):
-    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
-    pure_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
+    pure_ticker = to_pure_ticker(ticker)
+    is_krx = is_korean_stock(ticker)
     raw_stock = db.get_stock(pure_ticker) or db.get_stock(f"KRX:{pure_ticker}") or db.get_stock(ticker)
     if not raw_stock:
         stock = {
-            "ticker": ticker,
+            "ticker": pure_ticker if is_krx else ticker,
             "name": ticker,
             "description": "해외 주식/ETF (상세 재무 데이터 미지원)",
             "market_cap": 0,
@@ -166,20 +199,19 @@ def get_db_stock_info(ticker: str):
         }
     else:
         stock = dict(raw_stock)
+        stock["ticker"] = pure_ticker if is_krx else stock.get("ticker", ticker)
         
-    financials = db.get_financials(ticker) or []
+    financials = db.get_financials(pure_ticker) or db.get_financials(ticker) or []
     
     # 실시간 현재가 조회
     try:
         from naver_finance_scraper import naver_scraper
-        clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
         real_price = 0
         change = 0
         change_pct = 0
-        is_krx = ticker.startswith('KRX:') or ticker.isdigit()
         
         if is_krx:
-            detail = naver_scraper.get_current_price_detail(clean_ticker)
+            detail = naver_scraper.get_current_price_detail(pure_ticker)
             real_price = detail.get('price', 0)
             change = detail.get('change', 0)
             change_pct = detail.get('changePct', 0)
@@ -191,9 +223,9 @@ def get_db_stock_info(ticker: str):
             stock['currency'] = 'KRW'
         else:
             # 장 마감 등으로 KIS 0 반환 시 또는 해외주식인 경우 yfinance 폴백
-            import yfinance as yf
-            yf_ticker = f"{clean_ticker}.KS" if is_krx else clean_ticker
-            info = yf.Ticker(yf_ticker).info
+            from utils.yf_util import get_yf_ticker
+            yf_ticker = to_yf_ticker(ticker)
+            info = get_yf_ticker(yf_ticker).info
             fallback_price = info.get("regularMarketPrice") or info.get("previousClose") or info.get("currentPrice") or 0
             if fallback_price > 0:
                 stock['price'] = fallback_price
@@ -205,7 +237,7 @@ def get_db_stock_info(ticker: str):
         if is_krx:
             import requests
             from bs4 import BeautifulSoup
-            url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
+            url = f"https://finance.naver.com/item/main.naver?code={pure_ticker}"
             headers = {"User-Agent": "Mozilla/5.0"}
             try:
                 res = requests.get(url, headers=headers, timeout=5)
@@ -322,20 +354,20 @@ def get_stocks():
 # --- ETF / ETN Endpoints ---
 
 @app.get("/api/etf/strategy")
-async def get_etf_strategy(criteria: str = "momentum", w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
+async def get_etf_strategy(criteria: str = "momentum", top_n: int = 1, w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
     from etf_strategy import get_etf_strategy_results
-    results = get_etf_strategy_results(criteria=criteria, w1=w1, w5=w5, w20=w20)
+    results = get_etf_strategy_results(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
     return results
 
 @app.get("/api/etf/simulation")
-async def get_etf_sim(criteria: str = "momentum", w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
+async def get_etf_sim(criteria: str = "momentum", top_n: int = 1, w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
     from etf_strategy import get_etf_simulation
-    return get_etf_simulation(criteria=criteria, w1=w1, w5=w5, w20=w20)
+    return get_etf_simulation(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
 
 @app.get("/api/etf/simulation-models")
-async def api_get_etf_simulation_models(criteria: str = "momentum"):
+async def api_get_etf_simulation_models(criteria: str = "momentum", top_n: int = 1):
     from etf_strategy import run_bulk_simulation
-    return run_bulk_simulation(criteria=criteria)
+    return run_bulk_simulation(criteria=criteria, top_n=top_n)
 
 @app.get("/api/etf/list")
 def api_get_etf_list():
@@ -624,6 +656,21 @@ def api_get_global_news_ranking():
             return _global_news_ranking_cache
         return []
 
+@app.get("/api/order/foreign-top-stocks")
+def api_get_foreign_top_stocks(threshold: float = 5.0, limit: int = 20, force_refresh: bool = False):
+    """
+    KOSPI 및 KOSDAQ 전종목 중 외국계 창구 순매수 비중이 threshold% 이상인 종목을
+    비중 내림차순으로 상위 최대 limit개(20개 이하면 그대로) 반환
+    """
+    try:
+        from kis_foreign_scanner import get_foreign_net_buy_stocks
+        # force_refresh 매개변수는 kis_foreign_scanner 에서는 현재 지원하지 않으므로 생략
+        stocks = get_foreign_net_buy_stocks(threshold=threshold, limit=limit)
+        return stocks
+    except Exception as e:
+        print(f"Error in api_get_foreign_top_stocks: {e}")
+        return []
+
 @app.get("/api/market/{market}/top50")
 def api_get_market_top50(market: str):
     """
@@ -635,45 +682,74 @@ def api_get_market_top50(market: str):
 @app.get("/api/realtime-prices")
 def api_get_realtime_prices(tickers: str = ""):
     """
-    Returns real-time prices for the requested tickers (comma-separated).
-    Uses yfinance instead of naver scraper for stability.
+    Returns real-time prices for requested tickers (comma-separated).
+    Queries KIS API or Naver Scraper first, with yfinance as fallback.
     """
     if not tickers: return {}
-    import yfinance as yf
     
     ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
     results = {}
-    yf_tickers = []
-    ticker_map = {}
     
-    for t in ticker_list:
-        clean = t
-        if clean.startswith("KRX:") or clean.startswith("KOSPI:"):
-            clean = clean.split(":")[-1] + ".KS"
-        elif clean.startswith("KOSDAQ:"):
-            clean = clean.split(":")[-1] + ".KQ"
-        elif clean.isdigit() and len(clean) == 6:
-            clean = clean + ".KS"
+    from kis_instance import kis_client
+    import naver_finance_scraper as naver_scraper
+    import yfinance as yf
+
+    missing_tickers = []
+    
+    for original_t in ticker_list:
+        pure_ticker = original_t.split(":")[-1]
+        price = 0
         
-        yf_tickers.append(clean)
-        ticker_map[clean] = t
-        
-    try:
-        data = yf.Tickers(" ".join(yf_tickers))
-        for yf_t, original_t in ticker_map.items():
+        # 1. Try KIS Client if available
+        if kis_client:
             try:
-                # Using history for reliable real-time/latest price
-                hist = data.tickers[yf_t].history(period="1d")
-                if not hist.empty:
-                    results[original_t] = float(hist['Close'].iloc[-1])
-                else:
-                    results[original_t] = 0
-            except Exception as inner_e:
-                print(f"Error fetching {original_t}: {inner_e}")
-                results[original_t] = 0
-    except Exception as e:
-        print(f"yfinance bulk error: {e}")
-        
+                price = kis_client.get_current_price(pure_ticker)
+            except Exception:
+                price = 0
+                
+        # 2. Try Naver Scraper fallback if price is 0
+        if price <= 0:
+            try:
+                detail = naver_scraper.get_current_price_detail(pure_ticker)
+                if detail and detail.get('price', 0) > 0:
+                    price = detail['price']
+            except Exception:
+                price = 0
+
+        if price > 0:
+            results[original_t] = price
+            results[pure_ticker] = price
+            results[f"KRX:{pure_ticker}"] = price
+        else:
+            missing_tickers.append(original_t)
+
+    # 3. Fallback to yfinance for missing/overseas tickers
+    if missing_tickers:
+        yf_tickers = []
+        yf_map = {}
+        for t in missing_tickers:
+            clean_yf = to_yf_ticker(t)
+            yf_tickers.append(clean_yf)
+            yf_map[clean_yf] = t
+            
+        try:
+            yf_data = yf.Tickers(" ".join(yf_tickers))
+            for yf_t, orig_t in yf_map.items():
+                pure_t = orig_t.split(":")[-1]
+                try:
+                    hist = yf_data.tickers[yf_t].history(period="1d")
+                    if not hist.empty:
+                        p_val = float(hist['Close'].iloc[-1])
+                        results[orig_t] = p_val
+                        results[pure_t] = p_val
+                        results[f"KRX:{pure_t}"] = p_val
+                    else:
+                        results[orig_t] = 0
+                except Exception:
+                    results[orig_t] = 0
+        except Exception as e:
+            print(f"yfinance fallback error in realtime-prices: {e}")
+
     return results
 
 @app.get("/api/indices")
@@ -721,52 +797,9 @@ def get_indices():
 def api_kis_chart(ticker: str, period: str = "D", is_overseas: bool = False, excd: str = ""):
     """
     Returns chart OHLCV data for lightweight-charts.
-    Uses yfinance for robust chart rendering.
+    Delegates to get_kis_chart (KIS Domestic/Overseas with public_data & yfinance fallback).
     """
-    import yfinance as yf
-    from datetime import datetime, timedelta
-            
-    # Map periods to yfinance intervals
-    interval_map = {"D": "1d", "W": "1wk", "M": "1mo", "m": "1m"}
-    interval = interval_map.get(period, "1d")
-    
-    # Construct yfinance ticker
-    yf_ticker = ticker
-    if not is_overseas:
-        if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ"):
-            clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
-            if clean_for_check.isdigit() and len(clean_for_check) == 6:
-                yf_ticker = f"{clean_for_check}.KS"
-            else:
-                yf_ticker = clean_for_check
-    else:
-        if excd == "TSE" and not yf_ticker.endswith(".T"): yf_ticker = f"{yf_ticker}.T"
-        elif excd == "HKS" and not yf_ticker.endswith(".HK"): yf_ticker = f"{yf_ticker}.HK"
-        elif excd == "SHS" and not yf_ticker.endswith(".SS"): yf_ticker = f"{yf_ticker}.SS"
-        elif excd == "SZS" and not yf_ticker.endswith(".SZ"): yf_ticker = f"{yf_ticker}.SZ"
-        
-    try:
-        t = yf.Ticker(yf_ticker)
-        # 1m data is only available for 7 days
-        period_str = "7d" if interval == "1m" else "1y"
-        hist = t.history(period=period_str, interval=interval)
-        
-        data = []
-        for index, row in hist.iterrows():
-            # lightweight-charts expects time in YYYY-MM-DD or unix timestamp (seconds)
-            time_val = int(index.timestamp()) if interval == "1m" else index.strftime('%Y-%m-%d')
-            data.append({
-                "time": time_val,
-                "open": row["Open"],
-                "high": row["High"],
-                "low": row["Low"],
-                "close": row["Close"],
-                "value": row["Volume"] # For volume histogram
-            })
-        return data
-    except Exception as e:
-        print("Error fetching kis chart:", e)
-        return []
+    return get_kis_chart(ticker=ticker, is_overseas=is_overseas, excd=excd, period=period)
 
 @app.get("/api/stock/autocomplete")
 def autocomplete_global_stock(q: str):
@@ -855,21 +888,35 @@ def autocomplete_global_stock(q: str):
 
 @app.get("/api/stock/search/{ticker}")
 def search_global_stock(ticker: str):
-    import yfinance as yf
     try:
         clean_ticker = ticker.upper().strip()
+        pure_ticker = to_pure_ticker(clean_ticker)
+        is_kr = is_korean_stock(clean_ticker)
+        
+        # Yahoo Finance 조회용 심볼 생성 (.KS 부착)
+        yf_symbol = to_yf_ticker(clean_ticker)
+        
         from utils.yf_util import get_yf_ticker
-        t = get_yf_ticker(clean_ticker)
+        t = get_yf_ticker(yf_symbol)
         info = t.info
         
-        # If not found or empty, fallback for Korean stocks (6 digits -> .KS)
-        if (not info or ("shortName" not in info and "longName" not in info)) and clean_ticker.isdigit() and len(clean_ticker) == 6:
-            clean_ticker = f"{clean_ticker}.KS"
-            from utils.yf_util import get_yf_ticker
-            t = get_yf_ticker(clean_ticker)
+        # 만약 정보가 없는데 한국 주식인 경우 f"{pure_ticker}.KS"로 재시도
+        if (not info or ("shortName" not in info and "longName" not in info)) and is_kr:
+            t = get_yf_ticker(f"{pure_ticker}.KS")
             info = t.info
             
         if not info or ("shortName" not in info and "longName" not in info):
+            from database import get_stock
+            db_s = get_stock(pure_ticker)
+            if db_s:
+                return {
+                    "ticker": pure_ticker,
+                    "name": db_s.get("name", pure_ticker),
+                    "price": db_s.get("price", 0),
+                    "changePct": 0,
+                    "volume": 0,
+                    "categories": ["국내", "KR Top 50"]
+                }
             return {"error": "Stock not found"}
             
         price = info.get("currentPrice", info.get("regularMarketPrice", 0))
@@ -877,13 +924,14 @@ def search_global_stock(ticker: str):
         change_pct = round(((price - prev) / prev) * 100, 2) if prev else 0
         volume = info.get("volume", info.get("regularMarketVolume", 0))
         
+        # 한국 주식이면 반환할 때는 순수 6자리 코드와 국내 카테고리로 반환
         return {
-            "ticker": clean_ticker,
-            "name": info.get("shortName", info.get("longName", clean_ticker)),
+            "ticker": pure_ticker if is_kr else clean_ticker,
+            "name": info.get("shortName", info.get("longName", pure_ticker if is_kr else clean_ticker)),
             "price": round(price, 2),
             "changePct": change_pct,
             "volume": volume,
-            "categories": ["Global Search"]
+            "categories": ["국내", "KR Top 50"] if is_kr else ["Global Search"]
         }
     except Exception as e:
         print("Search error:", e)
@@ -901,7 +949,9 @@ def get_stock_summary(ticker: str):
     from ingestion.scrapers.country_news_scraper import translate_text
     import yfinance as yf
     
-    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
+    pure_ticker = to_pure_ticker(ticker)
+    is_kr = is_korean_stock(ticker)
+    cache_key = pure_ticker if is_kr else ticker
     db_path = "data/company_profiles.json"
     
     # Ensure data directory exists
@@ -916,24 +966,23 @@ def get_stock_summary(ticker: str):
             pass
             
     # If already cached, return immediately
-    if clean_ticker in profiles:
-        return {"summary": profiles[clean_ticker]}
+    if cache_key in profiles:
+        return {"summary": profiles[cache_key]}
     
-    yf_ticker = clean_ticker
-    if clean_ticker.isdigit() and len(clean_ticker) == 6:
-        yf_ticker = f"{clean_ticker}.KS"
+    yf_ticker = to_yf_ticker(ticker)
     
     text = ""
     try:
-        info = yf.Ticker(yf_ticker).info
+        from utils.yf_util import get_yf_ticker
+        info = get_yf_ticker(yf_ticker).info
         text = info.get("longBusinessSummary") or info.get("description") or ""
     except Exception as e:
         print("YFinance Summary error:", e)
         
-    if not text and clean_ticker.isdigit():
+    if not text and is_kr:
         import requests
         from bs4 import BeautifulSoup
-        url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
+        url = f"https://finance.naver.com/item/main.naver?code={pure_ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
         try:
             res = requests.get(url, headers=headers, timeout=5)
@@ -954,7 +1003,7 @@ def get_stock_summary(ticker: str):
         translated_text = translate_text(text, "ko")
         
     # Save to cache
-    profiles[clean_ticker] = translated_text
+    profiles[cache_key] = translated_text
     try:
         with open(db_path, 'w', encoding='utf-8') as f:
             json.dump(profiles, f, ensure_ascii=False, indent=4)
@@ -973,21 +1022,21 @@ def get_analyst_report(ticker: str):
     from valuation import ValuationRequest, calculate_dcf_model, calculate_rim_model
     import yfinance as yf
     
-    clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
-    pure_ticker = clean_ticker.replace('.KS', '').replace('.KQ', '')
+    pure_ticker = to_pure_ticker(ticker)
+    is_krx = is_korean_stock(ticker)
     
     # 1. Get stock info
     stock = get_stock(pure_ticker) or get_stock(f"KRX:{pure_ticker}") or get_stock(ticker)
-    is_krx = ticker.startswith('KRX:') or pure_ticker.isdigit()
     
     if not stock:
         # Fallback to yfinance only for US/Global stocks
-        yf_ticker = clean_ticker
+        yf_ticker = to_yf_ticker(ticker)
         if is_krx:
-            stock = {"name": ticker, "ticker": ticker, "price": 0, "eps": 0, "bps": 0}
+            stock = {"name": ticker, "ticker": pure_ticker, "price": 0, "eps": 0, "bps": 0}
         else:
             try:
-                info = yf.Ticker(yf_ticker).info
+                from utils.yf_util import get_yf_ticker
+                info = get_yf_ticker(yf_ticker).info
                 stock = {
                     "name": info.get("shortName", ticker),
                     "ticker": ticker,
@@ -999,7 +1048,6 @@ def get_analyst_report(ticker: str):
                 stock = {"name": ticker, "ticker": ticker, "price": 0, "eps": 0, "bps": 0}
             
     # 국내 주식 네이버 스크래핑 폴백 (DB에 eps, bps가 0일 경우 대비)
-    is_krx = ticker.startswith('KRX:') or pure_ticker.isdigit()
     if is_krx and (not stock.get("bps") or not stock.get("eps") or not stock.get("price")):
         import requests
         from bs4 import BeautifulSoup
@@ -1152,20 +1200,29 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0):
             def _place_sell_orders_bg(items):
                 for h_item in items:
                     try:
-                        kis_client.order_sell(h_item['ticker'], h_item['qty'], 0)
+                        clean_t = h_item['ticker'].split(':')[-1]
+                        kis_client.order_sell(clean_t, h_item['qty'], 0)
                     except Exception as order_err:
                         print(f"Background sell order skip/err for {h_item['ticker']}: {order_err}")
 
             threading.Thread(target=_place_sell_orders_bg, args=(list(holdings),), daemon=True).start()
 
         for h in holdings:
+            pure_t = h['ticker'].split(':')[-1]
             current_price = 0
-            try:
-                s_info = get_stock(h['ticker'])
-                if s_info and s_info.get('price'):
-                    current_price = float(s_info['price'])
-            except Exception:
-                pass
+            if kis_client:
+                try:
+                    current_price = kis_client.get_current_price(pure_t)
+                except Exception:
+                    current_price = 0
+                    
+            if current_price == 0:
+                try:
+                    s_info = get_stock(pure_t)
+                    if s_info and s_info.get('price'):
+                        current_price = float(s_info['price'])
+                except Exception:
+                    pass
             
             if current_price == 0:
                 current_price = h.get('buyPrice', h.get('buy_price', 0))
@@ -1194,13 +1251,25 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0):
 @app.get("/api/ledger-history")
 def api_ledger_history():
     """
-    Returns the detailed trading ledger history.
+    Returns the daily summary trading ledger history.
     """
     try:
         from database import get_ledger_history
         return get_ledger_history()
     except Exception as e:
         print(f"Ledger history error: {e}")
+        return []
+
+@app.get("/api/detailed-trading-ledger")
+def api_detailed_trading_ledger(date: str = None):
+    """
+    Returns per-stock detailed trading ledger entries.
+    """
+    try:
+        from database import get_detailed_trading_ledger
+        return get_detailed_trading_ledger(date)
+    except Exception as e:
+        print(f"Detailed trading ledger error: {e}")
         return []
 
 @app.get("/api/pnl-history")
@@ -1215,6 +1284,8 @@ def api_get_holdings():
     global _holdings_price_cache, _holdings_cache_time
     from database import get_holdings, get_stock
     import time
+    import json
+    import os
     
     try:
         holdings = get_holdings()
@@ -1223,25 +1294,69 @@ def api_get_holdings():
         if now - _holdings_cache_time > 60:
             _holdings_price_cache.clear()
             _holdings_cache_time = now
+
+        # 디스크 캐시 파일에서 9시 5분/스냅샷 데이터가 있는지 확인
+        cache_stocks_map = {}
+        cache_file = os.path.join(os.path.dirname(__file__), "data", "kis_foreign_stocks_cache.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cdata = json.load(f)
+                    c_list = cdata.get('stocks', [])
+                    for cs in c_list:
+                        c_tk = cs.get('clean_ticker') or cs.get('ticker', '').replace('KRX:', '')
+                        if c_tk:
+                            cache_stocks_map[c_tk] = cs
+            except Exception:
+                pass
+
+        from kis_foreign_scanner import fetch_kis_foreign_net
             
         for h in holdings:
-            ticker = h.get("ticker")
-            if not ticker: continue
+            raw_ticker = h.get("ticker", "")
+            clean_ticker = raw_ticker.replace("KRX:", "")
+            if not clean_ticker: continue
             
-            if ticker in _holdings_price_cache:
-                h["currentPrice"] = _holdings_price_cache[ticker]
-            else:
-                local_price = 0
-                try:
-                    s_info = get_stock(ticker)
-                    if s_info and s_info.get("price"):
-                        local_price = float(s_info["price"])
-                except Exception:
-                    pass
+            fetched_info = {}
+            try:
+                fetched_info = fetch_kis_foreign_net({'ticker': clean_ticker})
+            except Exception as e:
+                print(f"[api_get_holdings] fetch error for {clean_ticker}: {e}")
 
-                h["currentPrice"] = local_price if local_price > 0 else h.get("buyPrice", 0)
-                _holdings_price_cache[ticker] = h["currentPrice"]
-                    
+            current_p = fetched_info.get('price', 0)
+            if current_p <= 0:
+                if clean_ticker in _holdings_price_cache:
+                    current_p = _holdings_price_cache[clean_ticker]
+                else:
+                    try:
+                        s_info = get_stock(clean_ticker)
+                        if s_info and s_info.get("price"):
+                            current_p = float(s_info["price"])
+                    except Exception:
+                        pass
+            
+            if current_p <= 0:
+                current_p = h.get("buyPrice", 0)
+
+            _holdings_price_cache[clean_ticker] = current_p
+            h["currentPrice"] = current_p
+            
+            # 외국계 비중 매핑
+            live_ratio = fetched_info.get("foreign_ratio", 0.0)
+            h["foreign_ratio"] = live_ratio
+            h["foreignRatio"] = live_ratio
+            h["foreign_net_buy"] = fetched_info.get("foreign_net_buy", 0)
+            
+            # 9시 5분 비중 (캐시에 스냅샷이 남아있으면 그 비중, 없으면 현재 실시간 비중)
+            cache_match = cache_stocks_map.get(clean_ticker)
+            if cache_match:
+                ratio0905 = cache_match.get("foreign_ratio", cache_match.get("foreignRatio", live_ratio))
+            else:
+                ratio0905 = live_ratio
+                
+            h["ratio0905"] = ratio0905
+            h["foreign_ratio_0905"] = ratio0905
+
         return holdings
     except Exception as e:
         print(f"Error in api_get_holdings: {e}")
@@ -1269,10 +1384,7 @@ def api_social_twitter(symbol: str):
     try:
         import yfinance as yf
         # Format symbol for yf
-        yf_symbol = symbol
-        if yf_symbol.isdigit() or yf_symbol.startswith("KRX:"):
-            clean = yf_symbol.replace("KRX:", "")
-            yf_symbol = f"{clean}.KS"
+        yf_symbol = to_yf_ticker(symbol)
         
         info = yf.Ticker(yf_symbol).news
         tweets = []
@@ -1418,16 +1530,18 @@ import os
 def get_kis_price(ticker: str):
     if not kis_client:
         return {"error": "KIS API client not initialized"}
-    price = kis_client.get_current_price(ticker)
-    return {"ticker": ticker, "price": price}
+    pure_ticker = to_kis_ticker(ticker)
+    price = kis_client.get_current_price(pure_ticker)
+    return {"ticker": pure_ticker if is_korean_stock(ticker) else ticker, "price": price}
 
 @app.post("/api/kis/order/{ticker}")
 def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = ""):
     # --- 가상 모의투자 (Paper Trading) 로직 ---
     # KIS API 연동 오류를 우회하기 위해 DB 기록만 남기는 방식으로 대체합니다.
     success = True
-    
-    # Always update DB for demonstration
+    pure_ticker = to_pure_ticker(ticker)
+    is_kr = is_korean_stock(ticker)
+    final_ticker = pure_ticker if is_kr else ticker
 
     from database import update_holding, get_stock
     adj_qty = qty if type == "buy" else -qty
@@ -1436,31 +1550,32 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
     if actual_price == 0:
         try:
             from naver_finance_scraper import naver_scraper
-            clean_ticker = ticker.split(':')[-1] if ':' in ticker else ticker
-            actual_price = naver_scraper.get_current_price_detail(clean_ticker)['price']
+            actual_price = naver_scraper.get_current_price_detail(pure_ticker)['price']
         except:
             pass
             
     if actual_price == 0:
-        stock = get_stock(ticker)
+        stock = get_stock(pure_ticker) or get_stock(ticker)
         if stock and stock.get("price"):
             actual_price = stock["price"]
         else:
             actual_price = 1 # fallback
             
-    update_holding(ticker, name or ticker, adj_qty, actual_price)
+    update_holding(final_ticker, name or final_ticker, adj_qty, actual_price)
         
-    return {"ticker": ticker, "success": True, "real_api_success": success, "type": type}
+    return {"ticker": final_ticker, "success": True, "real_api_success": success, "type": type}
 
 @with_retry(max_retries=3, initial_delay=1.0)
 def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = ""):
-    if not is_overseas and period != "m":
-        clean_for_check = ticker.replace("KRX:", "").replace("KOSDAQ:", "").replace(".KS", "").replace(".KQ", "")
-        if clean_for_check.isdigit() and len(clean_for_check) == 6:
-            from public_data_api import get_stock_history
-            history = get_stock_history(clean_for_check, count=150)
-            if history:
-                return history
+    pure_ticker = to_pure_ticker(ticker)
+    is_kr = is_korean_stock(ticker) and not is_overseas
+    
+    # 1. 한국 주식인 경우 한국거래소(공공데이터포털) 일봉 우선 조회
+    if is_kr and period not in ["m", "1Y"]:
+        from public_data_api import get_stock_history
+        history = get_stock_history(pure_ticker, count=120 if period == "6M" else 250)
+        if history:
+            return history
 
     import yfinance as yf
     try:
@@ -1469,24 +1584,20 @@ def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = "")
             pass # Global indices and forex don't need country suffix
         elif is_overseas:
             if excd == "TSE" and not yf_ticker.endswith(".T"):
-                yf_ticker = f"{ticker}.T"
+                yf_ticker = f"{pure_ticker}.T"
             elif excd == "HKS" and not yf_ticker.endswith(".HK"):
-                yf_ticker = f"{ticker}.HK"
+                yf_ticker = f"{pure_ticker}.HK"
             elif excd in ["SHS", "SZS", "SSE", "SZSE"]:
                 if excd in ["SHS", "SSE"] and not yf_ticker.endswith(".SS"):
-                    yf_ticker = f"{ticker}.SS"
+                    yf_ticker = f"{pure_ticker}.SS"
                 elif excd in ["SZS", "SZSE"] and not yf_ticker.endswith(".SZ"):
-                    yf_ticker = f"{ticker}.SZ"
+                    yf_ticker = f"{pure_ticker}.SZ"
         else:
-            if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ"):
-                clean_for_check = ticker.replace("KRX:", "").replace("KOSDAQ:", "")
-                if clean_for_check.isdigit() and len(clean_for_check) == 6:
-                    yf_ticker = f"{clean_for_check}.KS"
-                else:
-                    yf_ticker = clean_for_check
+            # 한국 주식은 Yahoo Finance에서 데이터를 불러올 때만 .KS 부착
+            yf_ticker = to_yf_ticker(ticker)
         
-        interval = "5m" if period == "m" else ("1d" if period == "D" else ("1wk" if period == "W" else "1mo"))
-        yf_period = "5d" if period == "m" else "6mo"
+        interval = "5m" if period == "m" else ("1wk" if period == "W" else "1mo" if period == "M" else "1d")
+        yf_period = "5d" if period == "m" else ("1y" if period == "1Y" else "6mo")
             
         df = yf.download(yf_ticker, period=yf_period, interval=interval, progress=False)
         if df.empty:
@@ -1553,15 +1664,8 @@ def api_pairs_trading(ticker1: str, ticker2: str):
     import pandas as pd
     
     try:
-        def format_ticker(t):
-            if t.startswith("KRX:"): return t.replace("KRX:", "") + ".KS"
-            if t.startswith("KOSDAQ:"): return t.replace("KOSDAQ:", "") + ".KQ"
-            clean = t.replace("KRX:", "").replace("KOSDAQ:", "")
-            if clean.isdigit() and len(clean) == 6: return f"{clean}.KS"
-            return clean
-            
-        t1 = format_ticker(ticker1)
-        t2 = format_ticker(ticker2)
+        t1 = to_yf_ticker(ticker1)
+        t2 = to_yf_ticker(ticker2)
         
         def fetch_pairs():
             d1 = yf.download(t1, period="1y", progress=False)["Close"]
@@ -1620,25 +1724,12 @@ def api_get_fundamentals(ticker: str):
     """
     import yfinance as yf
     try:
-        yf_ticker = ticker
-        
-        if yf_ticker.startswith("KRX:"):
-            yf_ticker = yf_ticker.replace("KRX:", "") + ".KS" # default to KS, but KQ will also work with naver
-        elif yf_ticker.startswith("KOSDAQ:"):
-            yf_ticker = yf_ticker.replace("KOSDAQ:", "") + ".KQ"
-            
-        # Quick heuristic to format non-US tickers for yfinance
-        if not yf_ticker.endswith(".KS") and not yf_ticker.endswith(".KQ") and not yf_ticker.endswith(".T") and not yf_ticker.endswith(".HK") and not yf_ticker.endswith(".SS") and not yf_ticker.endswith(".SZ"):
-            # If it's pure numbers, assume Korean KS
-            clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
-            if clean_for_check.isdigit() and len(clean_for_check) == 6:
-                yf_ticker = f"{clean_for_check}.KS"
-            else:
-                yf_ticker = clean_for_check
+        pure_ticker = to_pure_ticker(ticker)
+        is_krx = is_korean_stock(ticker)
+        yf_ticker = to_yf_ticker(ticker)
         
         info = {}
         targetMean = 0
-        is_krx = yf_ticker.endswith(".KS") or yf_ticker.endswith(".KQ")
         
         try:
             def get_info():
@@ -1653,17 +1744,39 @@ def api_get_fundamentals(ticker: str):
         # Generate target price history for chart markers
         target_history = []
         if is_krx:
-            code = yf_ticker.split('.')[0]
+            code = pure_ticker
+            from routers.reports import get_analyst_reports
+            recent_reports = get_analyst_reports(code, days=180).get("items", [])
+            
+            # Extract targets and format them for the chart
+            for rep in recent_reports:
+                tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
+                if tp_str.isdigit() and int(tp_str) > 0:
+                    target_history.append({
+                        "time": rep["date"],
+                        "position": "aboveBar",
+                        "color": "rgba(255, 152, 0, 0.4)",
+                        "shape": "circle",
+                        "text": f"{rep.get('broker', '증권사')} 목표가: {int(tp_str):,}",
+                        "value": float(tp_str)
+                    })
+                    
             from database import get_analyst_target_history
-            target_history = get_analyst_target_history(code)
-            if target_history and targetMean == 0:
-                try:
-                    # Last item in history (ordered by date ascending)
-                    latest_val_str = target_history[-1]['text'].split()[-1].replace(',', '')
-                    if latest_val_str.isdigit():
-                        targetMean = int(latest_val_str)
-                except Exception:
-                    pass
+            db_history = get_analyst_target_history(code)
+            for item in db_history:
+                target_history.append({
+                    "time": item["time"],
+                    "position": "aboveBar",
+                    "color": "#ff9800",
+                    "shape": "circle",
+                    "text": item["text"] if item.get("text") else f"목표가: {int(item['target_price']):,}",
+                    "value": float(item['target_price'])
+                })
+            
+            if target_history:
+                target_history = sorted(target_history, key=lambda x: x["time"])
+                if targetMean == 0:
+                    targetMean = target_history[-1]["value"]
         else:
             try:
                 from utils.yf_util import get_yf_ticker
@@ -1859,8 +1972,8 @@ def api_get_fundamentals(ticker: str):
             pass
 
         return {
-            "ticker": ticker,
-            "name": info.get("shortName") or db_fallback_name or yf_ticker,
+            "ticker": pure_ticker if is_krx else ticker,
+            "name": info.get("shortName") or db_fallback_name or (pure_ticker if is_krx else yf_ticker),
             "par_value": nv_fund.get("par_value", 0) if nv_fund else 0,
             "per": nv_fund.get("per", "N/A") if nv_fund and nv_fund.get("per") != "N/A" else round(info.get("trailingPE", 0) or 0, 2),
             "per_next": nv_fund.get("per_next", "N/A"),
@@ -1909,7 +2022,7 @@ def api_calculate_valuation(ticker: str, req: ValuationRequest):
     is_default = (req.coe == 0.10 and req.discount_3y == 0.50 and req.term_growth == 0.05)
     
     # Reject overseas stocks
-    is_krx = ticker.endswith(".KS") or ticker.endswith(".KQ")
+    is_krx = is_korean_stock(ticker)
     if not is_krx:
         return {"error": "해외 주식은 주가모델 계산을 지원하지 않습니다."}
         
@@ -1945,7 +2058,7 @@ def api_calculate_valuation(ticker: str, req: ValuationRequest):
 
 @app.get("/api/kis/chart/{ticker}")
 def get_kis_chart(ticker: str, is_overseas: bool = False, excd: str = "", period: str = "D"):
-    if not kis_client:
+    if not kis_client or period == "1Y":
         return _fallback_chart(ticker, period, is_overseas, excd)
     
     try:
@@ -1966,7 +2079,8 @@ def get_kis_chart(ticker: str, is_overseas: bool = False, excd: str = "", period
                 })
             return formatted
         else:
-            data = kis_client.get_domestic_chart(ticker, period)
+            pure_ticker = to_kis_ticker(ticker)
+            data = kis_client.get_domestic_chart(pure_ticker, period)
             if not data:
                 return _fallback_chart(ticker, period, is_overseas)
             # Parse domestic data

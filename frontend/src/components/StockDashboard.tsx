@@ -94,12 +94,17 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
   }, [globalSearchTicker]);
 
   const handleSelect = async (ticker: string) => {
-    if (setGlobalSearchTicker && ticker !== globalSearchTicker) {
-      setGlobalSearchTicker(ticker);
+    const rawUpper = String(ticker || "").toUpperCase().trim();
+    const pureCode = rawUpper.replace(/^KRX:/, '').replace(/\.KS$/, '').replace(/\.KQ$/, '');
+    const isKR = /^\d{6}$/.test(pureCode) || rawUpper.endsWith('.KS') || rawUpper.endsWith('.KQ') || rawUpper.startsWith('KRX:');
+    const effectiveTicker = isKR ? pureCode : ticker;
+
+    if (setGlobalSearchTicker && effectiveTicker !== globalSearchTicker) {
+      setGlobalSearchTicker(effectiveTicker);
     }
     
     // 빠른 UI 반응성을 위한 Optimistic Update
-    const selectedFromList = combinedList.find(s => s.ticker === ticker);
+    const selectedFromList = combinedList.find(s => s.ticker === effectiveTicker || s.ticker === ticker || (isKR && s.ticker?.includes(pureCode)));
     if (selectedFromList) {
       setSelectedStock(selectedFromList);
       setStockDetails({ stock: selectedFromList, financials: [] });
@@ -109,7 +114,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
 
     try {
       // First try to fetch from /api/fundamentals/ (more global coverage) or search
-      const res = await fetch(`/api/fundamentals/${ticker}`);
+      const res = await fetch(`/api/fundamentals/${effectiveTicker}`);
       
       let data;
       if (!res.ok) {
@@ -122,11 +127,9 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
         }
       }
       
-      const selectedFromList = combinedList.find(s => s.ticker === ticker);
-      
       if (data.error || data.detail) {
         // Fallback to DB
-        const searchRes = await fetch(`/api/db/stock/${ticker}`);
+        const searchRes = await fetch(`/api/db/stock/${effectiveTicker}`);
         let searchData;
         if (!searchRes.ok) {
           searchData = { error: `DB Server error: ${searchRes.status}` };
@@ -143,7 +146,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
         } else {
            // Even fallback failed (not in DB, yfinance failed). Mock it so chart still loads!
            data = { 
-             stock: selectedFromList ? { ...selectedFromList } : { ticker, name: ticker, price: 0, currency: "KRW", change: 0, changePct: 0 }, 
+             stock: selectedFromList ? { ...selectedFromList } : { ticker: effectiveTicker, name: ticker, price: 0, currency: isKR ? "KRW" : "USD", change: 0, changePct: 0 }, 
              financials: [] 
            };
         }

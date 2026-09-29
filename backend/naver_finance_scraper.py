@@ -5,6 +5,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils.retry_util import with_retry
+from utils.ticker_util import to_naver_code, to_pure_ticker, to_yf_ticker, is_korean_stock
+
 class NaverFinanceScraper:
     def __init__(self):
         self.headers = {
@@ -12,8 +14,7 @@ class NaverFinanceScraper:
         }
 
     def _clean_ticker(self, ticker: str) -> str:
-        clean = ticker.split(':')[-1] if ':' in ticker else ticker
-        return clean.replace(".KS", "").replace(".KQ", "")
+        return to_naver_code(ticker)
 
     @with_retry(max_retries=3, initial_delay=1.0)
     def get_current_price_detail(self, ticker: str) -> dict:
@@ -33,8 +34,13 @@ class NaverFinanceScraper:
                     change = int(basic_data.get("compareToPreviousClosePrice", "0").replace(",", ""))
                     change_pct = float(basic_data.get("fluctuationsRatio", "0"))
                     
-                    if change_pct < 0 and change > 0:
-                        change = -change
+                    code = basic_data.get("compareToPreviousPrice", {}).get("code", "")
+                    if code in ['4', '5'] or change < 0 or change_pct < 0:
+                        change = -abs(change)
+                        change_pct = -abs(change_pct)
+                    elif code in ['1', '2'] or change > 0 or change_pct > 0:
+                        change = abs(change)
+                        change_pct = abs(change_pct)
                     
                     result["change"] = change
                     result["changePct"] = change_pct
@@ -52,11 +58,11 @@ class NaverFinanceScraper:
             print(f"Naver scraper error ({ticker}): {e}")
             
         if result["price"] == 0:
-            # Fallback 1: KIS API
+            # Fallback 1: KIS API (국내 주식은 .KS 제거된 6자리 코드로 호출)
             try:
                 from kis_instance import kis_client
                 if kis_client:
-                    kis_price = kis_client.get_current_price(ticker)
+                    kis_price = kis_client.get_current_price(clean_ticker)
                     if kis_price > 0:
                         result["price"] = int(kis_price)
                         return result
@@ -65,24 +71,24 @@ class NaverFinanceScraper:
                 
             # Fallback 2: Public Data API (Domestic) and YFinance (Overseas)
             try:
-                yf_ticker = ticker
-                clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
-                if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                pure_ticker = to_pure_ticker(ticker)
+                if is_korean_stock(ticker):
                     from public_data_api import get_current_price as get_pd_price
-                    pd_info = get_pd_price(clean_for_check)
+                    pd_info = get_pd_price(pure_ticker)
                     if pd_info:
                         result["price"] = int(pd_info.get("stck_prpr", "0"))
                         result["change"] = int(pd_info.get("prdy_vrss", "0"))
                         result["changePct"] = float(pd_info.get("prdy_ctrt", "0"))
                         result["volume"] = int(pd_info.get("acml_vol", "0"))
                         return result
-                    
-                    yf_ticker = f"{clean_for_check}.KS"
-                elif clean_for_check.isdigit() and len(clean_for_check) == 4:
-                    if clean_for_check == "0700":
-                        yf_ticker = f"{clean_for_check}.HK"
+                
+                # Yahoo Finance는 호출 시에만 .KS를 붙여 조회
+                yf_ticker = to_yf_ticker(ticker)
+                if pure_ticker.isdigit() and len(pure_ticker) == 4:
+                    if pure_ticker == "0700":
+                        yf_ticker = f"{pure_ticker}.HK"
                     else:
-                        yf_ticker = f"{clean_for_check}.T"
+                        yf_ticker = f"{pure_ticker}.T"
                 
                 from utils.yf_util import get_yf_ticker
                 info = get_yf_ticker(yf_ticker).info
@@ -161,35 +167,34 @@ class NaverFinanceScraper:
         # Fallback for missing tickers via KIS API and yfinance
         for original_ticker in tickers:
             if original_ticker not in prices or prices[original_ticker] == 0:
-                # 1. KIS API
+                pure_ticker = to_pure_ticker(original_ticker)
+                # 1. KIS API (순수 6자리 코드로 조회)
                 try:
                     from kis_instance import kis_client
                     if kis_client:
-                        kis_price = kis_client.get_current_price(original_ticker)
+                        kis_price = kis_client.get_current_price(pure_ticker)
                         if kis_price > 0:
                             prices[original_ticker] = int(kis_price)
                             continue
                 except Exception as e:
                     print(f"KIS fallback error for {original_ticker}: {e}")
                     
-                # 2. Public Data API & YFinance
+                # 2. Public Data API (한국 주식일 때 순수 코드로 조회)
                 try:
-                    yf_ticker = original_ticker
-                    clean_for_check = yf_ticker.replace("KRX:", "").replace("KOSDAQ:", "")
-                    if clean_for_check.isdigit() and len(clean_for_check) == 6:
+                    if is_korean_stock(original_ticker):
                         from public_data_api import get_current_price as get_pd_price
-                        pd_info = get_pd_price(clean_for_check)
+                        pd_info = get_pd_price(pure_ticker)
                         if pd_info:
                             prices[original_ticker] = int(pd_info.get("stck_prpr", "0"))
                             continue
                         
-                        yf_ticker = f"{clean_for_check}.KS"
-                    elif clean_for_check.isdigit() and len(clean_for_check) == 4:
-                        # Simple heuristic: 0700 is Tencent(HK), others usually Japanese(TSE)
-                        if clean_for_check == "0700":
-                            yf_ticker = f"{clean_for_check}.HK"
+                    # 3. YFinance (호출 시에만 .KS 부여)
+                    yf_ticker = to_yf_ticker(original_ticker)
+                    if pure_ticker.isdigit() and len(pure_ticker) == 4:
+                        if pure_ticker == "0700":
+                            yf_ticker = f"{pure_ticker}.HK"
                         else:
-                            yf_ticker = f"{clean_for_check}.T"
+                            yf_ticker = f"{pure_ticker}.T"
                     
                     from utils.yf_util import get_yf_ticker
                     info = get_yf_ticker(yf_ticker).info

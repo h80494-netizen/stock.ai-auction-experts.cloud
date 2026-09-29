@@ -1,139 +1,156 @@
-import React, { useEffect, useRef, memo } from 'react';
-import { createChart, ColorType, CandlestickSeries, LineStyle, createSeriesMarkers } from 'lightweight-charts';
+import React, { useMemo } from 'react';
+import {
+  ComposedChart,
+  Area,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer
+} from 'recharts';
 
-function KISChart({ data, symbol, fundamentals, currentPrice, changePct }: { data: any[], symbol: string, fundamentals?: any, currentPrice?: number, changePct?: number }) {
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!chartContainerRef.current) return;
-
-    const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
-      }
-    };
-
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#131722' },
-        textColor: '#d1d4dc',
-      },
-      grid: {
-        vertLines: { color: '#1e222d' },
-        horzLines: { color: '#1e222d' },
-      },
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
-    });
-
-    const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#ef5350',
-      downColor: '#26a69a',
-      borderVisible: false,
-      wickUpColor: '#ef5350',
-      wickDownColor: '#26a69a',
-    });
+export default function KISChart({ data, symbol, fundamentals, currentPrice, changePct }: any) {
+  const chartData = useMemo(() => {
+    if (!data || !Array.isArray(data) || data.length === 0) return [];
     
-    // Validate data format (time must be unique and sorted)
-    if (data && Array.isArray(data) && data.length > 0) {
-      try {
-        // Ensure data is sorted ascending by time (works for both string and number)
-        const sortedData = [...data].sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
-        
-        // Remove duplicates and invalid items (NaNs)
-        const validData = sortedData.filter((item) => 
-          item && 
-          item.time !== undefined && item.time !== null &&
-          typeof item.open === 'number' && !isNaN(item.open) && 
-          typeof item.high === 'number' && !isNaN(item.high) && 
-          typeof item.low === 'number' && !isNaN(item.low) && 
-          typeof item.close === 'number' && !isNaN(item.close)
-        );
-        
-        const uniqueData = validData.filter((item, index, arr) => 
-          index === 0 || item.time !== arr[index - 1].time
-        );
-        
-        if (uniqueData.length > 0) {
-          candlestickSeries.setData(uniqueData);
-          
-          if (fundamentals && fundamentals.target_history && fundamentals.target_history.length > 0) {
-            const availableTimes = uniqueData.map(d => d.time);
-            const targetLineData: any[] = [];
-            
-            // Map target history to specific times and create a line series
-            fundamentals.target_history.forEach((marker: any) => {
-              if (marker.value && !isNaN(marker.value)) {
-                let matchTime = null;
-                const exactMatch = availableTimes.find(t => t === marker.time);
-                if (exactMatch) {
-                   matchTime = exactMatch;
-                } else {
-                   const targetTime = typeof marker.time === 'string' ? new Date(marker.time).getTime() : marker.time * 1000;
-                   let closestTime = null;
-                   for (let i = availableTimes.length - 1; i >= 0; i--) {
-                     const dataTime = typeof availableTimes[i] === 'string' ? new Date(availableTimes[i]).getTime() : availableTimes[i] * 1000;
-                     if (dataTime <= targetTime) {
-                        closestTime = availableTimes[i];
-                        break;
-                     }
-                   }
-                   if (closestTime) matchTime = closestTime;
-                }
-                
-                if (matchTime) {
-                   // Ensure no duplicate times for line series
-                   if (!targetLineData.find(d => d.time === matchTime)) {
-                      targetLineData.push({ time: matchTime, value: marker.value });
-                   }
-                }
-              }
-            });
-            
-            if (targetLineData.length > 0) {
-               targetLineData.sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
-               // Create Line Series for Target Prices
-               const targetSeries = (chart as any).addLineSeries({
-                   color: '#ff9800',
-                   lineWidth: 2,
-                   lineStyle: 1, // Dotted
-                   title: '목표가',
-               });
-               targetSeries.setData(targetLineData);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Chart data formatting error:", err);
-      }
+    // 1. Sort base candlestick data
+    let sortedData = [...data].sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
+    
+    // filter duplicates and NaN
+    sortedData = sortedData.filter((item, index, arr) => 
+      item && typeof item.close === 'number' && !isNaN(item.close) &&
+      (index === 0 || item.time !== arr[index - 1].time)
+    );
+
+    if (sortedData.length === 0) return [];
+
+    // 2. Extract and format target history
+    let targets: { time: string, value: number }[] = [];
+    if (fundamentals && fundamentals.target_history && Array.isArray(fundamentals.target_history)) {
+      const lastPrice = sortedData[sortedData.length - 1].close;
+      targets = fundamentals.target_history
+        .filter((t: any) => t.value && !isNaN(t.value) && t.value > lastPrice * 0.1)
+        .map((t: any) => ({ time: t.time, value: t.value }));
+      targets.sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
     }
 
-    const resizeObserver = new ResizeObserver(() => handleResize());
-    resizeObserver.observe(chartContainerRef.current);
+    // 3. Merge targets into the timeline using forward-fill
+    let merged = sortedData.map(d => ({ ...d, targetPrice: null as number | null }));
+    
+    if (targets.length > 0) {
+      let currentTarget = targets[0].value;
+      let targetIdx = 0;
+      
+      merged.forEach(row => {
+        // Update target if we passed a target date
+        while (targetIdx < targets.length && row.time >= targets[targetIdx].time) {
+          currentTarget = targets[targetIdx].value;
+          targetIdx++;
+        }
+        row.targetPrice = currentTarget;
+      });
+    }
 
-    return () => {
-      resizeObserver.disconnect();
-      chart.remove();
-    };
-  }, [data]);
+    return merged;
+  }, [data, fundamentals]);
 
   const formattedPrice = currentPrice !== undefined ? currentPrice.toLocaleString() : '';
   const priceColor = changePct !== undefined ? (changePct > 0 ? 'text-red-500' : (changePct < 0 ? 'text-blue-500' : 'text-gray-400')) : 'text-gray-400';
   const sign = changePct !== undefined && changePct > 0 ? '+' : '';
 
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-gray-800 border border-gray-700 p-3 rounded shadow-lg z-50">
+          <p className="text-gray-300 font-bold mb-2">{label}</p>
+          {payload.map((entry: any, index: number) => (
+            <p key={index} style={{ color: entry.color }} className="text-sm">
+              {entry.name}: {entry.value ? entry.value.toLocaleString() : ''}
+            </p>
+          ))}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // If no data
+  if (!chartData || chartData.length === 0) {
+    return <div className="w-full h-full flex items-center justify-center text-gray-500">데이터가 없습니다</div>;
+  }
+
+  // Calculate dynamic Y-axis domain to add padding
+  const allValues = chartData.map(d => d.close).concat(chartData.map(d => d.targetPrice).filter(v => v !== null) as number[]);
+  const minVal = Math.min(...allValues);
+  const maxVal = Math.max(...allValues);
+  const padding = (maxVal - minVal) * 0.1;
+  const domainMin = Math.max(0, minVal - padding);
+  const domainMax = maxVal + padding;
+
   return (
-    <div className="w-full h-full relative">
-      <div className="absolute top-2 left-4 z-10 text-gray-400 font-bold bg-black/50 px-2 py-1 rounded flex items-center gap-2">
-        <span>{symbol} (KIS API 실시간 차트)</span>
+    <div className="w-full h-full relative font-sans">
+      <div className="absolute top-2 left-4 z-10 text-gray-300 font-bold bg-black/60 px-3 py-1.5 rounded flex items-center gap-2 text-sm shadow">
+        <span>{symbol} (6개월 주가 차트)</span>
         {currentPrice !== undefined && (
-          <span className={`ml-2 text-lg ${priceColor}`}>
-            {formattedPrice}원 <span className="text-sm">({sign}{changePct}%)</span>
+          <span className={priceColor}>
+            {formattedPrice} {changePct !== undefined ? `(${sign}${changePct.toFixed(2)}%)` : ''}
           </span>
         )}
       </div>
-      <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
+
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart
+          data={chartData}
+          margin={{ top: 50, right: 30, bottom: 10, left: 10 }}
+        >
+          <CartesianGrid stroke="#1e222d" strokeDasharray="3 3" vertical={false} />
+          <XAxis 
+            dataKey="time" 
+            stroke="#6b7280" 
+            tick={{ fill: '#9ca3af', fontSize: 11 }} 
+            minTickGap={40}
+            tickMargin={10}
+          />
+          <YAxis 
+            yAxisId="right"
+            orientation="right"
+            stroke="#6b7280" 
+            tick={{ fill: '#9ca3af', fontSize: 11 }} 
+            domain={[domainMin, domainMax]}
+            tickFormatter={(val) => {
+              if (val >= 1000000) return (val / 1000000).toFixed(1) + 'M';
+              if (val >= 1000) return (val / 1000).toFixed(0) + 'k';
+              return val;
+            }}
+          />
+          <Tooltip content={<CustomTooltip />} />
+          
+          <Area 
+            yAxisId="right"
+            type="monotone" 
+            dataKey="close" 
+            name="종가" 
+            stroke="#3b82f6" 
+            fill="#3b82f6" 
+            fillOpacity={0.15}
+            strokeWidth={2}
+            isAnimationActive={false}
+          />
+          
+          <Line 
+            yAxisId="right"
+            type="stepAfter" 
+            dataKey="targetPrice" 
+            name="목표가" 
+            stroke="#ffeb3b" 
+            strokeWidth={3} 
+            dot={false}
+            activeDot={{ r: 6, fill: '#ffeb3b', stroke: '#000', strokeWidth: 2 }}
+            isAnimationActive={false}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
     </div>
   );
 }
-
-export default memo(KISChart);

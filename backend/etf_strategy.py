@@ -2,6 +2,7 @@ import sqlite3
 import os
 import requests
 import time
+import math
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -48,49 +49,115 @@ def update_etf_data():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    success_count = 0
-    for ticker in ETF_TARGETS.keys():
-        try:
-            ticker_obj = yf.Ticker(ticker)
-            df = ticker_obj.history(period="2y")
+    tickers = list(ETF_TARGETS.keys())
+    success = False
+    try:
+        raw_df = yf.download(tickers, period="2y", progress=False)
+        if isinstance(raw_df.columns, pd.MultiIndex):
+            df = raw_df["Close"].copy()
+        else:
+            df = raw_df.copy()
             
-            if not df.empty:
-                for date, row in df.iterrows():
-                    date_str = date.strftime('%Y-%m-%d')
-                    close_val = row['Close']
-                    c.execute('''
-                        INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
-                        VALUES (?, ?, ?)
-                    ''', (ticker, date_str, float(close_val)))
-                success_count += 1
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"Failed to fetch ETF data for {ticker} from yfinance: {e}")
+        if not df.empty:
+            df = df.ffill()
+            last_date = df.index[-1]
             
+            # Fetch real latest prices using fast_info / ticker object to replace NaN or stale ffill prices on last_date
+            for ticker in tickers:
+                try:
+                    t_obj = yf.Ticker(ticker)
+                    last_price = t_obj.fast_info.get('lastPrice')
+                    if last_price and not math.isnan(last_price) and float(last_price) > 0:
+                        df.loc[last_date, ticker] = float(last_price)
+                    else:
+                        hist = t_obj.history(period="5d", interval="15m")
+                        if not hist.empty:
+                            valid_closes = hist['Close'].dropna()
+                            if not valid_closes.empty:
+                                df.loc[last_date, ticker] = float(valid_closes.iloc[-1])
+                except Exception as ex:
+                    print(f"Fetch real price failed for {ticker}: {ex}")
+                        
+            df = df.ffill().bfill()
+            
+            c.execute("DELETE FROM etf_daily_prices")
+            records = []
+            for date_idx, row in df.iterrows():
+                date_str = date_idx.strftime('%Y-%m-%d')
+                for ticker in tickers:
+                    if ticker in row and not pd.isna(row[ticker]):
+                        c_val = float(row[ticker])
+                        if c_val > 0 and not math.isnan(c_val) and not math.isinf(c_val):
+                            records.append((ticker, date_str, c_val))
+            
+            c.executemany('''
+                INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) 
+                VALUES (?, ?, ?)
+            ''', records)
+            conn.commit()
+            success = True
+    except Exception as e:
+        print(f"Failed to fetch ETF data from yfinance bulk download: {e}")
+        
+    c.execute("DELETE FROM etf_daily_prices WHERE close IS NULL OR close <= 0")
     conn.commit()
     conn.close()
     
-    if success_count > 0:
+    if success:
         with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
             f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 def check_and_update_etf_data():
     last_update_file = os.path.join(DATA_DIR, 'last_update.txt')
     needs_update = True
+    
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT count(*), max(date) FROM etf_daily_prices")
+    row = c.fetchone()
+    conn.close()
+    
+    count_val = row[0] if row else 0
+    max_db_date = row[1] if row and row[1] else ""
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    
     if os.path.exists(last_update_file):
         with open(last_update_file, 'r') as f:
             last_time_str = f.read().strip()
             try:
                 last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
-                if (datetime.now() - last_time).total_seconds() < 2 * 3600:
+                if (datetime.now() - last_time).total_seconds() < 2 * 3600 and max_db_date >= today_str:
                     needs_update = False
             except:
                 pass
                 
     if needs_update:
-        update_etf_data()
+        if count_val > 0:
+            # DB has existing data: trigger update in a background thread so API call is fast & non-blocking
+            import threading
+            threading.Thread(target=update_etf_data, daemon=True).start()
+        else:
+            # DB is empty: must fetch initial data synchronously
+            update_etf_data()
 
-def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
+def sanitize_val(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        val_f = float(val)
+        if math.isnan(val_f) or math.isinf(val_f):
+            return default
+        return val_f
+    except (ValueError, TypeError):
+        return default
+
+def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
+    try:
+        top_n = max(1, min(4, int(top_n)))
+    except (ValueError, TypeError):
+        top_n = 1
+
     check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -98,10 +165,10 @@ def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     results = []
     try:
         # Load all prices into a dataframe
-        df = pd.read_sql_query("SELECT * FROM etf_daily_prices ORDER BY date ASC", conn)
+        df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
         if df.empty:
             update_etf_data()
-            df = pd.read_sql_query("SELECT * FROM etf_daily_prices ORDER BY date ASC", conn)
+            df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
     except:
         conn.close()
         return []
@@ -120,18 +187,18 @@ def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
         closes = ticker_df['close'].tolist()
         dates = ticker_df['date'].tolist()
         
-        current_price = closes[-1]
-        prev_1d_price = closes[-2]
-        prev_5d_price = closes[-6] if len(closes) >= 6 else closes[0]
-        prev_20d_price = closes[-21] if len(closes) >= 21 else closes[0]
+        current_price = sanitize_val(closes[-1])
+        prev_1d_price = sanitize_val(closes[-2])
+        prev_5d_price = sanitize_val(closes[-6] if len(closes) >= 6 else closes[0])
+        prev_20d_price = sanitize_val(closes[-21] if len(closes) >= 21 else closes[0])
         
-        return_1d = ((current_price - prev_1d_price) / prev_1d_price) * 100
-        return_5d = ((current_price - prev_5d_price) / prev_5d_price) * 100
-        return_20d = ((current_price - prev_20d_price) / prev_20d_price) * 100
+        return_1d = sanitize_val(((current_price - prev_1d_price) / prev_1d_price) * 100) if prev_1d_price > 0 else 0.0
+        return_5d = sanitize_val(((current_price - prev_5d_price) / prev_5d_price) * 100) if prev_5d_price > 0 else 0.0
+        return_20d = sanitize_val(((current_price - prev_20d_price) / prev_20d_price) * 100) if prev_20d_price > 0 else 0.0
         
-        momentum_score = (return_1d * w1) + (return_5d * w5) + (return_20d * w20)
+        momentum_score = sanitize_val((return_1d * w1) + (return_5d * w5) + (return_20d * w20))
         
-        sharpe_ratio = 0
+        sharpe_ratio = 0.0
         if criteria == "sharpe":
             recent_20 = ticker_df.tail(21).copy() # 21 rows for 20 returns
             recent_20['daily_ret'] = recent_20['close'].pct_change() * 100
@@ -139,9 +206,9 @@ def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
             if pd.isna(std_dev) or std_dev == 0:
                 sharpe_ratio = momentum_score
             else:
-                sharpe_ratio = momentum_score / std_dev
+                sharpe_ratio = sanitize_val(momentum_score / std_dev)
                 
-        final_score = sharpe_ratio if criteria == "sharpe" else momentum_score
+        final_score = sanitize_val(sharpe_ratio if criteria == "sharpe" else momentum_score)
         
         results.append({
             "ticker": ticker,
@@ -153,22 +220,34 @@ def get_etf_strategy_results(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
             "momentum_score": momentum_score,
             "sharpe_ratio": sharpe_ratio,
             "final_score": final_score,
-            "last_updated": dates[-1]
+            "last_updated": dates[-1] if dates else ""
         })
         
     # Sort by final_score descending
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
+    
+    # Assign ranks & recommended weights based on top_n
+    equal_weight = round(100.0 / top_n, 1)
+    for idx, item in enumerate(results):
+        item["rank"] = idx + 1
+        if idx < top_n and item["final_score"] > 0.5:
+            item["is_selected"] = True
+            item["recommended_weight"] = equal_weight
+        else:
+            item["is_selected"] = False
+            item["recommended_weight"] = 0.0
+            
     return results
 
 from functools import lru_cache
 
 @lru_cache(maxsize=1)
-def get_cached_etf_pivot(criteria_dummy=None):
+def get_cached_etf_pivot(cache_key=None):
     check_and_update_etf_data()
     init_db()
     conn = sqlite3.connect(DB_PATH)
     try:
-        df = pd.read_sql_query("SELECT * FROM etf_daily_prices ORDER BY date ASC", conn)
+        df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
     except:
         conn.close()
         return None
@@ -182,10 +261,14 @@ def get_cached_etf_pivot(criteria_dummy=None):
     pivot = pivot.ffill().dropna()
     return pivot
 
-def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
+def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
+    try:
+        top_n = max(1, min(4, int(top_n)))
+    except (ValueError, TypeError):
+        top_n = 1
+
     check_and_update_etf_data()
     
-    # Use last_update time as cache key so we don't cache stale data
     try:
         with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
             cache_key = f.read().strip()
@@ -204,34 +287,31 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
     etf_normalized = {ticker: [100.0] * len(dates) for ticker in pivot.columns}
     strategy_returns = [100.0] * len(dates)
     selected_etf = [""] * len(dates)
+    selected_etf_lists = [[] for _ in range(len(dates))]
     
     # Calculate ETF individual normalized base 100
     for ticker in pivot.columns:
         base_price = float(pivot[ticker].iloc[0])
         for i, date in enumerate(dates):
-            etf_normalized[ticker][i] = float((pivot[ticker].iloc[i] / base_price) * 100.0)
+            val = (pivot[ticker].iloc[i] / base_price) * 100.0 if base_price > 0 else 100.0
+            etf_normalized[ticker][i] = sanitize_val(val, 100.0)
     ret_1d_df = pivot.pct_change(1) * 100
     ret_5d_df = pivot.pct_change(5) * 100
     ret_20d_df = pivot.pct_change(20) * 100
     
     if criteria == "sharpe":
-        # 21-day rolling standard deviation of daily returns
         daily_rets = pivot.pct_change() * 100
         rolling_std_df = daily_rets.rolling(window=21).std()
     
-    # Simulation Logic
-    current_target = None
+    current_targets = []
     
     for i in range(len(dates)):
         if i < 21:
-            # Need at least 21 days for 20-day return calculation
             selected_etf[i] = "Waiting"
+            selected_etf_lists[i] = ["Waiting"]
             continue
             
-        # Calculate momentum for all ETFs at day i
-        best_ticker = None
-        best_score = -9999
-        
+        scores = []
         for ticker in pivot.columns:
             try:
                 r1 = ret_1d_df[ticker].iloc[i]
@@ -249,38 +329,62 @@ def get_etf_simulation(criteria="momentum", w1=0.5, w5=0.3, w20=0.2):
                     if not pd.isna(std_dev) and std_dev > 0:
                         final_score = score / std_dev
                 
-                if final_score > best_score:
-                    best_score = final_score
-                    best_ticker = ticker
+                scores.append((ticker, final_score))
             except:
-                pass
+                continue
                 
-        # 현금(CASH) 방어 로직: 가장 높은 모멘텀 점수가 0.5 이하면 투자하지 않음
-        if best_score <= 0.5:
-            best_ticker = "CASH"
-            
-        selected_etf[i] = best_ticker
+        # Sort by final_score descending
+        scores.sort(key=lambda x: x[1], reverse=True)
         
-        # Apply return from current_target (which was selected at i-1)
-        if current_target and current_target in pivot.columns:
-            prev_p = float(pivot[current_target].iloc[i-1])
-            curr_p = float(pivot[current_target].iloc[i])
-            daily_ret = (curr_p - prev_p) / prev_p
-            strategy_returns[i] = float(strategy_returns[i-1] * (1 + daily_ret))
-        else:
-            strategy_returns[i] = float(strategy_returns[i-1])
+        # Select top_n tickers
+        top_candidates = scores[:top_n]
+        selected_tickers = []
+        for tkr, scr in top_candidates:
+            if scr <= 0.5:
+                selected_tickers.append("CASH")
+            else:
+                selected_tickers.append(tkr)
+                
+        # If no valid tickers or less than top_n, fill remaining with CASH
+        while len(selected_tickers) < top_n:
+            selected_tickers.append("CASH")
             
-        # Update target for next day
-        current_target = best_ticker
+        selected_etf[i] = ", ".join(selected_tickers)
+        selected_etf_lists[i] = selected_tickers
+        
+        # Apply return from current_targets (selected at i-1)
+        if current_targets:
+            port_ret = 0.0
+            for tgt in current_targets:
+                if tgt in pivot.columns:
+                    prev_p = float(pivot[tgt].iloc[i-1])
+                    curr_p = float(pivot[tgt].iloc[i])
+                    d_ret = (curr_p - prev_p) / prev_p if prev_p > 0 else 0.0
+                    port_ret += d_ret
+                else:
+                    # CASH or Waiting: 0 return
+                    port_ret += 0.0
+            avg_daily_ret = port_ret / len(current_targets)
+            strategy_returns[i] = sanitize_val(strategy_returns[i-1] * (1 + avg_daily_ret), 100.0)
+        else:
+            strategy_returns[i] = sanitize_val(strategy_returns[i-1], 100.0)
+            
+        current_targets = selected_tickers
 
     return {
         "dates": dates,
         "strategy": strategy_returns,
         "selected_etf": selected_etf,
+        "selected_etf_list": selected_etf_lists,
         "etfs": etf_normalized
     }
 
-def run_bulk_simulation(criteria="momentum"):
+def run_bulk_simulation(criteria="momentum", top_n=1):
+    try:
+        top_n = max(1, min(4, int(top_n)))
+    except (ValueError, TypeError):
+        top_n = 1
+
     models = []
     # Generate 21 models
     for i in range(21):
@@ -292,7 +396,7 @@ def run_bulk_simulation(criteria="momentum"):
         w5 = w5_pct / 100.0
         w20 = w20_pct / 100.0
         
-        sim_data = get_etf_simulation(criteria, w1, w5, w20)
+        sim_data = get_etf_simulation(criteria, top_n, w1, w5, w20)
         
         if not sim_data or not sim_data.get('dates'):
             continue
@@ -303,13 +407,10 @@ def run_bulk_simulation(criteria="momentum"):
         if len(dates) < 2:
             continue
             
-        # Calculate returns for different periods
-        # dates are YYYY-MM-DD ascending
         current_date = datetime.strptime(dates[-1], "%Y-%m-%d")
         
         def get_return(months_back):
             target_date = (current_date - timedelta(days=months_back*30)).strftime("%Y-%m-%d")
-            # Find closest date
             start_idx = 0
             for j, d in enumerate(dates):
                 if d >= target_date:
@@ -327,41 +428,34 @@ def run_bulk_simulation(criteria="momentum"):
         ret_6m = get_return(6)
         ret_1y = get_return(12)
         
-        # Calculate Total Return
         total_ret = ((strategy[-1] / strategy[0]) - 1) * 100
         
-        # Calculate Sharpe Ratio of the strategy
         strategy_series = pd.Series(strategy)
         daily_rets = strategy_series.pct_change().dropna()
         std_dev = daily_rets.std()
         mean_ret = daily_rets.mean()
-        # Annualized sharpe ratio (approx 252 trading days)
         if std_dev > 0:
             sharpe_ratio = (mean_ret / std_dev) * (252 ** 0.5)
         else:
             sharpe_ratio = 0
             
-        # Calculate MDD
         cum_max = strategy_series.cummax()
         drawdown = (strategy_series - cum_max) / cum_max
         mdd = drawdown.min() * 100
         
-        # Calculate Trade Metrics (Hitting ratio, avg win, avg loss)
         selected_etf = sim_data['selected_etf']
         trades_returns = []
         entry_value = strategy[0]
         
         for j in range(1, len(selected_etf)):
             if selected_etf[j] != selected_etf[j-1]:
-                # Position changed
                 exit_value = strategy[j]
-                if entry_value > 0 and selected_etf[j-1] not in ["Waiting", "CASH", ""]:
+                if entry_value > 0 and "Waiting" not in selected_etf[j-1] and "CASH" not in selected_etf[j-1] and selected_etf[j-1] != "":
                     trade_ret = ((exit_value - entry_value) / entry_value) * 100
                     trades_returns.append(trade_ret)
                 entry_value = exit_value
                 
-        # Last open position
-        if selected_etf[-1] not in ["Waiting", "CASH", ""] and entry_value > 0:
+        if "Waiting" not in selected_etf[-1] and "CASH" not in selected_etf[-1] and selected_etf[-1] != "" and entry_value > 0:
             exit_value = strategy[-1]
             trade_ret = ((exit_value - entry_value) / entry_value) * 100
             trades_returns.append(trade_ret)
@@ -392,7 +486,8 @@ def run_bulk_simulation(criteria="momentum"):
             "avg_loss": sanitize_float(avg_loss),
             "dates": dates,
             "strategy": [sanitize_float(s) for s in strategy],
-            "selected_etf": selected_etf
+            "selected_etf": selected_etf,
+            "selected_etf_list": sim_data.get("selected_etf_list", [])
         })
         
     return models

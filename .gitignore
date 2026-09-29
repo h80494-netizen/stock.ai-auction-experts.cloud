@@ -13,6 +13,9 @@ venv/
 .vscode/
 *.xlsm
 *.xlsx
+*.tar.gz
+deploy_latest.tar.gz
+*.db-journal
 backend_log.txt
 frontend_log.txt
 nextjs.log

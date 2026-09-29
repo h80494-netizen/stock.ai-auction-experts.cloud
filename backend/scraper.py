@@ -11,168 +11,113 @@ _kosdaq_last_fetch = 0
 
 def get_kospi_100():
     global _kospi_100_cache, _kospi_last_fetch
-    
-    if _kospi_100_cache is not None and (time.time() - _kospi_last_fetch) < 3600:
-        return _kospi_100_cache
-        
-    # We will fetch Top 100 Kospi stocks by market cap
-    # Naver Finance Market Cap Page
-    url = "https://finance.naver.com/sise/sise_market_sum.naver?sosok=0"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    stocks = []
-    
     try:
-        # Loop pages 1 to 2 to get 100 stocks (50 per page)
-        for page in range(1, 3):
-            res = requests.get(f"{url}&page={page}", headers=headers, timeout=5)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            table = soup.find('table', {'class': 'type_2'})
-            if not table:
-                continue
+        if _kospi_100_cache is not None and (time.time() - _kospi_last_fetch) < 3600:
+            return _kospi_100_cache
+    except NameError:
+        pass
+        
+    try:
+        res = requests.get('https://m.stock.naver.com/api/stocks/marketValue/KOSPI?page=1&pageSize=100', headers={'User-Agent': 'Mozilla/5.0'})
+        data = res.json()
+        stocks = []
+        for item in data.get('stocks', []):
+            try:
+                price = float(item['closePrice'].replace(',', ''))
+                change_val = float(str(item['compareToPreviousClosePrice']).replace(',', ''))
+                change_pct = float(item['fluctuationsRatio'])
                 
-            rows = table.find('tbody').find_all('tr')
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) > 5:
-                    a_tag = cols[1].find('a')
-                    if a_tag:
-                        name = a_tag.text.strip()
-                        href = a_tag['href']
-                        ticker = href.split('code=')[-1]
-                        price_text = cols[2].text.strip().replace(',', '')
-                        mcap_text = cols[6].text.strip().replace(',', '')
-                        
-                        price = float(price_text) if price_text.isdigit() else 0.0
-                        mcap = float(mcap_text) if mcap_text.isdigit() else 0.0
-                        
-                        try:
-                            change_pct_text = cols[4].text.strip().replace('%', '').replace('+', '')
-                            change_pct = float(change_pct_text)
-                        except:
-                            change_pct = 0.0
-                            
-                        try:
-                            change_text = cols[3].text.strip().replace(',', '')
-                            import re
-                            change_clean = re.sub(r'[^\d]', '', change_text)
-                            change_val = float(change_clean) if change_clean else 0.0
-                            if change_pct < 0:
-                                change_val = -change_val
-                        except:
-                            change_val = 0.0
-                            
-                        try:
-                            total_vol = int(cols[9].text.strip().replace(',', ''))
-                        except:
-                            total_vol = 0
-                            
-                        try:
-                            foreign_ratio = float(cols[8].text.strip().replace('%', ''))
-                        except:
-                            foreign_ratio = 0.0
-                        
-                        stocks.append({
-                            "ticker": f"KRX:{ticker}",
-                            "name": name,
-                            "price": price,
-                            "change": change_val,
-                            "changePct": change_pct,
-                            "market_cap": mcap,
-                            "total_volume": total_vol,
-                            "ratio": foreign_ratio,
-                            "foreign_net_buy": 0, # 백그라운드 태스크에서 실제 값으로 업데이트 됨
-                            "categories": []
-                        })
-                        if len(stocks) >= 100:
-                            break
-            if len(stocks) >= 100:
-                break
+                code = item.get('compareToPreviousPrice', {}).get('code')
+                if code in ['4', '5']: # Falling or lower limit
+                    change_val = -abs(change_val)
+                    change_pct = -abs(change_pct)
+                elif code in ['1', '2']: # Rising or upper limit
+                    change_val = abs(change_val)
+                    change_pct = abs(change_pct)
+
+                mcap_str = item.get('marketValue', '0').replace(',', '')
+                mcap = float(mcap_str) if mcap_str else 0.0
+                vol_str = item.get('accumulatedTradingVolume', '0').replace(',', '')
+                total_vol = int(vol_str) if vol_str else 0
+                
+                stocks.append({
+                    'ticker': f"KRX:{item['itemCode']}",
+                    'name': item['stockName'],
+                    'price': price,
+                    'change': change_val,
+                    'changePct': change_pct,
+                    'market_cap': mcap,
+                    'total_volume': total_vol,
+                    'ratio': 0.0,
+                    'foreign_net_buy': 0,
+                    'categories': []
+                })
+            except Exception as e:
+                pass
                 
         _kospi_100_cache = stocks
         _kospi_last_fetch = time.time()
         return stocks
     except Exception as e:
         print("Failed to fetch KOSPI 100:", e)
-        if _kospi_100_cache is not None:
-            return _kospi_100_cache
-        return []
+        try:
+            return _kospi_100_cache if _kospi_100_cache else []
+        except: return []
 
 def get_kosdaq_100():
     global _kosdaq_100_cache, _kosdaq_last_fetch
-    
-    if _kosdaq_100_cache is not None and (time.time() - _kosdaq_last_fetch) < 3600:
-        return _kosdaq_100_cache
-        
-    url = "https://finance.naver.com/sise/sise_market_sum.naver?sosok=1"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    stocks = []
     try:
-        for page in range(1, 3):
-            res = requests.get(f"{url}&page={page}", headers=headers, timeout=5)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            table = soup.find('table', {'class': 'type_2'})
-            if not table:
-                continue
+        if _kosdaq_100_cache is not None and (time.time() - _kosdaq_last_fetch) < 3600:
+            return _kosdaq_100_cache
+    except NameError:
+        pass
+        
+    try:
+        res = requests.get('https://m.stock.naver.com/api/stocks/marketValue/KOSDAQ?page=1&pageSize=100', headers={'User-Agent': 'Mozilla/5.0'})
+        data = res.json()
+        stocks = []
+        for item in data.get('stocks', []):
+            try:
+                price = float(item['closePrice'].replace(',', ''))
+                change_val = float(str(item['compareToPreviousClosePrice']).replace(',', ''))
+                change_pct = float(item['fluctuationsRatio'])
                 
-            rows = table.find('tbody').find_all('tr')
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) > 5:
-                    a_tag = cols[1].find('a')
-                    if a_tag:
-                        name = a_tag.text.strip()
-                        href = a_tag['href']
-                        ticker = href.split('code=')[-1]
-                        price_text = cols[2].text.strip().replace(',', '')
-                        mcap_text = cols[6].text.strip().replace(',', '')
-                        
-                        price = float(price_text) if price_text.isdigit() else 0.0
-                        mcap = float(mcap_text) if mcap_text.isdigit() else 0.0
-                        
-                        try:
-                            change_pct_text = cols[4].text.strip().replace('%', '').replace('+', '')
-                            change_pct = float(change_pct_text)
-                        except:
-                            change_pct = 0.0
-                            
-                        try:
-                            change_text = cols[3].text.strip().replace(',', '')
-                            import re
-                            change_clean = re.sub(r'[^\d]', '', change_text)
-                            change_val = float(change_clean) if change_clean else 0.0
-                            if change_pct < 0:
-                                change_val = -change_val
-                        except:
-                            change_val = 0.0
-                        
-                        stocks.append({
-                            "ticker": f"KRX:{ticker}",
-                            "name": name,
-                            "price": price,
-                            "change": change_val,
-                            "changePct": change_pct,
-                            "market_cap": mcap,
-                            "categories": []
-                        })
-                        if len(stocks) >= 100:
-                            break
-            if len(stocks) >= 100:
-                break
+                code = item.get('compareToPreviousPrice', {}).get('code')
+                if code in ['4', '5']: # Falling or lower limit
+                    change_val = -abs(change_val)
+                    change_pct = -abs(change_pct)
+                elif code in ['1', '2']: # Rising or upper limit
+                    change_val = abs(change_val)
+                    change_pct = abs(change_pct)
+
+                mcap_str = item.get('marketValue', '0').replace(',', '')
+                mcap = float(mcap_str) if mcap_str else 0.0
+                vol_str = item.get('accumulatedTradingVolume', '0').replace(',', '')
+                total_vol = int(vol_str) if vol_str else 0
+                
+                stocks.append({
+                    'ticker': f"KRX:{item['itemCode']}",
+                    'name': item['stockName'],
+                    'price': price,
+                    'change': change_val,
+                    'changePct': change_pct,
+                    'market_cap': mcap,
+                    'total_volume': total_vol,
+                    'ratio': 0.0,
+                    'foreign_net_buy': 0,
+                    'categories': []
+                })
+            except Exception as e:
+                pass
                 
         _kosdaq_100_cache = stocks
         _kosdaq_last_fetch = time.time()
         return stocks
     except Exception as e:
         print("Failed to fetch KOSDAQ 100:", e)
-        if _kosdaq_100_cache is not None:
-            return _kosdaq_100_cache
-        return []
+        try:
+            return _kosdaq_100_cache if _kosdaq_100_cache else []
+        except: return []
 
 def get_naver_sectors():
     global _sector_cache, _last_fetch
