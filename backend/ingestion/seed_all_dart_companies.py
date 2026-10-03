@@ -65,8 +65,8 @@ def get_listed_dart_companies():
 
 def fetch_and_save_company_financials(company: dict, year: str = "2023", reprt_code: str = "11011"):
     """개별 상장기업의 DART 재무제표 수집 및 DB 저장"""
-    stock_code = company["stock_code"]
-    corp_code = company["corp_code"]
+    stock_code = str(company["stock_code"]).strip().zfill(6)
+    corp_code = str(company["corp_code"]).strip().zfill(8)
     
     url = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json"
     params = {
