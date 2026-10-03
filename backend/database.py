@@ -259,6 +259,28 @@ def get_financials(ticker):
     conn.close()
     return [dict(row) for row in rows]
 
+def prune_old_dart_financials_12quarters(ticker: str, max_quarters: int = 12):
+    """
+    개별 기업별로 최신 12개 분기(3년 분량) 데이터만 보관하고,
+    12분기를 초과하는 가장 오래된 과거 분기 데이터는 DB에서 자동 삭제합니다.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, year, quarter FROM dart_financials
+        WHERE ticker = ?
+        ORDER BY year DESC, quarter DESC
+    ''', (ticker,))
+    rows = c.fetchall()
+    
+    if len(rows) > max_quarters:
+        old_ids = [r['id'] for r in rows[max_quarters:]]
+        placeholders = ','.join(['?'] * len(old_ids))
+        c.execute(f"DELETE FROM dart_financials WHERE id IN ({placeholders})", old_ids)
+        conn.commit()
+        
+    conn.close()
+
 def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit):
     conn = get_db_connection()
     c = conn.cursor()
@@ -275,6 +297,12 @@ def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, r
     ''', (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit))
     conn.commit()
     conn.close()
+    
+    # 최신 12분기 보관 유지 (12분기 초과 구 데이터 자동 삭제)
+    try:
+        prune_old_dart_financials_12quarters(ticker, max_quarters=12)
+    except Exception:
+        pass
 
 def calculate_and_save_ttm_financials(ticker: str):
     """

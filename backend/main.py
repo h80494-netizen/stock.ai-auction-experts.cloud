@@ -2178,6 +2178,15 @@ def api_dart_scan_status():
             pass
     return {"is_running": False, "current": 0, "total": 0, "saved_count": 0, "message": "대기 중"}
 
+@app.post("/api/dart/scan/auto-update")
+def api_trigger_dart_auto_update():
+    import threading
+    from ingestion.auto_dart_quarterly_updater import run_quarterly_auto_update
+    t = threading.Thread(target=run_quarterly_auto_update)
+    t.daemon = True
+    t.start()
+    return {"message": "분기 실적 발표 대응 12분기 롤링 자동 업데이트가 시작되었습니다."}
+
 @app.post("/api/market/scan/stop")
 def api_stop_market_scan():
     from ingestion.scrapers.naver_market_scraper import stop_scan

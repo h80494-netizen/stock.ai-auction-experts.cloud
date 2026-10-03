@@ -94,9 +94,9 @@ export default function MarketScannerView() {
 
       <div className="bg-[#1a1a1a] p-6 rounded-2xl border border-gray-800 shadow-xl max-w-4xl space-y-6">
         <div>
-          <h3 className="text-lg font-bold text-gray-200 mb-2">1. 국내 전체 상장사 (약 1,800개) DART 재무 DB 수집</h3>
-          <p className="text-sm text-gray-400">
-            상장된 모든 기업의 자산, 자본, 부채, 순이익, 영업이익, 매출액 데이터를 전수 수집하여 DB에 실시간 동기화합니다.
+          <h3 className="text-lg font-bold text-gray-200 mb-1">1. 국내 전체 상장사 (약 1,800개) DART 재무 DB 수집 & 12분기 롤링 관리</h3>
+          <p className="text-xs text-gray-400">
+            상장된 모든 기업의 자산, 자본, 부채, 순이익, 영업이익, 매출액 데이터를 전수 수집하며, <strong className="text-yellow-400 font-mono">최신 12분기 (3년) 분량만 항시 유지</strong>합니다. 신규 분기 추가 시 12분기를 초과하는 가장 오래된 분기는 DB에서 자동 삭제됩니다.
           </p>
         </div>
 
