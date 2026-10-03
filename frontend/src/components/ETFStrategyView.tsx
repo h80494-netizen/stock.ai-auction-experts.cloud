@@ -40,18 +40,147 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   
   const [showModelSwap, setShowModelSwap] = useState(false);
   const [modelsList, setModelsList] = useState<any[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [selectedSwapModel, setSelectedSwapModel] = useState<any>(null);
+  const [previousModel, setPreviousModel] = useState<any>(null);
+  const [swapHistory, setSwapHistory] = useState<any[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (showModelSwap && modelsList.length === 0) {
-      fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}`)
-        .then(res => res.json())
-        .then(json => setModelsList(json))
-        .catch(err => console.error(err));
-    }
-  }, [showModelSwap, criteria, topN, modelsList.length]);
-  
   const activeWeights = etfWeights || localWeights;
   const updateWeights = setEtfWeights || setLocalWeights;
+
+  const fetchSwapHistory = async () => {
+    try {
+      const res = await fetch('/api/etf/swap-history');
+      if (res.ok) {
+        const history = await res.json();
+        setSwapHistory(history);
+      }
+    } catch (e) {
+      console.error('Failed to fetch swap history:', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchSwapHistory();
+  }, []);
+
+  useEffect(() => {
+    setModelsLoading(true);
+    fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}`)
+      .then(res => res.json())
+      .then(json => {
+        if (Array.isArray(json)) {
+          setModelsList(json);
+          if (json.length > 0 && showModelSwap) {
+            setSelectedSwapModel((prev: any) => {
+              if (prev) {
+                const found = json.find((m: any) => m.model === prev.model);
+                if (found) return found;
+              }
+              return json.length > 1 ? json[1] : json[0];
+            });
+          }
+        }
+      })
+      .catch(err => console.error('Error fetching simulation models:', err))
+      .finally(() => setModelsLoading(false));
+  }, [showModelSwap, criteria, topN]);
+
+  // Determine current active model matching activeWeights
+  const currentModel = useMemo(() => {
+    if (!modelsList || modelsList.length === 0) return null;
+    const w1_pct = Math.round(activeWeights.w1 > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
+    const w5_pct = Math.round(activeWeights.w5 > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
+    const w20_pct = Math.round(activeWeights.w20 > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
+
+    const matched = modelsList.find((m: any) =>
+      Math.abs(m.weights.w1 - w1_pct) <= 1 &&
+      Math.abs(m.weights.w5 - w5_pct) <= 1 &&
+      Math.abs(m.weights.w20 - w20_pct) <= 1
+    );
+    return matched || modelsList[0];
+  }, [modelsList, activeWeights]);
+
+  // Effective model comparison target (if selected in modal use selectedSwapModel, otherwise fallback to previousModel)
+  const displaySwapTarget = useMemo(() => {
+    if (selectedSwapModel) return selectedSwapModel;
+    if (previousModel && currentModel && previousModel.model !== currentModel.model) return previousModel;
+    if (modelsList.length > 1 && currentModel) {
+      return modelsList.find((m: any) => m.model !== currentModel.model) || modelsList[1];
+    }
+    return null;
+  }, [selectedSwapModel, previousModel, currentModel, modelsList]);
+
+  const compareChartData = useMemo(() => {
+    const target = selectedSwapModel || displaySwapTarget;
+    if (!currentModel || !target || !currentModel.dates) return [];
+    const dates = currentModel.dates;
+    const currStrat = currentModel.strategy;
+    const swapStrat = target.strategy;
+
+    return dates.map((d: string, idx: number) => ({
+      date: d,
+      [currentModel.model || '현재 모델']: currStrat ? currStrat[idx] : 100,
+      [target.model || '비교/교체 모델']: swapStrat ? swapStrat[idx] : 100
+    }));
+  }, [currentModel, selectedSwapModel, displaySwapTarget]);
+
+  const handleApplyModelSwap = async () => {
+    if (!selectedSwapModel) return;
+    
+    const fromModelName = currentModel ? currentModel.model : '적용 모델';
+    const fromW = currentModel ? `${currentModel.weights.w1}/${currentModel.weights.w5}/${currentModel.weights.w20}` : `${activeWeights.w1*100}/${activeWeights.w5*100}/${activeWeights.w20*100}`;
+    const fromRet = currentModel ? currentModel.total_ret : 0;
+    const fromSharpe = currentModel ? currentModel.sharpe : 0;
+
+    const toModelName = selectedSwapModel.model;
+    const toW = `${selectedSwapModel.weights.w1}/${selectedSwapModel.weights.w5}/${selectedSwapModel.weights.w20}`;
+    const toRet = selectedSwapModel.total_ret;
+    const toSharpe = selectedSwapModel.sharpe;
+
+    // 1. Save to Backend DB
+    try {
+      await fetch('/api/etf/save-model-swap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_model: fromModelName,
+          from_weights: fromW,
+          from_ret: fromRet,
+          from_sharpe: fromSharpe,
+          to_model: toModelName,
+          to_weights: toW,
+          to_ret: toRet,
+          to_sharpe: toSharpe,
+          criteria: criteria,
+          top_n: topN
+        })
+      });
+      fetchSwapHistory();
+    } catch (err) {
+      console.error('Failed to save model swap:', err);
+    }
+
+    // 2. Track previous model state before update
+    if (currentModel) {
+      setPreviousModel({ ...currentModel });
+    }
+
+    // 3. Update weights
+    const normWeights = {
+      w1: selectedSwapModel.weights.w1 > 1 ? selectedSwapModel.weights.w1 / 100 : selectedSwapModel.weights.w1,
+      w5: selectedSwapModel.weights.w5 > 1 ? selectedSwapModel.weights.w5 / 100 : selectedSwapModel.weights.w5,
+      w20: selectedSwapModel.weights.w20 > 1 ? selectedSwapModel.weights.w20 / 100 : selectedSwapModel.weights.w20,
+    };
+    updateWeights(normWeights);
+    setShowModelSwap(false);
+
+    // 4. Show Notification Toast
+    setToastMessage(`✅ 모델이 성공적으로 저장 및 교체되었습니다! (${fromModelName} ➔ ${toModelName})`);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
 
   useEffect(() => {
     let isMounted = true;
@@ -74,7 +203,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
         const stratJson = await stratRes.json();
         const simJson = await simRes.json();
         
-        if (isMounted) {
+        if (isMounted && Array.isArray(stratJson) && stratJson.length > 0) {
           setData(stratJson);
           setSimData(simJson);
         }
@@ -295,7 +424,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   // sharpe 지수 모드일 땐 샤프지수 값으로 현금 보유 여부를 판단하거나, 
   // 기존과 같이 momentum_score가 0.5 이하일 때로 유지할 수 있음.
   // 로직상 criteria에 따라 final_score가 결정되므로 final_score를 이용.
-  const isCash = topETF && topETF.final_score <= 0.5;
+  const isCash = topETF && topETF.final_score <= 0.0;
   const etfTickers = simData && simData.etfs ? Object.keys(simData.etfs) : [];
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -321,23 +450,49 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   return (
     <div className="p-4 h-full overflow-y-auto space-y-6">
       
+      {/* 알림 토스트 (Model Swap Saved Toast) */}
+      {toastMessage && (
+        <div className="bg-emerald-900/90 border border-emerald-500 text-emerald-100 px-4 py-3 rounded-xl shadow-2xl flex justify-between items-center animate-bounce">
+          <span className="font-extrabold text-sm">{toastMessage}</span>
+          <button onClick={() => setToastMessage(null)} className="text-emerald-300 font-bold hover:text-white ml-3">✕</button>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row justify-center items-center gap-3 mb-4 sm:mb-6 flex-wrap">
-        {/* ETF 선택 개수 (1개, 2개, 3개, 4개) 선택기 */}
-        <div className="bg-gray-800 p-1.5 rounded-lg flex items-center gap-2 shadow-lg border border-gray-700">
-          <span className="text-xs sm:text-sm font-bold text-teal-400 ml-1">🎯 ETF 선택 개수:</span>
-          {[1, 2, 3, 4].map(n => (
-            <button
-              key={n}
-              onClick={() => setTopN(n)}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded-md transition-colors ${
-                topN === n
-                  ? 'bg-teal-600 text-white shadow'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-700'
-              }`}
-            >
-              {n}개
-            </button>
-          ))}
+        {/* ETF 선택 개수 (1개, 2개, 3개) 선택기 및 입력칸 */}
+        <div className="bg-gray-800 p-1.5 rounded-lg flex items-center gap-2 shadow-lg border border-gray-700 flex-wrap">
+          <span className="text-xs sm:text-sm font-bold text-teal-400 ml-1">🎯 종목 채택 수:</span>
+          <div className="flex items-center gap-1 bg-gray-900 px-2 py-1 rounded border border-gray-600">
+            <input
+              type="number"
+              min={1}
+              max={3}
+              value={topN}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) {
+                  setTopN(Math.max(1, Math.min(3, val)));
+                }
+              }}
+              className="w-10 bg-transparent text-center font-extrabold text-teal-300 outline-none text-sm"
+            />
+            <span className="text-xs text-gray-400 font-bold">개</span>
+          </div>
+          <div className="flex gap-1">
+            {[1, 2, 3].map(n => (
+              <button
+                key={n}
+                onClick={() => setTopN(n)}
+                className={`px-2.5 py-1 text-xs sm:text-sm font-bold rounded-md transition-colors ${
+                  topN === n
+                    ? 'bg-teal-600 text-white shadow'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                }`}
+              >
+                {n}개 ({n === 1 ? '100%' : n === 2 ? '50%' : '33.33%'})
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* 선택 기준 토글 */}
@@ -463,36 +618,418 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
           <h2 className="text-lg sm:text-2xl font-bold break-keep">
             🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? `1일 ${Math.round(activeWeights.w1*100)}%, 5일 ${Math.round(activeWeights.w5*100)}%, 20일 ${Math.round(activeWeights.w20*100)}% 가중 합산` : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
           </h2>
-          <div className="relative mt-2 md:mt-0 w-full md:w-auto">
+          <div className="mt-2 md:mt-0 w-full md:w-auto">
             <button 
-              onClick={() => setShowModelSwap(!showModelSwap)}
-              className="w-full md:w-auto bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-sm font-bold shadow transition-colors flex items-center justify-center gap-1"
+              onClick={() => setShowModelSwap(true)}
+              className="w-full md:w-auto bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition-all flex items-center justify-center gap-2 border border-blue-400/40"
             >
-              🔄 모델 교체 (리밸런싱)
+              <span>🔄 모델 교체 & 성과 비교</span>
+              {currentModel && <span className="bg-blue-900/80 px-2 py-0.5 text-xs rounded text-blue-200 border border-blue-400/30">현재: {currentModel.model}</span>}
             </button>
-            {showModelSwap && (
-              <div className="absolute right-0 mt-1 w-full md:w-64 max-h-60 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-2xl z-50">
-                {modelsList.length > 0 ? (
-                  modelsList.map((m, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => {
-                        updateWeights(m.weights);
-                        setShowModelSwap(false);
-                      }}
-                      className="w-full text-left px-3 py-2 hover:bg-gray-700 text-sm border-b border-gray-700/50 last:border-0"
-                    >
-                      <div className="font-bold text-blue-300">모델 {idx + 1}</div>
-                      <div className="text-xs text-gray-400">1일:{m.weights.w1*100}% 5일:{m.weights.w5*100}% 20일:{m.weights.w20*100}%</div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="p-3 text-sm text-gray-400 text-center">데이터를 불러오는 중...</div>
-                )}
-              </div>
-            )}
           </div>
         </div>
+
+        {/* 모델 교체 및 성과 비교 모달 (Comparison Modal) */}
+        {showModelSwap && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-3 sm:p-6 overflow-y-auto">
+            <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-w-5xl w-full max-h-[90vh] overflow-y-auto flex flex-col my-auto">
+              
+              {/* Modal Header */}
+              <div className="p-4 sm:p-5 border-b border-gray-800 flex justify-between items-center bg-gray-900/90 sticky top-0 z-20">
+                <div>
+                  <h3 className="text-xl font-extrabold text-white flex items-center gap-2">
+                    🔄 ETF 투자전략 모델 교체 & 성과 비교
+                  </h3>
+                  <p className="text-xs text-gray-400 mt-1">
+                    현재 운용 중인 모델과 교체 후보 모델의 가중치 및 백테스트 성과 지표를 실시간 비교합니다.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowModelSwap(false)}
+                  className="text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 w-8 h-8 rounded-full flex items-center justify-center transition-colors text-lg font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-4 sm:p-6 space-y-6">
+                
+                {/* 1. Model Selector Ribbon */}
+                <div>
+                  <div className="text-xs font-bold text-gray-300 mb-2 flex items-center justify-between">
+                    <span>🎯 교체할 후보 모델 선택 (총 21개 모델 제공)</span>
+                    {modelsLoading && <span className="text-xs text-blue-400 animate-pulse">⏳ 시뮬레이션 데이터를 불러오는 중...</span>}
+                  </div>
+                  
+                  <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-700">
+                    {modelsList.map((m: any) => {
+                      const isCurrent = currentModel && currentModel.model === m.model;
+                      const isSelected = selectedSwapModel && selectedSwapModel.model === m.model;
+                      return (
+                        <button
+                          key={m.model}
+                          onClick={() => setSelectedSwapModel(m)}
+                          className={`flex-shrink-0 px-3 py-2 rounded-xl text-left border transition-all min-w-[120px] ${
+                            isSelected
+                              ? 'bg-blue-600 border-blue-400 text-white shadow-lg shadow-blue-900/50 scale-105'
+                              : isCurrent
+                              ? 'bg-indigo-900/50 border-indigo-500 text-indigo-200'
+                              : 'bg-gray-800/80 border-gray-700 text-gray-300 hover:bg-gray-700'
+                          }`}
+                        >
+                          <div className="flex justify-between items-center">
+                            <span className="font-bold text-xs">{m.model}</span>
+                            {isCurrent && <span className="text-[10px] bg-indigo-500 text-white px-1 rounded font-bold">현재</span>}
+                          </div>
+                          <div className="text-[10px] opacity-80 mt-1 font-mono">
+                            {m.weights.w1}/{m.weights.w5}/{m.weights.w20}%
+                          </div>
+                          <div className="text-[11px] font-extrabold mt-1 font-mono text-emerald-400">
+                            {m.total_ret >= 0 ? '+' : ''}{m.total_ret.toFixed(1)}%
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. Side-by-Side Comparison Cards */}
+                {currentModel && selectedSwapModel && (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      
+                      {/* Current Model Card */}
+                      <div className="bg-gray-800/90 border border-gray-700 p-4 rounded-xl shadow space-y-3 relative overflow-hidden">
+                        <div className="absolute top-0 right-0 bg-indigo-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-lg">
+                          현재 적용 중인 모델
+                        </div>
+                        
+                        <div className="text-lg font-bold text-indigo-300 flex items-center gap-2">
+                          📌 {currentModel.model}
+                        </div>
+
+                        <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs space-y-1">
+                          <div className="text-gray-400">모멘텀 가중치 비율</div>
+                          <div className="font-mono text-white font-bold flex gap-3 text-sm">
+                            <span>1일: <strong className="text-blue-400">{currentModel.weights.w1}%</strong></span>
+                            <span>5일: <strong className="text-purple-400">{currentModel.weights.w5}%</strong></span>
+                            <span>20일: <strong className="text-amber-400">{currentModel.weights.w20}%</strong></span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <span className="text-gray-400 text-[10px]">총수익률</span>
+                            <div className={`font-bold text-sm ${currentModel.total_ret >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {currentModel.total_ret > 0 ? '+' : ''}{currentModel.total_ret.toFixed(2)}%
+                            </div>
+                          </div>
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <span className="text-gray-400 text-[10px]">실질수익률</span>
+                            <div className={`font-bold text-sm ${currentModel.net_ret >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {currentModel.net_ret > 0 ? '+' : ''}{currentModel.net_ret.toFixed(2)}%
+                            </div>
+                          </div>
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <span className="text-gray-400 text-[10px]">샤프 지수 (Sharpe)</span>
+                            <div className="font-bold text-sm text-purple-300">
+                              {currentModel.sharpe.toFixed(2)}
+                            </div>
+                          </div>
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <span className="text-gray-400 text-[10px]">MDD (최대낙폭)</span>
+                            <div className="font-bold text-sm text-red-400">
+                              -{currentModel.mdd.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Selected Target Swap Model Card */}
+                      <div className="bg-gradient-to-br from-blue-950/70 to-indigo-950/70 border border-blue-500/60 p-4 rounded-xl shadow space-y-3 relative overflow-hidden">
+                        <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-lg">
+                          교체할 후보 모델
+                        </div>
+                        
+                        <div className="text-lg font-bold text-blue-300 flex items-center gap-2">
+                          🔄 {selectedSwapModel.model}
+                        </div>
+
+                        <div className="bg-gray-900/80 p-2.5 rounded-lg border border-blue-900/50 text-xs space-y-1">
+                          <div className="text-gray-400">모멘텀 가중치 비율</div>
+                          <div className="font-mono text-white font-bold flex gap-3 text-sm">
+                            <span>1일: <strong className="text-blue-400">{selectedSwapModel.weights.w1}%</strong></span>
+                            <span>5일: <strong className="text-purple-400">{selectedSwapModel.weights.w5}%</strong></span>
+                            <span>20일: <strong className="text-amber-400">{selectedSwapModel.weights.w20}%</strong></span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <div className="flex justify-between items-center">
+                              <span className="text-gray-400 text-[10px]">총수익률</span>
+                              {(() => {
+                                const diff = selectedSwapModel.total_ret - currentModel.total_ret;
+                                return (
+                                  <span className={`text-[10px] font-bold px-1 rounded ${diff >= 0 ? 'bg-green-900/60 text-green-300' : 'bg-red-900/60 text-red-300'}`}>
+                                    {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <div className={`font-bold text-sm ${selectedSwapModel.total_ret >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {selectedSwapModel.total_ret > 0 ? '+' : ''}{selectedSwapModel.total_ret.toFixed(2)}%
+                            </div>
+                          </div>
+
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <div className="flex justify-between items-center">
+                              <span className="text-gray-400 text-[10px]">실질수익률</span>
+                              {(() => {
+                                const diff = selectedSwapModel.net_ret - currentModel.net_ret;
+                                return (
+                                  <span className={`text-[10px] font-bold px-1 rounded ${diff >= 0 ? 'bg-emerald-900/60 text-emerald-300' : 'bg-rose-900/60 text-rose-300'}`}>
+                                    {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <div className={`font-bold text-sm ${selectedSwapModel.net_ret >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {selectedSwapModel.net_ret > 0 ? '+' : ''}{selectedSwapModel.net_ret.toFixed(2)}%
+                            </div>
+                          </div>
+
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <div className="flex justify-between items-center">
+                              <span className="text-gray-400 text-[10px]">샤프 지수</span>
+                              {(() => {
+                                const diff = selectedSwapModel.sharpe - currentModel.sharpe;
+                                return (
+                                  <span className={`text-[10px] font-bold px-1 rounded ${diff >= 0 ? 'bg-purple-900/60 text-purple-300' : 'bg-red-900/60 text-red-300'}`}>
+                                    {diff >= 0 ? '+' : ''}{diff.toFixed(2)}
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <div className="font-bold text-sm text-purple-300">
+                              {selectedSwapModel.sharpe.toFixed(2)}
+                            </div>
+                          </div>
+
+                          <div className="bg-gray-900/60 p-2 rounded border border-gray-800">
+                            <div className="flex justify-between items-center">
+                              <span className="text-gray-400 text-[10px]">MDD</span>
+                              {(() => {
+                                const diff = selectedSwapModel.mdd - currentModel.mdd;
+                                return (
+                                  <span className={`text-[10px] font-bold px-1 rounded ${diff <= 0 ? 'bg-green-900/60 text-green-300' : 'bg-red-900/60 text-red-300'}`}>
+                                    {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <div className="font-bold text-sm text-red-400">
+                              -{selectedSwapModel.mdd.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                    </div>
+
+                    {/* 3. Detailed Metrics Comparison Table */}
+                    <div className="bg-gray-800/80 rounded-xl p-4 border border-gray-700 space-y-2">
+                      <h4 className="text-sm font-bold text-gray-200 flex items-center gap-2">
+                        📊 항목별 교체 전후 성과 세부 비교
+                      </h4>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs text-left border-collapse font-mono whitespace-nowrap">
+                          <thead>
+                            <tr className="bg-gray-900 text-gray-400 border-b border-gray-700">
+                              <th className="p-2 font-sans">성과 항목</th>
+                              <th className="p-2 text-right">현재 ({currentModel.model})</th>
+                              <th className="p-2 text-right text-blue-300">교체후 ({selectedSwapModel.model})</th>
+                              <th className="p-2 text-right">성과 변화량 (Diff)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-800">
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">가중치 (1일 / 5일 / 20일)</td>
+                              <td className="p-2 text-right">{currentModel.weights.w1}% / {currentModel.weights.w5}% / {currentModel.weights.w20}%</td>
+                              <td className="p-2 text-right text-blue-300 font-bold">{selectedSwapModel.weights.w1}% / {selectedSwapModel.weights.w5}% / {selectedSwapModel.weights.w20}%</td>
+                              <td className="p-2 text-right text-gray-400 font-sans">가중치 변경</td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">백테스트 총 수익률</td>
+                              <td className="p-2 text-right font-bold">{currentModel.total_ret.toFixed(2)}%</td>
+                              <td className="p-2 text-right font-bold text-blue-300">{selectedSwapModel.total_ret.toFixed(2)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.total_ret - currentModel.total_ret;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">실질 수익률 (수수료 반영)</td>
+                              <td className="p-2 text-right font-bold text-emerald-400">{currentModel.net_ret.toFixed(2)}%</td>
+                              <td className="p-2 text-right font-bold text-emerald-300">{selectedSwapModel.net_ret.toFixed(2)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.net_ret - currentModel.net_ret;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">샤프 지수 (Sharpe Ratio)</td>
+                              <td className="p-2 text-right">{currentModel.sharpe.toFixed(2)}</td>
+                              <td className="p-2 text-right text-purple-300 font-bold">{selectedSwapModel.sharpe.toFixed(2)}</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.sharpe - currentModel.sharpe;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-purple-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">MDD (최대 낙폭)</td>
+                              <td className="p-2 text-right text-red-400">-{currentModel.mdd.toFixed(2)}%</td>
+                              <td className="p-2 text-right text-red-400 font-bold">-{selectedSwapModel.mdd.toFixed(2)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.mdd - currentModel.mdd;
+                                  return (
+                                    <span className={`font-bold ${diff <= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">매매 승률 (Win Rate)</td>
+                              <td className="p-2 text-right">{currentModel.win_rate.toFixed(1)}%</td>
+                              <td className="p-2 text-right text-blue-300 font-bold">{selectedSwapModel.win_rate.toFixed(1)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.win_rate - currentModel.win_rate;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-blue-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(1)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">최근 3개월 수익률</td>
+                              <td className="p-2 text-right">{currentModel.ret_3m.toFixed(2)}%</td>
+                              <td className="p-2 text-right text-blue-300 font-bold">{selectedSwapModel.ret_3m.toFixed(2)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.ret_3m - currentModel.ret_3m;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="p-2 font-sans font-medium text-gray-300">최근 6개월 수익률</td>
+                              <td className="p-2 text-right">{currentModel.ret_6m.toFixed(2)}%</td>
+                              <td className="p-2 text-right text-blue-300 font-bold">{selectedSwapModel.ret_6m.toFixed(2)}%</td>
+                              <td className="p-2 text-right">
+                                {(() => {
+                                  const diff = selectedSwapModel.ret_6m - currentModel.ret_6m;
+                                  return (
+                                    <span className={`font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                                    </span>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* 4. Strategy Return Comparison Chart */}
+                    {compareChartData.length > 0 && (
+                      <div className="bg-gray-800/80 rounded-xl p-4 border border-gray-700 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <h4 className="text-sm font-bold text-gray-200">
+                            📈 모델간 누적 수익률 추이 비교 (Base = 100)
+                          </h4>
+                          <div className="flex gap-4 text-xs font-bold">
+                            <span className="text-indigo-400">■ 현재: {currentModel.model}</span>
+                            <span className="text-amber-400">■ 교체: {selectedSwapModel.model}</span>
+                          </div>
+                        </div>
+                        <div className="h-[240px] w-full text-xs">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={compareChartData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                              <XAxis dataKey="date" stroke="#9ca3af" minTickGap={40} />
+                              <YAxis domain={['auto', 'auto']} stroke="#9ca3af" />
+                              <Tooltip contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }} />
+                              <Line type="monotone" dataKey={currentModel.model} stroke="#818cf8" strokeWidth={2.5} dot={false} />
+                              <Line type="monotone" dataKey={selectedSwapModel.model} stroke="#fbbf24" strokeWidth={2.5} dot={false} />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Modal Footer Actions */}
+              <div className="p-4 border-t border-gray-800 bg-gray-900/90 flex flex-col sm:flex-row justify-between items-center gap-3 sticky bottom-0 z-20">
+                <div className="text-xs text-gray-400 text-center sm:text-left">
+                  {selectedSwapModel && (
+                    <span>
+                      선택 모델: <strong className="text-blue-300 font-mono">{selectedSwapModel.model}</strong> (가중치 1일:{selectedSwapModel.weights.w1}%, 5일:{selectedSwapModel.weights.w5}%, 20일:{selectedSwapModel.weights.w20}%)
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex gap-2 w-full sm:w-auto">
+                  <button
+                    onClick={() => setShowModelSwap(false)}
+                    className="flex-1 sm:flex-none px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm font-bold transition-colors"
+                  >
+                    취소
+                  </button>
+                  <button
+                    disabled={!selectedSwapModel}
+                    onClick={handleApplyModelSwap}
+                    className="flex-1 sm:flex-none px-5 py-2 bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 text-white rounded-lg text-sm font-extrabold shadow-lg transition-all disabled:opacity-50"
+                  >
+                    🚀 {selectedSwapModel?.model || '선택 모델'} (으)로 교체 적용 & DB 저장
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
         {/* 상위 Top N 추천 포트폴리오 리스트 */}
         <div className="my-4">
           <div className="text-sm font-bold text-blue-200 mb-2 flex items-center gap-2">
@@ -502,7 +1039,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             {data.slice(0, topN).map((item: any, idx: number) => {
-              const isItemCash = item.final_score <= 0.5;
+              const isItemCash = item.final_score <= 0.0;
               return (
                 <div key={item.ticker || idx} className="bg-gray-900/90 border border-blue-400/40 p-3.5 rounded-lg shadow space-y-2">
                   <div className="flex justify-between items-center">
@@ -558,6 +1095,150 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
         </div>
       </div>
 
+      {/* 📊 모델 교체 전 vs 교체 후 수익률 동시 비교 차트 섹션 (Main Comparison Chart) */}
+      <div className="bg-gradient-to-r from-gray-900 via-indigo-950/60 to-gray-900 p-4 sm:p-5 rounded-xl border border-indigo-500/50 shadow-xl space-y-4">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 pb-3 border-b border-gray-800">
+          <div>
+            <h3 className="text-lg sm:text-xl font-extrabold text-white flex items-center gap-2">
+              📊 모델 교체 전 vs 교체 후 수익률 동시 비교 차트
+            </h3>
+            <p className="text-xs text-gray-400 mt-1">
+              현재 적용 모델({currentModel?.model || '현재'})과 비교/교체 모델({displaySwapTarget?.model || '비교 대상'})의 누적 수익률 추이를 Base 100 기준 동일 선상에서 겹쳐서 비교합니다.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowModelSwap(true)}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow border border-indigo-400/40 flex items-center gap-1"
+            >
+              🔄 모델 변경 & 성과 선택
+            </button>
+          </div>
+        </div>
+
+        {compareChartData.length > 0 && currentModel && displaySwapTarget ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono">
+              <div className="bg-indigo-900/40 p-2.5 rounded-lg border border-indigo-500/40">
+                <span className="text-indigo-300 font-bold block text-[11px]">📌 현재 적용: {currentModel.model}</span>
+                <span className="text-gray-400 text-[10px]">1/5/20일: {currentModel.weights.w1}/{currentModel.weights.w5}/{currentModel.weights.w20}%</span>
+                <div className="font-extrabold text-sm text-indigo-200 mt-0.5">총수익: {currentModel.total_ret.toFixed(2)}% | Sharpe: {currentModel.sharpe.toFixed(2)}</div>
+              </div>
+              <div className="bg-amber-900/40 p-2.5 rounded-lg border border-amber-500/40">
+                <span className="text-amber-300 font-bold block text-[11px]">🔄 비교/교체: {displaySwapTarget.model}</span>
+                <span className="text-gray-400 text-[10px]">1/5/20일: {displaySwapTarget.weights.w1}/{displaySwapTarget.weights.w5}/{displaySwapTarget.weights.w20}%</span>
+                <div className="font-extrabold text-sm text-amber-200 mt-0.5">총수익: {displaySwapTarget.total_ret.toFixed(2)}% | Sharpe: {displaySwapTarget.sharpe.toFixed(2)}</div>
+              </div>
+              <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-gray-400 text-[10px]">수익률 격차 (Diff)</span>
+                {(() => {
+                  const diff = displaySwapTarget.total_ret - currentModel.total_ret;
+                  return (
+                    <div className={`font-bold text-sm ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                    </div>
+                  );
+                })()}
+                <span className="text-[10px] text-gray-500">교체 시 예상 변동</span>
+              </div>
+              <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-gray-400 text-[10px]">샤프지수 격차 (Diff)</span>
+                {(() => {
+                  const diff = displaySwapTarget.sharpe - currentModel.sharpe;
+                  return (
+                    <div className={`font-bold text-sm ${diff >= 0 ? 'text-purple-400' : 'text-red-400'}`}>
+                      {diff >= 0 ? '+' : ''}{diff.toFixed(2)}
+                    </div>
+                  );
+                })()}
+                <span className="text-[10px] text-gray-500">위험조정 성과 격차</span>
+              </div>
+            </div>
+
+            <div className="h-[280px] w-full text-xs bg-gray-900/90 p-2 rounded-xl border border-gray-800">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={compareChartData} margin={{ top: 15, right: 20, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis dataKey="date" stroke="#9ca3af" minTickGap={35} />
+                  <YAxis domain={['auto', 'auto']} stroke="#9ca3af" />
+                  <Tooltip contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }} />
+                  <Legend />
+                  <Line 
+                    type="monotone" 
+                    dataKey={currentModel.model} 
+                    name={`[교체 전/현재] ${currentModel.model}`} 
+                    stroke="#818cf8" 
+                    strokeWidth={3} 
+                    dot={false} 
+                  />
+                  <Line 
+                    type="monotone" 
+                    dataKey={displaySwapTarget.model} 
+                    name={`[교체 후/비교] ${displaySwapTarget.model}`} 
+                    stroke="#fbbf24" 
+                    strokeWidth={3} 
+                    dot={false} 
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-6 text-gray-500 text-xs">
+            비교 모델 데이터를 불러오는 중입니다...
+          </div>
+        )}
+
+        {/* 📜 모델 교체 저장 이력 히스토리 (Swap History Log Table) */}
+        {swapHistory.length > 0 && (
+          <div className="pt-2 border-t border-gray-800 space-y-2">
+            <h4 className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
+              <span>📜 저장된 최근 모델 교체 이력 ({swapHistory.length}건)</span>
+            </h4>
+            <div className="overflow-x-auto max-h-[160px] overflow-y-auto scrollbar-thin">
+              <table className="w-full text-[11px] text-left border-collapse font-mono whitespace-nowrap">
+                <thead>
+                  <tr className="bg-gray-900 text-gray-400 border-b border-gray-800 sticky top-0">
+                    <th className="p-1.5">교체 일시</th>
+                    <th className="p-1.5">교체 전 모델</th>
+                    <th className="p-1.5">교체 전 가중치</th>
+                    <th className="p-1.5 text-right">교체 전 수익률</th>
+                    <th className="p-1.5 text-center">➔</th>
+                    <th className="p-1.5 text-blue-300">교체 후 모델</th>
+                    <th className="p-1.5 text-blue-300">교체 후 가중치</th>
+                    <th className="p-1.5 text-right text-emerald-300">교체 후 수익률</th>
+                    <th className="p-1.5 text-right">수익률 변동</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800/60">
+                  {swapHistory.slice(0, 10).map((h: any) => {
+                    const diff = h.to_ret - h.from_ret;
+                    return (
+                      <tr key={h.id} className="hover:bg-gray-800/50 transition-colors">
+                        <td className="p-1.5 text-gray-400">{h.timestamp}</td>
+                        <td className="p-1.5 font-bold text-indigo-300">{h.from_model}</td>
+                        <td className="p-1.5 text-gray-300">{h.from_weights}</td>
+                        <td className="p-1.5 text-right text-gray-300">{h.from_ret.toFixed(2)}%</td>
+                        <td className="p-1.5 text-center text-blue-400 font-bold">➔</td>
+                        <td className="p-1.5 font-bold text-blue-300">{h.to_model}</td>
+                        <td className="p-1.5 text-blue-200">{h.to_weights}</td>
+                        <td className="p-1.5 text-right font-bold text-emerald-300">{h.to_ret.toFixed(2)}%</td>
+                        <td className="p-1.5 text-right">
+                          <span className={`font-bold ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <div className="bg-gray-800 p-4 rounded-lg shadow-lg border border-gray-700">
           <div className="flex flex-col md:flex-row justify-between items-center mb-4">
@@ -580,8 +1261,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
           </div>
           
           {chartData.length > 0 ? (
-            <div className="h-[400px] xl:h-[500px] w-full text-xs">
-              <ResponsiveContainer width="100%" height="100%">
+            <div className="h-[400px] xl:h-[500px] w-full min-w-0 text-xs">
+              <ResponsiveContainer width="100%" height={450} minWidth={0}>
                 <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} minTickGap={30} />

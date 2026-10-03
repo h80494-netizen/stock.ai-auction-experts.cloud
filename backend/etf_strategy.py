@@ -41,6 +41,22 @@ def init_db():
             PRIMARY KEY (ticker, date)
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS model_swaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            from_model TEXT,
+            from_weights TEXT,
+            from_ret REAL,
+            from_sharpe REAL,
+            to_model TEXT,
+            to_weights TEXT,
+            to_ret REAL,
+            to_sharpe REAL,
+            criteria TEXT,
+            top_n INTEGER
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -80,7 +96,6 @@ def update_etf_data():
                         
             df = df.ffill().bfill()
             
-            c.execute("DELETE FROM etf_daily_prices")
             records = []
             for date_idx, row in df.iterrows():
                 date_str = date_idx.strftime('%Y-%m-%d')
@@ -154,9 +169,14 @@ def sanitize_val(val, default=0.0):
 
 def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
     try:
-        top_n = max(1, min(4, int(top_n)))
+        top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
+
+    if w1 > 1.0 or w5 > 1.0 or w20 > 1.0:
+        w1 = w1 / 100.0
+        w5 = w5 / 100.0
+        w20 = w20 / 100.0
 
     check_and_update_etf_data()
     init_db()
@@ -227,10 +247,10 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
     
     # Assign ranks & recommended weights based on top_n
-    equal_weight = round(100.0 / top_n, 1)
+    equal_weight = 100.0 if top_n == 1 else (50.0 if top_n == 2 else 33.33)
     for idx, item in enumerate(results):
         item["rank"] = idx + 1
-        if idx < top_n and item["final_score"] > 0.5:
+        if idx < top_n and item["final_score"] > 0.0:
             item["is_selected"] = True
             item["recommended_weight"] = equal_weight
         else:
@@ -261,21 +281,26 @@ def get_cached_etf_pivot(cache_key=None):
     pivot = pivot.ffill().dropna()
     return pivot
 
-def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
+def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pivot=None, precalc=None):
     try:
-        top_n = max(1, min(4, int(top_n)))
+        top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
 
-    check_and_update_etf_data()
-    
-    try:
-        with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
-            cache_key = f.read().strip()
-    except:
-        cache_key = "0"
-        
-    pivot = get_cached_etf_pivot(cache_key)
+    if w1 > 1.0 or w5 > 1.0 or w20 > 1.0:
+        w1 = w1 / 100.0
+        w5 = w5 / 100.0
+        w20 = w20 / 100.0
+
+    if pivot is None:
+        check_and_update_etf_data()
+        try:
+            with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
+                cache_key = f.read().strip()
+        except:
+            cache_key = "0"
+            
+        pivot = get_cached_etf_pivot(cache_key)
     
     if pivot is None:
         return {}
@@ -295,14 +320,18 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
         for i, date in enumerate(dates):
             val = (pivot[ticker].iloc[i] / base_price) * 100.0 if base_price > 0 else 100.0
             etf_normalized[ticker][i] = sanitize_val(val, 100.0)
-    ret_1d_df = pivot.pct_change(1) * 100
-    ret_5d_df = pivot.pct_change(5) * 100
-    ret_20d_df = pivot.pct_change(20) * 100
-    
-    if criteria == "sharpe":
-        daily_rets = pivot.pct_change() * 100
-        rolling_std_df = daily_rets.rolling(window=21).std()
-    
+
+    if precalc:
+        ret_1d_df = precalc.get('r1')
+        ret_5d_df = precalc.get('r5')
+        ret_20d_df = precalc.get('r20')
+        rolling_std_df = precalc.get('rstd')
+    else:
+        ret_1d_df = pivot.pct_change(1) * 100
+        ret_5d_df = pivot.pct_change(5) * 100
+        ret_20d_df = pivot.pct_change(20) * 100
+        rolling_std_df = (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None
+
     current_targets = []
     
     for i in range(len(dates)):
@@ -324,7 +353,7 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
                 score = (r1 * w1) + (r5 * w5) + (r20 * w20)
                 final_score = score
                 
-                if criteria == "sharpe":
+                if criteria == "sharpe" and rolling_std_df is not None:
                     std_dev = rolling_std_df[ticker].iloc[i]
                     if not pd.isna(std_dev) and std_dev > 0:
                         final_score = score / std_dev
@@ -340,7 +369,7 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
         top_candidates = scores[:top_n]
         selected_tickers = []
         for tkr, scr in top_candidates:
-            if scr <= 0.5:
+            if scr <= 0.0:
                 selected_tickers.append("CASH")
             else:
                 selected_tickers.append(tkr)
@@ -381,9 +410,28 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
 
 def run_bulk_simulation(criteria="momentum", top_n=1):
     try:
-        top_n = max(1, min(4, int(top_n)))
+        top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
+
+    check_and_update_etf_data()
+    try:
+        with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
+            cache_key = f.read().strip()
+    except:
+        cache_key = "0"
+        
+    pivot = get_cached_etf_pivot(cache_key)
+    if pivot is None:
+        return []
+
+    # Pre-calculate returns dataframes
+    precalc = {
+        'r1': pivot.pct_change(1) * 100,
+        'r5': pivot.pct_change(5) * 100,
+        'r20': pivot.pct_change(20) * 100,
+        'rstd': (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None
+    }
 
     models = []
     # Generate 21 models
@@ -396,7 +444,7 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
         w5 = w5_pct / 100.0
         w20 = w20_pct / 100.0
         
-        sim_data = get_etf_simulation(criteria, top_n, w1, w5, w20)
+        sim_data = get_etf_simulation(criteria, top_n, w1, w5, w20, pivot=pivot, precalc=precalc)
         
         if not sim_data or not sim_data.get('dates'):
             continue
@@ -441,14 +489,16 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
             
         cum_max = strategy_series.cummax()
         drawdown = (strategy_series - cum_max) / cum_max
-        mdd = drawdown.min() * 100
+        mdd = abs(drawdown.min()) * 100
         
         selected_etf = sim_data['selected_etf']
         trades_returns = []
+        trade_count = 0
         entry_value = strategy[0]
         
         for j in range(1, len(selected_etf)):
             if selected_etf[j] != selected_etf[j-1]:
+                trade_count += 1
                 exit_value = strategy[j]
                 if entry_value > 0 and "Waiting" not in selected_etf[j-1] and "CASH" not in selected_etf[j-1] and selected_etf[j-1] != "":
                     trade_ret = ((exit_value - entry_value) / entry_value) * 100
@@ -466,6 +516,9 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
         win_rate = (len(wins) / len(trades_returns)) * 100 if trades_returns else 0
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
+
+        fee_rate = 0.03
+        net_ret = total_ret - (trade_count * fee_rate)
             
         def sanitize_float(val):
             if pd.isna(val) or val == float('inf') or val == float('-inf'):
@@ -473,12 +526,15 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
             return float(val)
             
         models.append({
+            "model_id": i + 1,
             "model": f"Model {i+1}",
             "weights": {"w1": w1_pct, "w5": w5_pct, "w20": w20_pct},
             "ret_3m": sanitize_float(ret_3m),
             "ret_6m": sanitize_float(ret_6m),
             "ret_1y": sanitize_float(ret_1y),
             "total_ret": sanitize_float(total_ret),
+            "net_ret": sanitize_float(net_ret),
+            "trade_count": trade_count,
             "sharpe": sanitize_float(sharpe_ratio),
             "mdd": sanitize_float(mdd),
             "win_rate": sanitize_float(win_rate),
@@ -491,4 +547,63 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
         })
         
     return models
+
+
+def save_model_swap(from_model, from_weights, from_ret, from_sharpe, to_model, to_weights, to_ret, to_sharpe, criteria="sharpe", top_n=1):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    c.execute('''
+        INSERT INTO model_swaps 
+        (timestamp, from_model, from_weights, from_ret, from_sharpe, to_model, to_weights, to_ret, to_sharpe, criteria, top_n)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        ts,
+        from_model,
+        str(from_weights),
+        float(from_ret) if from_ret is not None else 0.0,
+        float(from_sharpe) if from_sharpe is not None else 0.0,
+        to_model,
+        str(to_weights),
+        float(to_ret) if to_ret is not None else 0.0,
+        float(to_sharpe) if to_sharpe is not None else 0.0,
+        criteria,
+        int(top_n)
+    ))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "timestamp": ts}
+
+
+def get_model_swap_history():
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, timestamp, from_model, from_weights, from_ret, from_sharpe, to_model, to_weights, to_ret, to_sharpe, criteria, top_n
+        FROM model_swaps ORDER BY id DESC LIMIT 50
+    ''')
+    rows = c.fetchall()
+    conn.close()
+    
+    history = []
+    for r in rows:
+        history.append({
+            "id": r[0],
+            "timestamp": r[1],
+            "from_model": r[2],
+            "from_weights": r[3],
+            "from_ret": r[4],
+            "from_sharpe": r[5],
+            "to_model": r[6],
+            "to_weights": r[7],
+            "to_ret": r[8],
+            "to_sharpe": r[9],
+            "criteria": r[10],
+            "top_n": r[11]
+        })
+    return history
+
 

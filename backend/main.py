@@ -369,6 +369,40 @@ async def api_get_etf_simulation_models(criteria: str = "momentum", top_n: int =
     from etf_strategy import run_bulk_simulation
     return run_bulk_simulation(criteria=criteria, top_n=top_n)
 
+class ModelSwapRequest(BaseModel):
+    from_model: str
+    from_weights: Any
+    from_ret: float = 0.0
+    from_sharpe: float = 0.0
+    to_model: str
+    to_weights: Any
+    to_ret: float = 0.0
+    to_sharpe: float = 0.0
+    criteria: str = "sharpe"
+    top_n: int = 1
+
+@app.post("/api/etf/save-model-swap")
+async def api_save_model_swap(req: ModelSwapRequest):
+    from etf_strategy import save_model_swap
+    return save_model_swap(
+        from_model=req.from_model,
+        from_weights=req.from_weights,
+        from_ret=req.from_ret,
+        from_sharpe=req.from_sharpe,
+        to_model=req.to_model,
+        to_weights=req.to_weights,
+        to_ret=req.to_ret,
+        to_sharpe=req.to_sharpe,
+        criteria=req.criteria,
+        top_n=req.top_n
+    )
+
+@app.get("/api/etf/swap-history")
+async def api_get_swap_history():
+    from etf_strategy import get_model_swap_history
+    return get_model_swap_history()
+
+
 @app.get("/api/etf/list")
 def api_get_etf_list():
     from ingestion.scrapers.etf_scraper import EtfScraper
@@ -1310,52 +1344,45 @@ def api_get_holdings():
             except Exception:
                 pass
 
-        from kis_foreign_scanner import fetch_kis_foreign_net
-            
+        from kis_foreign_scanner import get_snapshot_0905_map
+        snap_0905_map = get_snapshot_0905_map()
+
         for h in holdings:
             raw_ticker = h.get("ticker", "")
             clean_ticker = raw_ticker.replace("KRX:", "")
             if not clean_ticker: continue
             
-            fetched_info = {}
-            try:
-                fetched_info = fetch_kis_foreign_net({'ticker': clean_ticker})
-            except Exception as e:
-                print(f"[api_get_holdings] fetch error for {clean_ticker}: {e}")
-
-            current_p = fetched_info.get('price', 0)
-            if current_p <= 0:
-                if clean_ticker in _holdings_price_cache:
-                    current_p = _holdings_price_cache[clean_ticker]
-                else:
-                    try:
-                        s_info = get_stock(clean_ticker)
-                        if s_info and s_info.get("price"):
-                            current_p = float(s_info["price"])
-                    except Exception:
-                        pass
+            # 캐시 데이터 매칭
+            cache_match = cache_stocks_map.get(clean_ticker) or cache_stocks_map.get(f"KRX:{clean_ticker}") or {}
             
+            # 현재가 결정 (캐시가 있으면 캐시가, 없으면 이전 캐시가 또는 매입가)
+            current_p = cache_match.get('price', 0)
+            if current_p <= 0:
+                current_p = _holdings_price_cache.get(clean_ticker, 0)
+            if current_p <= 0:
+                try:
+                    s_info = get_stock(clean_ticker)
+                    if s_info and s_info.get("price"):
+                        current_p = float(s_info["price"])
+                except Exception:
+                    pass
             if current_p <= 0:
                 current_p = h.get("buyPrice", 0)
 
             _holdings_price_cache[clean_ticker] = current_p
             h["currentPrice"] = current_p
             
-            # 외국계 비중 매핑
-            live_ratio = fetched_info.get("foreign_ratio", 0.0)
+            # 외국계 비중 & 9시 5분 비중 매핑
+            live_ratio = cache_match.get("foreign_ratio", cache_match.get("foreignRatio", 0.0))
+            ratio0905 = snap_0905_map.get(clean_ticker, cache_match.get("ratio0905", live_ratio))
+            
             h["foreign_ratio"] = live_ratio
             h["foreignRatio"] = live_ratio
-            h["foreign_net_buy"] = fetched_info.get("foreign_net_buy", 0)
-            
-            # 9시 5분 비중 (캐시에 스냅샷이 남아있으면 그 비중, 없으면 현재 실시간 비중)
-            cache_match = cache_stocks_map.get(clean_ticker)
-            if cache_match:
-                ratio0905 = cache_match.get("foreign_ratio", cache_match.get("foreignRatio", live_ratio))
-            else:
-                ratio0905 = live_ratio
-                
+            h["foreign_net_buy"] = cache_match.get("foreign_net_buy", 0)
             h["ratio0905"] = ratio0905
             h["foreign_ratio_0905"] = ratio0905
+
+        return holdings
 
         return holdings
     except Exception as e:
