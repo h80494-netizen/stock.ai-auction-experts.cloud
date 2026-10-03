@@ -68,9 +68,28 @@ def init_db():
             revenue REAL,
             operating_profit REAL,
             net_profit REAL,
+            revenue_ttm REAL DEFAULT 0,
+            operating_profit_ttm REAL DEFAULT 0,
+            net_profit_ttm REAL DEFAULT 0,
+            roe_ttm REAL DEFAULT 0,
+            op_margin_ttm REAL DEFAULT 0,
             UNIQUE(ticker, year, quarter)
         )
     ''')
+    
+    # 동적 컬럼 덧붙이기 (기존 테이블 마이그레이션)
+    ttm_cols = [
+        ("revenue_ttm", "REAL DEFAULT 0"),
+        ("operating_profit_ttm", "REAL DEFAULT 0"),
+        ("net_profit_ttm", "REAL DEFAULT 0"),
+        ("roe_ttm", "REAL DEFAULT 0"),
+        ("op_margin_ttm", "REAL DEFAULT 0")
+    ]
+    for col_name, col_type in ttm_cols:
+        try:
+            c.execute(f"ALTER TABLE dart_financials ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass
     
     # 일자별 실현손익 테이블
     c.execute('''
@@ -257,6 +276,108 @@ def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, r
     conn.commit()
     conn.close()
 
+def calculate_and_save_ttm_financials(ticker: str):
+    """
+    특정 종목의 과거 분기별 누적 재무 데이터에서
+    직전 4개 분기 실적 합계(TTM, Trailing 12 Months)를 정교하게 산출하여 DB에 업데이트합니다.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM dart_financials WHERE ticker = ? ORDER BY year ASC, quarter ASC", (ticker,))
+    rows = [dict(r) for r in c.fetchall()]
+    
+    if not rows:
+        conn.close()
+        return
+
+    # 순수 3개월 분기 실적(Discrete Quarter) 구하기
+    year_map = {}
+    for r in rows:
+        y = r['year']
+        if y not in year_map:
+            year_map[y] = {}
+        year_map[y][r['quarter']] = r
+
+    discrete_quarters = []
+    for y in sorted(year_map.keys()):
+        q_dict = year_map[y]
+        q1 = q_dict.get('11013')
+        q2 = q_dict.get('11012')
+        q3 = q_dict.get('11014')
+        fy = q_dict.get('11011')
+        
+        for q_code, q_obj in [('11013', q1), ('11012', q2), ('11014', q3), ('11011', fy)]:
+            if not q_obj:
+                continue
+            
+            raw_rev = q_obj.get('revenue') or 0
+            raw_op = q_obj.get('operating_profit') or 0
+            raw_np = q_obj.get('net_profit') or 0
+            equity = q_obj.get('equity') or 0
+            
+            if q_code == '11013':
+                s_rev, s_op, s_np = raw_rev, raw_op, raw_np
+            elif q_code == '11012':
+                prev = q1
+                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev / 2.0)
+                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op / 2.0)
+                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np / 2.0)
+            elif q_code == '11014':
+                prev = q2
+                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev * 2 / 3.0)
+                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op * 2 / 3.0)
+                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np * 2 / 3.0)
+            else: # 11011
+                prev = q3
+                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev * 3 / 4.0)
+                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op * 3 / 4.0)
+                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np * 3 / 4.0)
+
+            discrete_quarters.append({
+                "id": q_obj['id'],
+                "year": y,
+                "quarter": q_code,
+                "equity": equity,
+                "s_rev": s_rev,
+                "s_op": s_op,
+                "s_np": s_np,
+                "raw_rev": raw_rev,
+                "raw_op": raw_op,
+                "raw_np": raw_np
+            })
+
+    # TTM (직전 4개 분기 순수 실적 누적 합산) 계산
+    for idx, dq in enumerate(discrete_quarters):
+        start_idx = max(0, idx - 3)
+        window = discrete_quarters[start_idx : idx + 1]
+        
+        if len(window) == 4:
+            rev_ttm = sum(w['s_rev'] for w in window)
+            op_ttm = sum(w['s_op'] for w in window)
+            np_ttm = sum(w['s_np'] for w in window)
+        else:
+            factor = 4.0 / len(window)
+            rev_ttm = sum(w['s_rev'] for w in window) * factor
+            op_ttm = sum(w['s_op'] for w in window) * factor
+            np_ttm = sum(w['s_np'] for w in window) * factor
+            
+        equity = dq['equity']
+        roe_ttm = (np_ttm / equity * 100.0) if equity > 0 else 0
+        op_margin_ttm = (op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0
+        
+        c.execute('''
+            UPDATE dart_financials SET
+                revenue_ttm = ?,
+                operating_profit_ttm = ?,
+                net_profit_ttm = ?,
+                roe_ttm = ?,
+                op_margin_ttm = ?
+            WHERE id = ?
+        ''', (rev_ttm, op_ttm, np_ttm, roe_ttm, op_margin_ttm, dq['id']))
+        
+    conn.commit()
+    conn.close()
+
 def get_dart_financials(ticker):
     conn = get_db_connection()
     c = conn.cursor()
@@ -269,7 +390,7 @@ def get_dart_screener_results(conditions: dict):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 종목별 최신 재무 데이터 조회
+    # 종목별 최신 TTM 재무 데이터 조회
     c.execute('''
         SELECT f.* FROM dart_financials f
         INNER JOIN (
@@ -284,27 +405,31 @@ def get_dart_screener_results(conditions: dict):
     results = []
     for r in rows:
         item = dict(r)
-        quarter_str = str(item.get('quarter', ''))
-        # 분기 보고서(11013:1분기, 11012:반기/2분기, 11014:3분기)인 경우 * 4 연환산
-        # 11011(사업보고서/연간)인 경우 * 1
-        multiplier = 1.0 if quarter_str == '11011' else 4.0
         
-        raw_rev = item.get('revenue') or 0
-        raw_op = item.get('operating_profit') or 0
-        raw_np = item.get('net_profit') or 0
+        # 1. TTM 4분기 누적 연간 실적 우선 사용
+        rev_ttm = item.get('revenue_ttm') or 0
+        op_ttm = item.get('operating_profit_ttm') or 0
+        np_ttm = item.get('net_profit_ttm') or 0
         equity = item.get('equity') or 0
         assets = item.get('assets') or 0
         
-        rev = raw_rev * multiplier
-        op = raw_op * multiplier
-        np_val = raw_np * multiplier
+        quarter_str = str(item.get('quarter', ''))
+        mult = 1.0 if quarter_str == '11011' else 4.0
         
-        roe = (np_val / equity * 100.0) if equity > 0 else None
-        op_margin = (op / rev * 100.0) if rev > 0 else None
+        # TTM 값이 0인 경우 기본 연환산 fallback
+        if rev_ttm == 0:
+            rev_ttm = (item.get('revenue') or 0) * mult
+        if op_ttm == 0:
+            op_ttm = (item.get('operating_profit') or 0) * mult
+        if np_ttm == 0:
+            np_ttm = (item.get('net_profit') or 0) * mult
+
+        roe = item.get('roe_ttm') or ((np_ttm / equity * 100.0) if equity > 0 else 0)
+        op_margin = item.get('op_margin_ttm') or ((op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0)
         
-        rev_eok = rev / 100000000.0  # 억 원 단위
-        op_eok = op / 100000000.0
-        np_eok = np_val / 100000000.0
+        rev_eok = rev_ttm / 100000000.0  # 억 원 단위
+        op_eok = op_ttm / 100000000.0
+        np_eok = np_ttm / 100000000.0
         
         # 다중 중복 조건 (Multi-filtering) 검사
         if conditions.get('use_roe', False):
@@ -341,10 +466,9 @@ def get_dart_screener_results(conditions: dict):
             "ticker": item['ticker'],
             "year": item['year'],
             "quarter": item['quarter'],
-            "annualized": multiplier > 1.0,
-            "multiplier": multiplier,
-            "roe": round(roe, 2) if roe is not None else 0,
-            "operating_margin": round(op_margin, 2) if op_margin is not None else 0,
+            "is_ttm": True,
+            "roe": round(roe, 2),
+            "operating_margin": round(op_margin, 2),
             "revenue_eok": round(rev_eok, 1),
             "op_profit_eok": round(op_eok, 1),
             "net_profit_eok": round(np_eok, 1),
@@ -512,6 +636,23 @@ def get_foreign_financials_cache(ticker: str):
     row = c.fetchone()
     conn.close()
     return dict(row) if row else None
+
+def recalculate_all_ttm_financials():
+    """DB에 수집된 모든 기업의 과거 분기 실적으로부터 TTM 4분기 누적 연간 실적을 일괄 산출 및 업데이트"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT ticker FROM dart_financials")
+    rows = c.fetchall()
+    conn.close()
+    
+    tickers = [r['ticker'] for r in rows if r['ticker']]
+    print(f"[TTM Batch] Recalculating TTM 4-quarter cumulative financials for {len(tickers)} companies...")
+    for t in tickers:
+        try:
+            calculate_and_save_ttm_financials(t)
+        except Exception:
+            pass
+    print(f"[TTM Batch] Recalculation complete!")
 
 # Initialize DB when imported
 init_db()

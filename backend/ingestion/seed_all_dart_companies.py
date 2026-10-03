@@ -170,6 +170,13 @@ def fetch_and_save_company_financials(company: dict):
         stock_code, target_year, target_quarter,
         assets, equity, liabilities, revenue, operating_profit, net_profit
     )
+    
+    # 4분기 누적 TTM 연간 실적 즉시 산출 및 DB 저장
+    try:
+        db.calculate_and_save_ttm_financials(stock_code)
+    except Exception as e:
+        pass
+        
     return True
 
 def seed_all_dart_companies(max_count: int = 3000):

@@ -87,7 +87,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <span>🧩 종목 필터링 (Tetris Screener)</span>
           </h2>
           <p className="text-xs text-gray-400 mt-1">
-            DART 재무제표 기반 다중 복수 조건 중복 필터링 (분기별 데이터는 <strong className="text-yellow-400 font-mono">x 4 (연환산)</strong> 기준 적용)
+            DART 재무제표 기반 다중 복수 조건 중복 필터링 (모든 실적은 <strong className="text-yellow-400 font-mono">직전 4개 분기 누적 합산 (TTM 연간 실적)</strong> 기준 적용)
           </p>
         </div>
         <button
@@ -354,8 +354,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       {item.net_profit_eok.toLocaleString()} 억
                     </td>
                     <td className="p-3 text-center">
-                      <span className={`px-2 py-0.5 text-[10px] rounded font-sans font-bold ${item.annualized ? 'bg-yellow-900/60 text-yellow-300 border border-yellow-600/40' : 'bg-gray-800 text-gray-300'}`}>
-                        {item.annualized ? `분기x4 (${item.quarter})` : '연간'}
+                      <span className="px-2.5 py-0.5 text-[10px] rounded font-sans font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40">
+                        TTM 4분기누적 ({item.year}-{item.quarter})
                       </span>
                     </td>
                   </tr>
