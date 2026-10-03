@@ -84,10 +84,15 @@ def fetch_and_save_company_financials(company: dict, year: str = "2023", reprt_c
         if data.get("status") != "000":
             return False
             
-        results = {}
+        assets = 0
+        equity = 0
+        liabilities = 0
+        revenue = 0
+        operating_profit = 0
+        net_profit = 0
+
         for item in data.get("list", []):
-            acc_nm = (item.get("account_nm") or "").strip()
-            acc_id = (item.get("account_id") or "").strip()
+            acc_nm = item.get("account_nm", "").strip()
             amount_str = item.get("thstrm_amount")
             fs_div = item.get("fs_div")
             
@@ -99,24 +104,19 @@ def fetch_and_save_company_financials(company: dict, year: str = "2023", reprt_c
             except ValueError:
                 continue
 
-            # 매칭할 계정키
-            keys_to_set = [acc_nm, acc_id]
-            for k in keys_to_set:
-                if k and (k not in results or fs_div == 'CFS'):
-                    results[k] = val
-        
-        if not results:
-            return False
-            
-        assets = results.get("자산총계", 0) or results.get("ifrs-full_Assets", 0)
-        equity = results.get("자본총계", 0) or results.get("ifrs-full_Equity", 0)
-        liabilities = results.get("부채총계", 0) or results.get("ifrs-full_Liabilities", 0)
-        revenue = (results.get("매출액", 0) or results.get("수익(매출액)", 0) or 
-                   results.get("매출", 0) or results.get("ifrs-full_Revenue", 0))
-        operating_profit = (results.get("영업이익", 0) or results.get("영업이익(손실)", 0) or 
-                            results.get("ifrs-full_OperatingProfit", 0))
-        net_profit = (results.get("당기순이익", 0) or results.get("당기순이익(손실)", 0) or 
-                      results.get("ifrs-full_ProfitLoss", 0))
+            # 연결재무제표(CFS) 데이터를 우선 적용, 없으면 개별(OFS)
+            if "자산총계" in acc_nm and (assets == 0 or fs_div == 'CFS'):
+                assets = val
+            elif "자본총계" in acc_nm and (equity == 0 or fs_div == 'CFS'):
+                equity = val
+            elif "부채총계" in acc_nm and (liabilities == 0 or fs_div == 'CFS'):
+                liabilities = val
+            elif ("매출" in acc_nm or "수익" in acc_nm) and (revenue == 0 or fs_div == 'CFS'):
+                revenue = val
+            elif "영업이익" in acc_nm and (operating_profit == 0 or fs_div == 'CFS'):
+                operating_profit = val
+            elif "당기순이익" in acc_nm and (net_profit == 0 or fs_div == 'CFS'):
+                net_profit = val
         
         # 최소한 자산이나 매출/순이익 중 하나 이상 데이터가 존재하는 경우 저장
         if assets == 0 and revenue == 0 and net_profit == 0:
