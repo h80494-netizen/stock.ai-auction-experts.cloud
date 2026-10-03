@@ -19,6 +19,22 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   const [useNetProfit, setUseNetProfit] = useState<boolean>(false);
   const [minNetProfit, setMinNetProfit] = useState<number>(30); // 30억 원 이상
 
+  // YoY (전년대비) 개선 조건 필터
+  const [useYoyRoeUp, setUseYoyRoeUp] = useState<boolean>(false);
+  const [minYoyRoeDiff, setMinYoyRoeDiff] = useState<number>(1.0); // +1.0%p 이상
+
+  const [useYoyRevUp, setUseYoyRevUp] = useState<boolean>(false);
+  const [minYoyRevGrowth, setMinYoyRevGrowth] = useState<number>(5.0); // +5.0% 이상
+
+  const [useYoyOpUp, setUseYoyOpUp] = useState<boolean>(false);
+  const [minYoyOpGrowth, setMinYoyOpGrowth] = useState<number>(10.0); // +10.0% 이상
+
+  const [useYoyNpUp, setUseYoyNpUp] = useState<boolean>(false);
+  const [minYoyNpGrowth, setMinYoyNpGrowth] = useState<number>(10.0); // +10.0% 이상
+
+  const [useYoyPriceUp, setUseYoyPriceUp] = useState<boolean>(false);
+  const [minYoyPriceGrowth, setMinYoyPriceGrowth] = useState<number>(0.0); // +0% 이상 (상승)
+
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -49,6 +65,28 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       if (useNetProfit) {
         payload.use_net_profit = true;
         payload.min_net_profit = minNetProfit;
+      }
+
+      // YoY 필터 추가
+      if (useYoyRoeUp) {
+        payload.use_yoy_roe_up = true;
+        payload.min_yoy_roe_diff = minYoyRoeDiff;
+      }
+      if (useYoyRevUp) {
+        payload.use_yoy_rev_up = true;
+        payload.min_yoy_rev_growth = minYoyRevGrowth;
+      }
+      if (useYoyOpUp) {
+        payload.use_yoy_op_up = true;
+        payload.min_yoy_op_growth = minYoyOpGrowth;
+      }
+      if (useYoyNpUp) {
+        payload.use_yoy_np_up = true;
+        payload.min_yoy_np_growth = minYoyNpGrowth;
+      }
+      if (useYoyPriceUp) {
+        payload.use_yoy_price_up = true;
+        payload.min_yoy_price_growth = minYoyPriceGrowth;
       }
 
       const res = await fetch('/api/dart/screener', {
@@ -87,7 +125,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <span>🧩 종목 필터링 (Tetris Screener)</span>
           </h2>
           <p className="text-xs text-gray-400 mt-1">
-            DART 재무제표 기반 다중 복수 조건 중복 필터링 (모든 실적은 <strong className="text-yellow-400 font-mono">직전 4개 분기 누적 합산 (TTM 연간 실적)</strong> 기준 적용)
+            DART 재무제표 12분기 TTM 연간 실적 DB 기반 다중 중복 조건 & YoY(전년대비) 성장성 필터링
           </p>
         </div>
         <button
@@ -103,8 +141,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       {/* 1. Multi-Filter Condition Control Grid */}
       <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-4">
         <div className="text-sm font-bold text-indigo-300 flex items-center justify-between border-b border-gray-800 pb-2">
-          <span>🎯 필터링 조건 설정 (원하는 항목을 체크하여 중복 적용)</span>
-          <span className="text-xs text-gray-400 font-normal">※ 분기 실적은 x4 곱연산으로 자동 연환산 비교됩니다.</span>
+          <span>🎯 기본 절대 지표 필터링 (원하는 항목을 체크하여 중복 적용)</span>
+          <span className="text-xs text-gray-400 font-normal">※ 12분기 TTM (최근 4분기 누적) 실적 기준 비교</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
@@ -196,7 +234,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             </div>
           </div>
 
-          {/* (3) Annualized Revenue Filter (x 4) */}
+          {/* (3) Annualized Revenue Filter (TTM) */}
           <div className={`p-3 rounded-lg border transition-all space-y-2 ${useRevenue ? 'bg-indigo-950/40 border-indigo-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -206,7 +244,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   onChange={(e) => setUseRevenue(e.target.checked)}
                   className="w-4 h-4 accent-indigo-500 rounded"
                 />
-                <span>💰 연환산 매출액 (억 원) <span className="text-[10px] text-yellow-400 font-mono">(분기x4)</span></span>
+                <span>💰 TTM 연간 매출액 (억 원)</span>
               </label>
               <span className="font-mono text-blue-300 font-bold">{minRevenue}억 이상</span>
             </div>
@@ -229,7 +267,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             </div>
           </div>
 
-          {/* (4) Annualized Operating Profit Filter (x 4) */}
+          {/* (4) Annualized Operating Profit Filter (TTM) */}
           <div className={`p-3 rounded-lg border transition-all space-y-2 ${useOp ? 'bg-indigo-950/40 border-indigo-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -239,7 +277,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   onChange={(e) => setUseOp(e.target.checked)}
                   className="w-4 h-4 accent-indigo-500 rounded"
                 />
-                <span>🏢 연환산 영업이익 (억 원) <span className="text-[10px] text-yellow-400 font-mono">(분기x4)</span></span>
+                <span>🏢 TTM 연간 영업이익 (억 원)</span>
               </label>
               <span className="font-mono text-emerald-300 font-bold">{minOp}억 이상</span>
             </div>
@@ -262,7 +300,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             </div>
           </div>
 
-          {/* (5) Annualized Net Profit Filter (x 4) */}
+          {/* (5) Annualized Net Profit Filter (TTM) */}
           <div className={`p-3 rounded-lg border transition-all space-y-2 ${useNetProfit ? 'bg-indigo-950/40 border-indigo-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -272,7 +310,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   onChange={(e) => setUseNetProfit(e.target.checked)}
                   className="w-4 h-4 accent-indigo-500 rounded"
                 />
-                <span>💎 연환산 당기순이익 (억 원) <span className="text-[10px] text-yellow-400 font-mono">(분기x4)</span></span>
+                <span>💎 TTM 연간 당기순이익 (억 원)</span>
               </label>
               <span className="font-mono text-amber-300 font-bold">{minNetProfit}억 이상</span>
             </div>
@@ -296,9 +334,185 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           </div>
 
         </div>
+
+        {/* 2. YoY (전년대비) 성장 지표 필터링 */}
+        <div className="text-sm font-bold text-emerald-300 flex items-center justify-between border-b border-gray-800 pt-4 pb-2">
+          <span>🚀 전년 동기 대비(YoY) 지표 개선/상승 조건</span>
+          <span className="text-xs text-gray-400 font-normal">※ 1년 전 동일 분기 TTM 대비 상승폭 검증</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+          
+          {/* YoY ROE 상승 */}
+          <div className={`p-3 rounded-lg border transition-all space-y-2 ${useYoyRoeUp ? 'bg-emerald-950/40 border-emerald-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={useYoyRoeUp}
+                  onChange={(e) => setUseYoyRoeUp(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded"
+                />
+                <span>🔺 YoY ROE 상승폭 (%p)</span>
+              </label>
+              <span className="font-mono text-emerald-300 font-bold">+{minYoyRoeDiff}%p 이상</span>
+            </div>
+            <div className="pt-2 flex items-center gap-2">
+              <input
+                type="range"
+                min="0" max="20" step="0.5"
+                value={minYoyRoeDiff}
+                disabled={!useYoyRoeUp}
+                onChange={(e) => setMinYoyRoeDiff(Number(e.target.value))}
+                className="w-full accent-emerald-500"
+              />
+              <input
+                type="number"
+                step="0.1"
+                value={minYoyRoeDiff}
+                disabled={!useYoyRoeUp}
+                onChange={(e) => setMinYoyRoeDiff(Number(e.target.value))}
+                className="w-16 bg-gray-800 border border-gray-700 text-center rounded px-1 py-1 text-xs text-white font-mono"
+              />
+            </div>
+          </div>
+
+          {/* YoY 매출 성장률 */}
+          <div className={`p-3 rounded-lg border transition-all space-y-2 ${useYoyRevUp ? 'bg-emerald-950/40 border-emerald-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={useYoyRevUp}
+                  onChange={(e) => setUseYoyRevUp(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded"
+                />
+                <span>📈 YoY 매출액 성장률 (%)</span>
+              </label>
+              <span className="font-mono text-blue-300 font-bold">+{minYoyRevGrowth}% 이상</span>
+            </div>
+            <div className="pt-2 flex items-center gap-2">
+              <input
+                type="range"
+                min="0" max="100" step="5"
+                value={minYoyRevGrowth}
+                disabled={!useYoyRevUp}
+                onChange={(e) => setMinYoyRevGrowth(Number(e.target.value))}
+                className="w-full accent-emerald-500"
+              />
+              <input
+                type="number"
+                value={minYoyRevGrowth}
+                disabled={!useYoyRevUp}
+                onChange={(e) => setMinYoyRevGrowth(Number(e.target.value))}
+                className="w-16 bg-gray-800 border border-gray-700 text-center rounded px-1 py-1 text-xs text-white font-mono"
+              />
+            </div>
+          </div>
+
+          {/* YoY 영업이익 성장률 */}
+          <div className={`p-3 rounded-lg border transition-all space-y-2 ${useYoyOpUp ? 'bg-emerald-950/40 border-emerald-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={useYoyOpUp}
+                  onChange={(e) => setUseYoyOpUp(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded"
+                />
+                <span>💥 YoY 영업이익 성장률 (%)</span>
+              </label>
+              <span className="font-mono text-emerald-300 font-bold">+{minYoyOpGrowth}% 이상</span>
+            </div>
+            <div className="pt-2 flex items-center gap-2">
+              <input
+                type="range"
+                min="0" max="200" step="5"
+                value={minYoyOpGrowth}
+                disabled={!useYoyOpUp}
+                onChange={(e) => setMinYoyOpGrowth(Number(e.target.value))}
+                className="w-full accent-emerald-500"
+              />
+              <input
+                type="number"
+                value={minYoyOpGrowth}
+                disabled={!useYoyOpUp}
+                onChange={(e) => setMinYoyOpGrowth(Number(e.target.value))}
+                className="w-16 bg-gray-800 border border-gray-700 text-center rounded px-1 py-1 text-xs text-white font-mono"
+              />
+            </div>
+          </div>
+
+          {/* YoY 순이익 성장률 */}
+          <div className={`p-3 rounded-lg border transition-all space-y-2 ${useYoyNpUp ? 'bg-emerald-950/40 border-emerald-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={useYoyNpUp}
+                  onChange={(e) => setUseYoyNpUp(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded"
+                />
+                <span>💎 YoY 당기순이익 성장률 (%)</span>
+              </label>
+              <span className="font-mono text-amber-300 font-bold">+{minYoyNpGrowth}% 이상</span>
+            </div>
+            <div className="pt-2 flex items-center gap-2">
+              <input
+                type="range"
+                min="0" max="200" step="5"
+                value={minYoyNpGrowth}
+                disabled={!useYoyNpUp}
+                onChange={(e) => setMinYoyNpGrowth(Number(e.target.value))}
+                className="w-full accent-emerald-500"
+              />
+              <input
+                type="number"
+                value={minYoyNpGrowth}
+                disabled={!useYoyNpUp}
+                onChange={(e) => setMinYoyNpGrowth(Number(e.target.value))}
+                className="w-16 bg-gray-800 border border-gray-700 text-center rounded px-1 py-1 text-xs text-white font-mono"
+              />
+            </div>
+          </div>
+
+          {/* YoY 분기말 주가 상승률 */}
+          <div className={`p-3 rounded-lg border transition-all space-y-2 ${useYoyPriceUp ? 'bg-emerald-950/40 border-emerald-500/80 text-white' : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={useYoyPriceUp}
+                  onChange={(e) => setUseYoyPriceUp(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded"
+                />
+                <span>📊 YoY 분기말 주가 상승률 (%)</span>
+              </label>
+              <span className="font-mono text-purple-300 font-bold">+{minYoyPriceGrowth}% 이상</span>
+            </div>
+            <div className="pt-2 flex items-center gap-2">
+              <input
+                type="range"
+                min="-20" max="100" step="5"
+                value={minYoyPriceGrowth}
+                disabled={!useYoyPriceUp}
+                onChange={(e) => setMinYoyPriceGrowth(Number(e.target.value))}
+                className="w-full accent-emerald-500"
+              />
+              <input
+                type="number"
+                value={minYoyPriceGrowth}
+                disabled={!useYoyPriceUp}
+                onChange={(e) => setMinYoyPriceGrowth(Number(e.target.value))}
+                className="w-16 bg-gray-800 border border-gray-700 text-center rounded px-1 py-1 text-xs text-white font-mono"
+              />
+            </div>
+          </div>
+
+        </div>
       </div>
 
-      {/* 2. Screener Search Results Table */}
+      {/* 3. Screener Search Results Table */}
       <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-4 flex-1">
         <div className="flex justify-between items-center border-b border-gray-800 pb-3">
           <h3 className="font-bold text-base text-white flex items-center gap-2">
@@ -318,11 +532,11 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               <thead>
                 <tr className="bg-gray-900/90 text-gray-400 border-b border-gray-800">
                   <th className="p-3 font-sans">종목명 (코드)</th>
-                  <th className="p-3 text-right text-indigo-300">ROE (%)</th>
+                  <th className="p-3 text-right text-indigo-300">ROE / YoY</th>
                   <th className="p-3 text-right text-purple-300">영업이익률 (%)</th>
-                  <th className="p-3 text-right text-blue-300">연환산 매출액 (억)</th>
-                  <th className="p-3 text-right text-emerald-300">연환산 영업이익 (억)</th>
-                  <th className="p-3 text-right text-amber-300">연환산 순이익 (억)</th>
+                  <th className="p-3 text-right text-blue-300">TTM 매출 / YoY</th>
+                  <th className="p-3 text-right text-emerald-300">TTM 영업이익 / YoY</th>
+                  <th className="p-3 text-right text-amber-300">TTM 순이익 / YoY</th>
                   <th className="p-3 text-center">적용 기준</th>
                 </tr>
               </thead>
@@ -338,20 +552,40 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     <td className="p-3 font-sans font-bold text-white group-hover:text-indigo-300">
                       {getStockName(item.ticker)} <span className="text-gray-500 font-mono text-[11px]">({item.ticker})</span>
                     </td>
-                    <td className="p-3 text-right font-bold text-indigo-400">
-                      {item.roe}%
+                    <td className="p-3 text-right">
+                      <div className="font-bold text-indigo-400">{item.roe}%</div>
+                      {item.yoy_roe_diff !== undefined && (
+                        <div className={`text-[10px] ${item.yoy_roe_diff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {item.yoy_roe_diff >= 0 ? `+${item.yoy_roe_diff}%p ▲` : `${item.yoy_roe_diff}%p ▼`}
+                        </div>
+                      )}
                     </td>
-                    <td className="p-3 text-right text-purple-300">
+                    <td className="p-3 text-right text-purple-300 font-bold">
                       {item.operating_margin}%
                     </td>
-                    <td className="p-3 text-right text-blue-300">
-                      {item.revenue_eok.toLocaleString()} 억
+                    <td className="p-3 text-right">
+                      <div className="text-blue-300 font-bold">{item.revenue_eok.toLocaleString()} 억</div>
+                      {item.yoy_rev_growth !== undefined && (
+                        <div className={`text-[10px] ${item.yoy_rev_growth >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {item.yoy_rev_growth >= 0 ? `+${item.yoy_rev_growth}% ▲` : `${item.yoy_rev_growth}% ▼`}
+                        </div>
+                      )}
                     </td>
-                    <td className="p-3 text-right text-emerald-400 font-bold">
-                      {item.op_profit_eok.toLocaleString()} 억
+                    <td className="p-3 text-right">
+                      <div className="text-emerald-400 font-bold">{item.op_profit_eok.toLocaleString()} 억</div>
+                      {item.yoy_op_growth !== undefined && (
+                        <div className={`text-[10px] ${item.yoy_op_growth >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {item.yoy_op_growth >= 0 ? `+${item.yoy_op_growth}% ▲` : `${item.yoy_op_growth}% ▼`}
+                        </div>
+                      )}
                     </td>
-                    <td className="p-3 text-right text-amber-300">
-                      {item.net_profit_eok.toLocaleString()} 억
+                    <td className="p-3 text-right">
+                      <div className="text-amber-300 font-bold">{item.net_profit_eok.toLocaleString()} 억</div>
+                      {item.yoy_np_growth !== undefined && (
+                        <div className={`text-[10px] ${item.yoy_np_growth >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {item.yoy_np_growth >= 0 ? `+${item.yoy_np_growth}% ▲` : `${item.yoy_np_growth}% ▼`}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 text-center">
                       <span className="px-2.5 py-0.5 text-[10px] rounded font-sans font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40">
@@ -367,7 +601,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           <div className="text-center py-16 text-gray-500 text-sm">
             {loading ? (
               <div className="animate-pulse space-y-2">
-                <div>⏳ DART 재무제표 DB에서 분기 x 4 연환산 조건 검색 중입니다...</div>
+                <div>⏳ DART 12분기 TTM 재무제표 DB에서 조건 검색 중입니다...</div>
               </div>
             ) : (
               '조건 검색 실행 버튼을 누르거나, 필터링 수치를 변경해 보세요.'

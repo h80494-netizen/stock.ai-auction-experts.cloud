@@ -418,82 +418,111 @@ def get_dart_screener_results(conditions: dict):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 종목별 최신 TTM 재무 데이터 조회
-    c.execute('''
-        SELECT f.* FROM dart_financials f
-        INNER JOIN (
-            SELECT ticker, MAX(year || '_' || quarter) as max_yq
-            FROM dart_financials
-            GROUP BY ticker
-        ) latest ON f.ticker = latest.ticker AND (f.year || '_' || f.quarter) = latest.max_yq
-    ''')
-    rows = c.fetchall()
+    # 1. 모든 dart_financials 데이터를 ticker별로 조회하여 최신 TTM과 전년 동분기 TTM 매칭
+    c.execute("SELECT * FROM dart_financials ORDER BY ticker ASC, year DESC, quarter DESC")
+    all_rows = [dict(r) for r in c.fetchall()]
     conn.close()
     
+    # ticker별 그룹화
+    ticker_map = {}
+    for r in all_rows:
+        tk = r['ticker']
+        if tk not in ticker_map:
+            ticker_map[tk] = []
+        ticker_map[tk].append(r)
+        
     results = []
-    for r in rows:
-        item = dict(r)
+    for tk, list_rows in ticker_map.items():
+        if not list_rows:
+            continue
+            
+        latest = list_rows[0] # 최신 TTM 레코드
+        cur_year = int(latest['year']) if str(latest['year']).isdigit() else 2024
+        cur_q = latest['quarter']
         
-        # 1. TTM 4분기 누적 연간 실적 우선 사용
-        rev_ttm = item.get('revenue_ttm') or 0
-        op_ttm = item.get('operating_profit_ttm') or 0
-        np_ttm = item.get('net_profit_ttm') or 0
-        equity = item.get('equity') or 0
-        assets = item.get('assets') or 0
-        
-        quarter_str = str(item.get('quarter', ''))
-        mult = 1.0 if quarter_str == '11011' else 4.0
-        
-        # TTM 값이 0인 경우 기본 연환산 fallback
-        if rev_ttm == 0:
-            rev_ttm = (item.get('revenue') or 0) * mult
-        if op_ttm == 0:
-            op_ttm = (item.get('operating_profit') or 0) * mult
-        if np_ttm == 0:
-            np_ttm = (item.get('net_profit') or 0) * mult
+        # 1년 전 동일 분기 레코드 찾기 (예: 2024_11014 -> 2023_11014)
+        prev_year_str = str(cur_year - 1)
+        prev_item = next((x for x in list_rows if str(x['year']) == prev_year_str and x['quarter'] == cur_q), None)
+        if not prev_item and len(list_rows) >= 4:
+            prev_item = list_rows[min(4, len(list_rows)-1)]
 
-        roe = item.get('roe_ttm') or ((np_ttm / equity * 100.0) if equity > 0 else 0)
-        op_margin = item.get('op_margin_ttm') or ((op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0)
+        # 현재 TTM 실적
+        rev_ttm = latest.get('revenue_ttm') or (latest.get('revenue') or 0) * (1.0 if cur_q == '11011' else 4.0)
+        op_ttm = latest.get('operating_profit_ttm') or (latest.get('operating_profit') or 0) * (1.0 if cur_q == '11011' else 4.0)
+        np_ttm = latest.get('net_profit_ttm') or (latest.get('net_profit') or 0) * (1.0 if cur_q == '11011' else 4.0)
+        equity = latest.get('equity') or 0
+        assets = latest.get('assets') or 0
         
-        rev_eok = rev_ttm / 100000000.0  # 억 원 단위
+        roe = latest.get('roe_ttm') or ((np_ttm / equity * 100.0) if equity > 0 else 0)
+        op_margin = latest.get('op_margin_ttm') or ((op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0)
+        
+        rev_eok = rev_ttm / 100000000.0
         op_eok = op_ttm / 100000000.0
         np_eok = np_ttm / 100000000.0
         
-        # 다중 중복 조건 (Multi-filtering) 검사
+        # 전년 동분기 TTM 실적
+        prev_roe = 0
+        prev_rev_ttm = 0
+        prev_op_ttm = 0
+        prev_np_ttm = 0
+        
+        if prev_item:
+            p_q = prev_item['quarter']
+            p_mult = 1.0 if p_q == '11011' else 4.0
+            prev_rev_ttm = prev_item.get('revenue_ttm') or (prev_item.get('revenue') or 0) * p_mult
+            prev_op_ttm = prev_item.get('operating_profit_ttm') or (prev_item.get('operating_profit') or 0) * p_mult
+            prev_np_ttm = prev_item.get('net_profit_ttm') or (prev_item.get('net_profit') or 0) * p_mult
+            p_eq = prev_item.get('equity') or 0
+            prev_roe = prev_item.get('roe_ttm') or ((prev_np_ttm / p_eq * 100.0) if p_eq > 0 else 0)
+            
+        # YoY 변화량 계산
+        yoy_roe_diff = roe - prev_roe if prev_item else 0
+        yoy_rev_growth = ((rev_ttm - prev_rev_ttm) / abs(prev_rev_ttm) * 100.0) if (prev_item and prev_rev_ttm != 0) else 0
+        yoy_op_growth = ((op_ttm - prev_op_ttm) / abs(prev_op_ttm) * 100.0) if (prev_item and prev_op_ttm != 0) else 0
+        yoy_np_growth = ((np_ttm - prev_np_ttm) / abs(prev_np_ttm) * 100.0) if (prev_item and prev_np_ttm != 0) else 0
+
+        # 절대조건 필터링
         if conditions.get('use_roe', False):
-            min_roe = conditions.get('min_roe')
-            max_roe = conditions.get('max_roe')
-            if roe is None:
+            if roe < float(conditions.get('min_roe', -20)) or roe > float(conditions.get('max_roe', 200)):
                 continue
-            if min_roe is not None and roe < float(min_roe):
-                continue
-            if max_roe is not None and roe > float(max_roe):
-                continue
-                
         if conditions.get('use_op_margin', False):
-            min_op_m = conditions.get('min_op_margin')
-            if op_margin is None or op_margin < float(min_op_m):
+            if op_margin < float(conditions.get('min_op_margin', 0)):
                 continue
-                
         if conditions.get('use_revenue', False):
-            min_rev = conditions.get('min_revenue')
-            if min_rev is not None and rev_eok < float(min_rev):
+            if rev_eok < float(conditions.get('min_revenue', 0)):
                 continue
-                
         if conditions.get('use_op', False):
-            min_op = conditions.get('min_op')
-            if min_op is not None and op_eok < float(min_op):
+            if op_eok < float(conditions.get('min_op', 0)):
+                continue
+        if conditions.get('use_net_profit', False):
+            if np_eok < float(conditions.get('min_net_profit', 0)):
                 continue
                 
-        if conditions.get('use_net_profit', False):
-            min_np = conditions.get('min_net_profit')
-            if min_np is not None and np_eok < float(min_np):
+        # 전년대비(YoY) 지표 상승 필터링
+        if conditions.get('use_yoy_roe_up', False):
+            min_diff = float(conditions.get('min_yoy_roe_diff', 0))
+            if yoy_roe_diff < min_diff:
+                continue
+                
+        if conditions.get('use_yoy_rev_up', False):
+            min_rev_g = float(conditions.get('min_yoy_rev_growth', 0))
+            if yoy_rev_growth < min_rev_g:
+                continue
+                
+        if conditions.get('use_yoy_op_up', False):
+            min_op_g = float(conditions.get('min_yoy_op_growth', 0))
+            if yoy_op_growth < min_op_g:
+                continue
+                
+        if conditions.get('use_yoy_np_up', False):
+            min_np_g = float(conditions.get('min_yoy_np_growth', 0))
+            if yoy_np_growth < min_np_g:
                 continue
 
         results.append({
-            "ticker": item['ticker'],
-            "year": item['year'],
-            "quarter": item['quarter'],
+            "ticker": tk,
+            "year": latest['year'],
+            "quarter": latest['quarter'],
             "is_ttm": True,
             "roe": round(roe, 2),
             "operating_margin": round(op_margin, 2),
@@ -502,8 +531,14 @@ def get_dart_screener_results(conditions: dict):
             "net_profit_eok": round(np_eok, 1),
             "assets_eok": round(assets / 100000000.0, 1),
             "equity_eok": round(equity / 100000000.0, 1),
+            # YoY 전년대비 수치
+            "has_yoy": prev_item is not None,
+            "yoy_roe_diff": round(yoy_roe_diff, 2),
+            "yoy_rev_growth": round(yoy_rev_growth, 1),
+            "yoy_op_growth": round(yoy_op_growth, 1),
+            "yoy_np_growth": round(yoy_np_growth, 1),
         })
-        
+
     return results
 
 def add_realized_pnl(date: str, amount: float):
