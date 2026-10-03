@@ -12,8 +12,11 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database as db
 
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+load_dotenv(env_path)
 load_dotenv()
-DART_API_KEY = os.environ.get("DART_API_KEY")
+
+DART_API_KEY = os.environ.get("DART_API_KEY") or "539baccadbc74546d98d2d0b1d5f2763886d8ea1"
 
 EXCLUDE_PATTERNS = [
     r"KODEX", r"TIGER", r"KBSTAR", r"ACE", r"SOL", r"ARIRANG", r"HANARO", r"TIMEFOLIO", r"WOORI",
