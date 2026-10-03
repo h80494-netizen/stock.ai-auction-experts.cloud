@@ -269,23 +269,90 @@ def get_dart_screener_results(conditions: dict):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 간단한 조건부 필터링 쿼리 예시
-    # 실제로는 조건을 바탕으로 동적 쿼리를 생성해야 합니다.
-    query = 'SELECT DISTINCT ticker FROM dart_financials WHERE 1=1'
-    params = []
-    
-    # 임시 조건 예시
-    if 'min_roe' in conditions:
-        # ROE = net_profit / equity * 100
-        query += ' AND (net_profit / equity * 100) >= ?'
-        params.append(conditions['min_roe'])
-        
-    c.execute(query, params)
+    # 종목별 최신 재무 데이터 조회
+    c.execute('''
+        SELECT f.* FROM dart_financials f
+        INNER JOIN (
+            SELECT ticker, MAX(year || '_' || quarter) as max_yq
+            FROM dart_financials
+            GROUP BY ticker
+        ) latest ON f.ticker = latest.ticker AND (f.year || '_' || f.quarter) = latest.max_yq
+    ''')
     rows = c.fetchall()
-    tickers = [row['ticker'] for row in rows]
     conn.close()
     
-    return tickers
+    results = []
+    for r in rows:
+        item = dict(r)
+        quarter_str = str(item.get('quarter', ''))
+        # 분기 보고서(11013:1분기, 11012:반기/2분기, 11014:3분기)인 경우 * 4 연환산
+        # 11011(사업보고서/연간)인 경우 * 1
+        multiplier = 1.0 if quarter_str == '11011' else 4.0
+        
+        raw_rev = item.get('revenue') or 0
+        raw_op = item.get('operating_profit') or 0
+        raw_np = item.get('net_profit') or 0
+        equity = item.get('equity') or 0
+        assets = item.get('assets') or 0
+        
+        rev = raw_rev * multiplier
+        op = raw_op * multiplier
+        np_val = raw_np * multiplier
+        
+        roe = (np_val / equity * 100.0) if equity > 0 else None
+        op_margin = (op / rev * 100.0) if rev > 0 else None
+        
+        rev_eok = rev / 100000000.0  # 억 원 단위
+        op_eok = op / 100000000.0
+        np_eok = np_val / 100000000.0
+        
+        # 다중 중복 조건 (Multi-filtering) 검사
+        if conditions.get('use_roe', False):
+            min_roe = conditions.get('min_roe')
+            max_roe = conditions.get('max_roe')
+            if roe is None:
+                continue
+            if min_roe is not None and roe < float(min_roe):
+                continue
+            if max_roe is not None and roe > float(max_roe):
+                continue
+                
+        if conditions.get('use_op_margin', False):
+            min_op_m = conditions.get('min_op_margin')
+            if op_margin is None or op_margin < float(min_op_m):
+                continue
+                
+        if conditions.get('use_revenue', False):
+            min_rev = conditions.get('min_revenue')
+            if min_rev is not None and rev_eok < float(min_rev):
+                continue
+                
+        if conditions.get('use_op', False):
+            min_op = conditions.get('min_op')
+            if min_op is not None and op_eok < float(min_op):
+                continue
+                
+        if conditions.get('use_net_profit', False):
+            min_np = conditions.get('min_net_profit')
+            if min_np is not None and np_eok < float(min_np):
+                continue
+
+        results.append({
+            "ticker": item['ticker'],
+            "year": item['year'],
+            "quarter": item['quarter'],
+            "annualized": multiplier > 1.0,
+            "multiplier": multiplier,
+            "roe": round(roe, 2) if roe is not None else 0,
+            "operating_margin": round(op_margin, 2) if op_margin is not None else 0,
+            "revenue_eok": round(rev_eok, 1),
+            "op_profit_eok": round(op_eok, 1),
+            "net_profit_eok": round(np_eok, 1),
+            "assets_eok": round(assets / 100000000.0, 1),
+            "equity_eok": round(equity / 100000000.0, 1),
+        })
+        
+    return results
 
 def add_realized_pnl(date: str, amount: float):
     conn = get_db_connection()

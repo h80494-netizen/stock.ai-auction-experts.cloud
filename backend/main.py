@@ -133,8 +133,9 @@ from typing import Dict, Any
 @app.post("/api/dart/screener")
 def dart_screener(conditions: Dict[str, Any]):
     try:
-        tickers = db.get_dart_screener_results(conditions)
-        return {"success": True, "tickers": tickers}
+        results = db.get_dart_screener_results(conditions)
+        tickers = [r["ticker"] for r in results] if isinstance(results, list) else []
+        return {"success": True, "results": results, "tickers": tickers}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2155,6 +2156,15 @@ def api_start_market_scan():
         return {"message": msg}
     else:
         raise HTTPException(status_code=400, detail=msg)
+
+@app.post("/api/dart/scan/start")
+def api_start_dart_scan():
+    import threading
+    from ingestion.seed_all_dart_companies import seed_all_dart_companies
+    t = threading.Thread(target=seed_all_dart_companies, kwargs={"max_count": 500})
+    t.daemon = True
+    t.start()
+    return {"message": "DART 상장기업 백그라운드 DB 크롤링 스캔이 시작되었습니다."}
 
 @app.post("/api/market/scan/stop")
 def api_stop_market_scan():
