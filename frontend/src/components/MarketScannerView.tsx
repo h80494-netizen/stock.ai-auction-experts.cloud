@@ -2,15 +2,24 @@ import React, { useState, useEffect } from 'react';
 
 export default function MarketScannerView() {
   const [status, setStatus] = useState<any>(null);
+  const [dartStatus, setDartStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [dartScanMsg, setDartScanMsg] = useState<string | null>(null);
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch('/api/market/scan/status');
-      if (!res.ok) throw new Error(res.statusText || 'API Error');
-      const data = await res.json();
-      setStatus(data);
+      const [marketRes, dartRes] = await Promise.all([
+        fetch('/api/market/scan/status'),
+        fetch('/api/dart/scan/status')
+      ]);
+      if (marketRes.ok) {
+        const data = await marketRes.json();
+        setStatus(data);
+      }
+      if (dartRes.ok) {
+        const dData = await dartRes.json();
+        setDartStatus(dData);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -48,12 +57,12 @@ export default function MarketScannerView() {
 
   const handleStartDartScan = async () => {
     setLoading(true);
-    setDartScanMsg('DART 상장기업 전수 DB 수집이 시작되었습니다...');
+    setDartScanMsg('전체 상장기업 (약 1,800개) DART 수집이 시작되었습니다...');
     try {
       const res = await fetch('/api/dart/scan/start', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        setDartScanMsg(data.message || 'DART DB 스캔 시작 완료!');
+        setDartScanMsg(data.message || 'DART 전체 수집 시작!');
       }
     } catch (e: any) {
       setDartScanMsg('DART 스캔 시작 오류: ' + String(e));
@@ -64,53 +73,55 @@ export default function MarketScannerView() {
   };
 
   const progressPercent = status && status.total > 0 ? Math.round((status.current / status.total) * 100) : 0;
+  const dartProgressPercent = dartStatus && dartStatus.total > 0 ? Math.round((dartStatus.current / dartStatus.total) * 100) : 0;
 
   return (
     <div className="p-6 bg-black text-white min-h-screen space-y-6">
       <div className="border-b border-gray-800 pb-4">
         <h2 className="text-2xl font-bold text-yellow-500 flex items-center gap-2">
-          <span>🔍 DB 크롤링 스캐너 (Naver Finance & DART Scanner)</span>
+          <span>🔍 DB 크롤링 스캐너 (Naver & DART 전체 상장사 수집)</span>
         </h2>
         <p className="text-xs text-gray-400 mt-1">
-          네이버 증권 전 종목 및 DART OpenAPI 상장기업(ETF, ETN 등 제외)의 재무제표 데이터를 백그라운드 크롤링하여 DB에 수집 및 동기화합니다.
+          네이버 증권 전 종목 및 DART OpenAPI 상장기업 전체(약 1,800여 개 종목, ETF/ETN 제외)의 재무제표 데이터를 백그라운드 멀티스레딩으로 전수 크롤링하여 DB에 수집합니다.
         </p>
       </div>
 
       {dartScanMsg && (
-        <div className="bg-indigo-950/80 border border-indigo-500 text-indigo-200 p-3 rounded-lg text-xs font-bold animate-bounce">
+        <div className="bg-indigo-950/80 border border-indigo-500 text-indigo-200 p-3.5 rounded-xl text-xs font-bold animate-bounce">
           💡 {dartScanMsg}
         </div>
       )}
 
-      <div className="bg-[#1a1a1a] p-6 rounded-lg border border-gray-800 shadow-xl max-w-4xl space-y-6">
+      <div className="bg-[#1a1a1a] p-6 rounded-2xl border border-gray-800 shadow-xl max-w-4xl space-y-6">
         <div>
-          <h3 className="text-lg font-bold text-gray-200 mb-2">1. 네이버 증권 & DART 재무 DB 통합 수집 스캔</h3>
+          <h3 className="text-lg font-bold text-gray-200 mb-2">1. 국내 전체 상장사 (약 1,800개) DART 재무 DB 수집</h3>
           <p className="text-sm text-gray-400">
-            상장된 모든 기업의 자기자본, 부채, 순이익, 영업이익, 매출액 데이터를 구하여 DB에 동기화합니다. 종목 필터링(Tetris) 및 다중 조건 스크리너 계산에 실시간 반영됩니다.
+            상장된 모든 기업의 자산, 자본, 부채, 순이익, 영업이익, 매출액 데이터를 전수 수집하여 DB에 실시간 동기화합니다.
           </p>
         </div>
 
         <div className="flex flex-wrap gap-3">
           <button
+            onClick={handleStartDartScan}
+            disabled={dartStatus?.is_running || loading}
+            className={`px-6 py-2.5 rounded-xl font-extrabold text-sm shadow-xl transition-all flex items-center gap-2 border border-blue-400/40 cursor-pointer ${dartStatus?.is_running ? 'bg-indigo-950 text-indigo-300 border-indigo-500 animate-pulse' : 'bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white'}`}
+          >
+            <span>📡</span>
+            <span>{dartStatus?.is_running ? 'DART 전수 수집 중...' : 'DART 전체 상장사 (1,800+ 개) 재무 DB 수집 시작'}</span>
+          </button>
+
+          <button
             onClick={handleStart}
             disabled={status?.is_running || loading}
-            className={`px-6 py-2.5 rounded-xl font-extrabold text-sm transition-all cursor-pointer ${status?.is_running || loading ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-500 text-white shadow-lg'}`}
+            className={`px-5 py-2.5 rounded-xl font-bold text-sm transition-all cursor-pointer ${status?.is_running || loading ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-500 text-white shadow-lg'}`}
           >
-            🚀 네이버 마켓 스캔 시작
-          </button>
-          
-          <button
-            onClick={handleStartDartScan}
-            disabled={loading}
-            className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl font-extrabold text-sm shadow-lg transition-all border border-blue-400/40 cursor-pointer"
-          >
-            📡 DART 상장사 재무 DB 수집 시작
+            🚀 네이버 마켓 스캔
           </button>
 
           <button
             onClick={handleStop}
             disabled={!status?.is_running || loading}
-            className={`px-5 py-2.5 rounded-xl font-bold text-sm transition-all cursor-pointer ${!status?.is_running || loading ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 text-white'}`}
+            className={`px-4 py-2.5 rounded-xl font-bold text-sm transition-all cursor-pointer ${!status?.is_running || loading ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 text-white'}`}
           >
             🛑 중지
           </button>
@@ -123,31 +134,48 @@ export default function MarketScannerView() {
           </button>
         </div>
 
+        {/* DART 전체 상장사 수집 진행 상태 카운터 */}
+        {dartStatus && (
+          <div className="bg-gray-900/90 p-4 rounded-xl border border-indigo-900/80 space-y-3 shadow-inner">
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-extrabold text-indigo-300 flex items-center gap-2">
+                <span>📡 DART 전체 상장사 (1,800+ 개) 재무 DB 수집 현황</span>
+                {dartStatus.is_running && <span className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded-full font-mono animate-pulse">수집 중</span>}
+              </h3>
+              <span className="font-mono text-xs text-indigo-200 font-bold">
+                {dartStatus.current || 0} / {dartStatus.total || 0} 개 ({dartProgressPercent}%) — DB 저장: <strong className="text-emerald-400">{dartStatus.saved_count || 0}개 기업</strong>
+              </span>
+            </div>
+            
+            {/* DART Progress Bar */}
+            <div className="w-full bg-gray-800 rounded-full h-3.5 border border-gray-700">
+              <div 
+                className="bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 h-3.5 rounded-full transition-all duration-500 ease-in-out shadow" 
+                style={{ width: `${dartProgressPercent}%` }}
+              ></div>
+            </div>
+
+            <div className="text-xs text-gray-400 font-mono flex justify-between">
+              <span>{dartStatus.message || '수집 준비 완료'}</span>
+              <span>최종 수집시각: {dartStatus.timestamp || '-'}</span>
+            </div>
+          </div>
+        )}
+
+        {/* 네이버 마켓 스캔 진행 상태 */}
         {status && (
           <div className="bg-black p-4 rounded-xl border border-gray-800 space-y-3">
-            <h3 className="text-sm font-semibold text-gray-300">현재 네이버 마켓 스캔 진행 상태</h3>
+            <h3 className="text-sm font-semibold text-gray-300">네이버 마켓 실시간 시세 스캔 상태</h3>
             <div className="flex justify-between text-xs text-gray-400 font-mono">
               <span>{status.message}</span>
               <span>{status.current} / {status.total} ({progressPercent}%)</span>
             </div>
             
-            {/* Progress Bar */}
             <div className="w-full bg-gray-800 rounded-full h-3">
               <div 
-                className="bg-gradient-to-r from-blue-500 to-indigo-500 h-3 rounded-full transition-all duration-500 ease-in-out" 
+                className="bg-gradient-to-r from-emerald-500 to-teal-500 h-3 rounded-full transition-all duration-500 ease-in-out" 
                 style={{ width: `${progressPercent}%` }}
               ></div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 text-xs font-mono">
-              <div className="bg-[#111] p-3 rounded border border-gray-800">
-                <div className="text-gray-500 text-[10px]">Current Ticker</div>
-                <div className="font-bold text-blue-400 mt-1">{status.current_ticker || '-'}</div>
-              </div>
-              <div className="bg-[#111] p-3 rounded border border-gray-800">
-                <div className="text-gray-500 text-[10px]">Running Time</div>
-                <div className="font-bold text-indigo-300 mt-1">{status.elapsed || '0s'}</div>
-              </div>
             </div>
           </div>
         )}

@@ -2161,10 +2161,22 @@ def api_start_market_scan():
 def api_start_dart_scan():
     import threading
     from ingestion.seed_all_dart_companies import seed_all_dart_companies
-    t = threading.Thread(target=seed_all_dart_companies, kwargs={"max_count": 500})
+    t = threading.Thread(target=seed_all_dart_companies, kwargs={"max_count": 3000})
     t.daemon = True
     t.start()
-    return {"message": "DART 상장기업 백그라운드 DB 크롤링 스캔이 시작되었습니다."}
+    return {"message": "전체 상장기업 (약 1,800+ 개) DART 재무 DB 스캔이 시작되었습니다."}
+
+@app.get("/api/dart/scan/status")
+def api_dart_scan_status():
+    import json, os
+    status_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "dart_scan_status.json")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"is_running": False, "current": 0, "total": 0, "saved_count": 0, "message": "대기 중"}
 
 @app.post("/api/market/scan/stop")
 def api_stop_market_scan():
