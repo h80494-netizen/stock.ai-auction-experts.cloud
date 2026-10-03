@@ -93,9 +93,13 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
             
             // 9시 5분 이후이고, 아직 오늘자 고정 스냅샷이 없거나 사용자가 '확정' 버튼으로 강제 갱신(force)한 경우 고정!
             if (canFreeze && (savedDate !== today || force)) {
-              setFrozenStocks(data);
+              const validFrozen = data.filter((s: any) => {
+                const r = s.foreign_ratio !== undefined ? s.foreign_ratio : (s.foreignRatio || 0);
+                return r >= curThreshold;
+              });
+              setFrozenStocks(validFrozen);
               localStorage.setItem('frozen_date_0905', today);
-              localStorage.setItem('frozen_data_0905', JSON.stringify(data));
+              localStorage.setItem('frozen_data_0905', JSON.stringify(validFrozen));
             }
           }
         }
@@ -116,7 +120,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return () => clearInterval(interval);
   }, [fetchForeignStocks, threshold]);
 
-  // 9시 5분 시점에 고정된 종목 리스트를 기준으로 UI 표시, 실시간 비중만 병합
+  // 9시 5분 시점에 고정된 종목 리스트를 기준으로 UI 표시, 실시간 비중만 병합 (threshold 미달 종목 100% 원천 제거)
   const orderStocks = useMemo(() => {
     if (frozenStocks.length > 0) {
       return frozenStocks.map(fs => {
@@ -130,15 +134,19 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
            liveRatio = fallbackData.foreignRatio || 0;
         }
 
+        const ratio0905 = fs.foreign_ratio !== undefined ? fs.foreign_ratio : (fs.foreignRatio || 0);
+
         return {
           ...fs,
-          ratio0905: fs.foreign_ratio !== undefined ? fs.foreign_ratio : (fs.foreignRatio || 0),
+          ratio0905,
           currentRatio: liveRatio
         };
-      }).slice(0, 20);
+      })
+      .filter(fs => fs.ratio0905 >= threshold)
+      .slice(0, 20);
     }
     return [];
-  }, [frozenStocks, foreignOrderStocks, computedStocks]);
+  }, [frozenStocks, foreignOrderStocks, computedStocks, threshold]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -303,6 +311,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     for (let i = 0; i < orderStocks.length; i += batchSize) {
       const batch = orderStocks.slice(i, i + batchSize);
       const promises = batch.map(async (stock) => {
+        if (stock.ratio0905 !== undefined && stock.ratio0905 < threshold) return 0;
         const cleanTicker = stock.ticker.split(':').pop() || stock.ticker;
         const liveP = livePrices[stock.ticker] || livePrices[`KRX:${stock.ticker}`] || stock.price || 0;
         const price = liveP; 
@@ -687,16 +696,33 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
 
                     const pnlColor = netProfit > 0 ? 'text-red-400' : (netProfit < 0 ? 'text-blue-400' : 'text-gray-400');
                     
-                    const frozenMatch = frozenStocks.find(fs => fs.ticker === h.ticker || fs.ticker === `KRX:${h.ticker}` || fs.clean_ticker === cleanTicker);
-                    const foreignMatch = foreignOrderStocks.find(fs => fs.ticker === h.ticker || fs.ticker === `KRX:${h.ticker}` || fs.clean_ticker === cleanTicker);
+                    const frozenMatch = frozenStocks.find(fs => 
+                      fs.clean_ticker === cleanTicker || 
+                      fs.ticker === h.ticker || 
+                      fs.ticker === `KRX:${cleanTicker}` ||
+                      (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                    );
+                    const foreignMatch = foreignOrderStocks.find(fs => 
+                      fs.clean_ticker === cleanTicker || 
+                      fs.ticker === h.ticker || 
+                      fs.ticker === `KRX:${cleanTicker}` ||
+                      (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                    );
 
-                    let ratio0905 = (h as any).ratio0905 !== undefined ? (h as any).ratio0905 
-                      : (frozenMatch ? (frozenMatch.foreign_ratio !== undefined ? frozenMatch.foreign_ratio : frozenMatch.foreignRatio) 
-                      : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio : undefined));
+                    // 9시 5분 비중 (09:05 당시 고정 스냅샷 수치)
+                    let ratio0905: number | undefined = foreignMatch?.ratio0905 !== undefined 
+                      ? foreignMatch.ratio0905 
+                      : (frozenMatch?.ratio0905 !== undefined 
+                        ? frozenMatch.ratio0905 
+                        : ((h as any).ratio0905 !== undefined ? (h as any).ratio0905 : undefined));
 
-                    let liveRatio = (h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
-                      : (foreignMatch ? (foreignMatch.foreign_ratio !== undefined ? foreignMatch.foreign_ratio : (foreignMatch.foreignRatio || 0)) 
-                      : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0));
+                    // 실시간 비중 (장중 실시간 외국계 창구 순매수량 / 총거래량 수치)
+                    let liveRatio: number = foreignMatch?.foreign_ratio !== undefined 
+                      ? foreignMatch.foreign_ratio 
+                      : (foreignMatch?.foreignRatio !== undefined 
+                        ? foreignMatch.foreignRatio 
+                        : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
+                          : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0)));
                     
                     return (
                       <tr key={h.ticker} className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
@@ -836,9 +862,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
 
                           // 3. 실시간 외국계 스캔 (foreignOrderStocks) match
                           const foreignMatch = foreignOrderStocks.find(fs => 
-                            fs.ticker === h.ticker || 
-                            fs.ticker === `KRX:${h.ticker}` || 
                             fs.clean_ticker === cleanTicker ||
+                            fs.ticker === h.ticker || 
+                            fs.ticker === `KRX:${cleanTicker}` || 
                             (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
                           );
 
@@ -854,15 +880,20 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                           const profitRatio = h.buyPrice > 0 ? ((currentPrice - h.buyPrice) / h.buyPrice) * 100 : 0;
                           const pnlColor = netProfit > 0 ? 'text-red-400' : (netProfit < 0 ? 'text-blue-400' : 'text-gray-400');
                           
-                          // 9시 5분 비중
-                          let ratio0905: number | undefined = (h as any).ratio0905 !== undefined ? (h as any).ratio0905 
-                            : (frozenMatch ? (frozenMatch.ratio0905 !== undefined ? frozenMatch.ratio0905 : (frozenMatch.foreign_ratio !== undefined ? frozenMatch.foreign_ratio : frozenMatch.foreignRatio)) 
-                            : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio : undefined));
+                          // 9시 5분 비중 (09:05 당시 고정 스냅샷 수치)
+                          let ratio0905: number | undefined = foreignMatch?.ratio0905 !== undefined 
+                            ? foreignMatch.ratio0905 
+                            : (frozenMatch?.ratio0905 !== undefined 
+                              ? frozenMatch.ratio0905 
+                              : ((h as any).ratio0905 !== undefined ? (h as any).ratio0905 : undefined));
 
-                          // 실시간 비중
-                          let liveRatio: number = (h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
-                            : (foreignMatch ? (foreignMatch.foreign_ratio !== undefined ? foreignMatch.foreign_ratio : (foreignMatch.foreignRatio || 0)) 
-                            : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0));
+                          // 실시간 비중 (장중 실시간 수치)
+                          let liveRatio: number = foreignMatch?.foreign_ratio !== undefined 
+                            ? foreignMatch.foreign_ratio 
+                            : (foreignMatch?.foreignRatio !== undefined 
+                              ? foreignMatch.foreignRatio 
+                              : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
+                                : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0)));
 
                           const market = cleanTicker.startsWith('0') ? 'KOSPI' : 'KOSDAQ';
 

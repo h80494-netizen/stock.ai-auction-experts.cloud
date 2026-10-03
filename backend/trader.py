@@ -77,29 +77,38 @@ def execute_morning_buy(broker: BrokerageAPI, limit: int = 3, target_amount_per_
     for stock in stocks:
         ticker = stock["clean_ticker"]
         name = stock["name"]
-        ratio = stock["foreign_ratio"]
+        ratio = stock.get("foreign_ratio", 0.0)
         
-        # 매도 1호가 조회
-        ask_price_1 = broker.get_ask_price_1(ticker)
-        if ask_price_1 <= 0:
-            print(f"[{name}] 호가 조회 실패, 매수 건너뜀.")
+        # 9시 5분 비중 5.0% 미만 엄격 제외
+        if ratio < 5.0:
+            print(f"[{name}({ticker})] 순매수 비중 {ratio}% < 5.0% 미달로 매수 대상에서 제외.")
+            continue
+        
+        # 수량 계산을 위한 현재가/호가 조회
+        current_price = broker.get_ask_price_1(ticker)
+        if current_price <= 0:
+            current_price = stock.get("price", 0)
+            
+        if current_price <= 0:
+            print(f"[{name}] 호가/현재가 조회 실패, 매수 건너뜀.")
             continue
             
         # 수량 계산
-        qty = int(target_amount_per_stock // ask_price_1)
+        qty = int(target_amount_per_stock // current_price)
         
         if qty > 0:
-            print(f"[{name}({ticker})] 순매수 비중 {ratio}% -> 매수 1호가({ask_price_1}원) 매수 진행")
-            success = broker.order_buy(ticker=ticker, qty=qty, price=ask_price_1)
+            print(f"[{name}({ticker})] 9시 5분 순매수 비중 {ratio}% -> 시장가(price=0) 매수 주문 진행")
+            # price=0 은 KIS 시장가 주문
+            success = broker.order_buy(ticker=ticker, qty=qty, price=0)
             if success:
-                # DB 원장에 기록
-                record_trade(today_str, ticker, name, ask_price_1, qty, 'BUY')
+                # DB 원장에 기록 (체결 기준 가격으로 저장)
+                record_trade(today_str, ticker, name, current_price, qty, 'BUY')
                 results.append({
                     "ticker": ticker,
                     "name": name,
-                    "buy_price": ask_price_1,
+                    "buy_price": current_price,
                     "qty": qty,
-                    "total_amount": ask_price_1 * qty
+                    "total_amount": current_price * qty
                 })
         else:
             print(f"[{name}({ticker})] 1주도 살 수 없는 금액({target_amount_per_stock}원).")

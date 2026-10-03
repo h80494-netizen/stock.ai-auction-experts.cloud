@@ -104,6 +104,45 @@ def _background_scan():
     except Exception as e:
         print(f"[KISForeignScanner] background scan error: {e}")
 
+import datetime
+
+# 9시 5분 동결 스냅샷 파일 경로
+SNAPSHOT_0905_FILE = os.path.join(os.path.dirname(__file__), "data", "foreign_orders_0905.json")
+
+def get_snapshot_0905_map() -> Dict[str, float]:
+    """오늘 날짜의 09:05 스냅샷 비율 맵 반환 (없으면 빈 딕셔너리)"""
+    if not os.path.exists(SNAPSHOT_0905_FILE):
+        return {}
+    try:
+        with open(SNAPSHOT_0905_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            if data.get("date") == today_str:
+                return data.get("ratios", {})
+    except Exception as e:
+        print(f"[KISForeignScanner] Snapshot read error: {e}")
+    return {}
+
+def save_snapshot_0905(results: List[Dict[str, Any]]):
+    """현재 스캔 결과를 오늘 날짜 09:05 스냅샷으로 저장"""
+    try:
+        os.makedirs(os.path.dirname(SNAPSHOT_0905_FILE), exist_ok=True)
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        r_map = {}
+        for s in results:
+            tk = s.get('clean_ticker') or s.get('ticker', '').replace('KRX:', '')
+            if tk:
+                r_map[tk] = s.get('foreign_ratio', 0.0)
+        with open(SNAPSHOT_0905_FILE, 'w', encoding='utf-8') as f:
+            json.dump({
+                "date": today_str,
+                "created_at": time.time(),
+                "ratios": r_map
+            }, f, ensure_ascii=False, indent=2)
+        print(f"[KISForeignScanner] Saved 09:05 snapshot for {len(r_map)} stocks on {today_str}.")
+    except Exception as e:
+        print(f"[KISForeignScanner] Failed to save 09:05 snapshot: {e}")
+
 def get_foreign_net_buy_stocks(threshold: float = 5.0, limit: int = 20) -> List[Dict[str, Any]]:
     """
     외국인 순매수 비중이 threshold% 이상인 종목을 내림차순으로 정렬하여 최대 limit개 반환
@@ -128,8 +167,26 @@ def get_foreign_net_buy_stocks(threshold: float = 5.0, limit: int = 20) -> List[
         # 백그라운드에서 스캔 실행
         threading.Thread(target=_background_scan, daemon=True).start()
         
-    filtered = [s for s in results if s.get('foreign_ratio', 0) >= threshold]
-    filtered.sort(key=lambda x: x.get('foreign_ratio', 0), reverse=True)
+    # 09:05 스냅샷 맵 확인 (없고 results가 존재하면 첫 스캔 결과로 스냅샷 생성)
+    snap_map = get_snapshot_0905_map()
+    if not snap_map and results:
+        save_snapshot_0905(results)
+        snap_map = get_snapshot_0905_map()
+
+    # 종목별 ratio0905 (09:05 고정값) 및 foreign_ratio (실시간 수치) 분리 매핑
+    output = []
+    for s in results:
+        s_copy = dict(s)
+        tk = s_copy.get('clean_ticker') or s_copy.get('ticker', '').replace('KRX:', '')
+        # 09:05 비중은 스냅샷 맵에 등록된 고정 수치 (없으면 현재 ratio)
+        ratio_0905 = snap_map.get(tk, s_copy.get('foreign_ratio', 0.0))
+        s_copy['ratio0905'] = ratio_0905
+        s_copy['foreign_ratio_0905'] = ratio_0905
+        output.append(s_copy)
+
+    # 매수 추천 기준: 9시 5분 고정 비중이 5.0% 이상인 종목들
+    filtered = [s for s in output if s.get('ratio0905', 0.0) >= threshold or s.get('foreign_ratio', 0.0) >= threshold]
+    filtered.sort(key=lambda x: x.get('foreign_ratio', 0.0), reverse=True)
     return filtered[:limit]
 
 if __name__ == "__main__":

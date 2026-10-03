@@ -81,8 +81,12 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
+      setSimData(null);
       try {
-        const res = await fetch(`/api/etf/simulation?criteria=${criteria}&top_n=${topN}`);
+        const w1 = etfWeights?.w1 ?? 0.5;
+        const w5 = etfWeights?.w5 ?? 0.3;
+        const w20 = etfWeights?.w20 ?? 0.2;
+        const res = await fetch(`/api/etf/simulation?criteria=${criteria}&top_n=${topN}&w1=${w1}&w5=${w5}&w20=${w20}&t=${Date.now()}`);
         if (!res.ok) throw new Error('API Error');
         const json = await res.json();
         setSimData(json);
@@ -94,7 +98,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     };
     fetchData();
     handleRunSimulator(topN, criteria);
-  }, [criteria, topN]);
+  }, [criteria, topN, etfWeights]);
 
   // Helper to get start date based on period
   const getStartDate = () => {
@@ -120,6 +124,42 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     }
     return startDate;
   };
+
+  // 0. 단일 메인 모델 차트 데이터 생성 (Rebasing base=100)
+  const mainChartData = useMemo(() => {
+    if (!simData || !simData.dates || simData.dates.length === 0) return [];
+    
+    const startDate = getStartDate();
+    const { dates, strategy, selected_etf, etfs } = simData;
+
+    let startIdx = 0;
+    for (let i = 0; i < dates.length; i++) {
+      if (dates[i] >= startDate) {
+        startIdx = i;
+        break;
+      }
+    }
+    if (startIdx >= dates.length) startIdx = 0;
+
+    const baseStrategy = (strategy && strategy[startIdx] > 0) ? strategy[startIdx] : 100;
+    
+    const data = [];
+    for (let i = startIdx; i < dates.length; i++) {
+      const point: any = {
+        date: dates[i],
+        Selected: selected_etf[i] || 'CASH',
+        Strategy: (strategy[i] / baseStrategy) * 100
+      };
+      if (etfs) {
+        Object.keys(etfs).forEach(ticker => {
+          const basePrice = etfs[ticker][startIdx] || 100;
+          point[ticker] = basePrice > 0 ? (etfs[ticker][i] / basePrice) * 100 : 100;
+        });
+      }
+      data.push(point);
+    }
+    return data;
+  }, [simData, period]);
 
   // 1. 단일 모델(메인) 히스토리 계산 (기간 필터 및 리베이싱 적용)
   const historyRows = useMemo(() => {
@@ -373,22 +413,40 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
         </div>
         
         <div className="flex flex-col sm:flex-row gap-3 items-center flex-wrap">
-          {/* ETF 선택 개수 (1개, 2개, 3개, 4개) 선택기 */}
-          <div className="bg-gray-900 px-3 py-1.5 rounded-lg flex items-center gap-2 border border-gray-700">
-            <span className="text-xs font-bold text-teal-400">🎯 ETF 선택 개수:</span>
-            {[1, 2, 3, 4].map(n => (
-              <button
-                key={n}
-                onClick={() => setTopN(n)}
-                className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${
-                  topN === n
-                    ? 'bg-teal-600 text-white shadow'
-                    : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
-                }`}
-              >
-                {n}개
-              </button>
-            ))}
+          {/* 종목 채택 수 (1개, 2개, 3개) 입력 및 선택기 */}
+          <div className="bg-gray-900 px-3 py-1.5 rounded-lg flex items-center gap-2 border border-gray-700 flex-wrap">
+            <span className="text-xs font-bold text-teal-400">🎯 종목 채택 수:</span>
+            <div className="flex items-center gap-1 bg-gray-800 px-2 py-0.5 rounded border border-gray-600">
+              <input
+                type="number"
+                min={1}
+                max={3}
+                value={topN}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (!isNaN(val)) {
+                    setTopN(Math.max(1, Math.min(3, val)));
+                  }
+                }}
+                className="w-8 bg-transparent text-center font-extrabold text-teal-300 outline-none text-xs"
+              />
+              <span className="text-xs text-gray-400">개</span>
+            </div>
+            <div className="flex gap-1">
+              {[1, 2, 3].map(n => (
+                <button
+                  key={n}
+                  onClick={() => setTopN(n)}
+                  className={`px-2 py-1 text-xs font-bold rounded transition-colors ${
+                    topN === n
+                      ? 'bg-teal-600 text-white shadow'
+                      : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  {n}개({n === 1 ? '100%' : n === 2 ? '50%' : '33.33%'})
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* 선택 기준 토글 */}
@@ -419,13 +477,13 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
             onClick={() => handleRunSimulator(topN, criteria)}
             className="bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded-lg shadow border border-teal-500 text-xs font-bold flex items-center justify-center gap-2"
           >
-            <span>🧪 21개 모델 시뮬레이션</span>
+            <span>🧪 21개 모델 비교 실행</span>
             {runningSimulator && <span className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-white border-t-transparent"></span>}
           </button>
         </div>
       </div>
 
-      {/* 기간 선택 버튼 (추가) */}
+      {/* 기간 선택 버튼 */}
       <div className="flex flex-wrap gap-2">
         {periodOptions.map(p => (
           <button
@@ -440,6 +498,45 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
             {p}
           </button>
         ))}
+      </div>
+
+      {/* 1. 메인 시뮬레이션 히스토리 그래프 (항상 렌더링) */}
+      <div className="bg-gray-800 p-4 rounded-lg shadow-lg border border-yellow-500/40 space-y-3">
+        <div className="flex justify-between items-center">
+          <h3 className="text-xl font-bold text-yellow-400">
+            📊 현재 설정 메인 전략 누적 수익률 추이 ({period}, 종목채택수: {topN}개 [{topN === 1 ? '100%' : topN === 2 ? '50%' : '33.33%'}])
+          </h3>
+        </div>
+        <div className="h-[380px] w-full min-w-0 bg-gray-900/60 rounded-lg p-2 min-h-[350px]">
+          {mainChartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={350} minWidth={0}>
+              <LineChart data={mainChartData} margin={{ top: 15, right: 30, left: 10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} minTickGap={30} />
+                <YAxis domain={['auto', 'auto']} stroke="#9ca3af" tick={{fill: '#9ca3af'}} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#111827', borderColor: '#374151' }}
+                  itemStyle={{ color: '#e5e7eb' }}
+                  labelStyle={{ color: '#9ca3af', fontWeight: 'bold' }}
+                />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="Strategy" 
+                  name="메인 전략 수익률 (Base=100)"
+                  stroke="#fbbf24" 
+                  strokeWidth={3.5} 
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full w-full flex items-center justify-center text-gray-500">
+              시뮬레이션 그래프 데이터를 로딩 중입니다...
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 21개 모델 다중 차트 영역 */}
@@ -493,11 +590,11 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
             )}
           </div>
           
-          <div className="h-[400px] w-full bg-gray-900/50 rounded-lg p-2">
+          <div className="h-[400px] w-full min-w-0 bg-gray-900/50 rounded-lg p-2">
             {runningSimulator ? (
               <div className="h-full w-full flex items-center justify-center text-gray-500 animate-pulse">시뮬레이션 실행 중...</div>
             ) : multiChartData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height={360} minWidth={0}>
                 <LineChart data={multiChartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis dataKey="date" stroke="#9ca3af" tick={{fill: '#9ca3af'}} minTickGap={30} />

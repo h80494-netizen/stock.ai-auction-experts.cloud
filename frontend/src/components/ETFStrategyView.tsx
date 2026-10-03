@@ -70,22 +70,31 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
     fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}`)
       .then(res => res.json())
       .then(json => {
-        if (Array.isArray(json)) {
+        if (Array.isArray(json) && json.length > 0) {
           setModelsList(json);
-          if (json.length > 0 && showModelSwap) {
-            setSelectedSwapModel((prev: any) => {
-              if (prev) {
-                const found = json.find((m: any) => m.model === prev.model);
-                if (found) return found;
-              }
-              return json.length > 1 ? json[1] : json[0];
-            });
-          }
+          setSelectedSwapModel((prev: any) => {
+            if (prev) {
+              const found = json.find((m: any) => m.model === prev.model);
+              if (found) return found;
+            }
+            const curW1 = Math.round(activeWeights.w1 > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
+            const curW5 = Math.round(activeWeights.w5 > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
+            const curW20 = Math.round(activeWeights.w20 > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
+            const matchedIdx = json.findIndex((m: any) => 
+              Math.abs(m.weights.w1 - curW1) <= 1 &&
+              Math.abs(m.weights.w5 - curW5) <= 1 &&
+              Math.abs(m.weights.w20 - curW20) <= 1
+            );
+            if (matchedIdx !== -1 && matchedIdx + 1 < json.length) {
+              return json[matchedIdx + 1];
+            }
+            return json.length > 1 ? json[1] : json[0];
+          });
         }
       })
       .catch(err => console.error('Error fetching simulation models:', err))
       .finally(() => setModelsLoading(false));
-  }, [showModelSwap, criteria, topN]);
+  }, [criteria, topN]);
 
   // Determine current active model matching activeWeights
   const currentModel = useMemo(() => {
@@ -614,17 +623,32 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
       </div>
 
       <div className="p-4 sm:p-6 bg-gradient-to-r from-blue-900 to-indigo-900 rounded-lg shadow-lg border border-blue-500">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-2">
-          <h2 className="text-lg sm:text-2xl font-bold break-keep">
-            🏆 추천 투자 포지션 <span className="text-sm sm:text-base font-normal text-blue-200 block sm:inline mt-1 sm:mt-0">({criteria === 'momentum' ? `1일 ${Math.round(activeWeights.w1*100)}%, 5일 ${Math.round(activeWeights.w5*100)}%, 20일 ${Math.round(activeWeights.w20*100)}% 가중 합산` : '모멘텀 수익률 대비 변동성 리스크 고려'})</span>
-          </h2>
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-3 gap-3">
+          <div>
+            <h2 className="text-lg sm:text-2xl font-bold break-keep flex flex-wrap items-center gap-2">
+              <span>🏆 추천 투자 포지션</span>
+              {currentModel && (
+                <span className="bg-blue-950/90 text-blue-200 text-xs sm:text-sm px-3 py-1 rounded-full border border-blue-400/50 font-mono shadow-md">
+                  📌 현재 운용 모델: <strong className="text-white font-extrabold">{currentModel.model}</strong> (1일 <span className="text-blue-300 font-bold">{currentModel.weights.w1}%</span>, 5일 <span className="text-purple-300 font-bold">{currentModel.weights.w5}%</span>, 20일 <span className="text-amber-300 font-bold">{currentModel.weights.w20}%</span>)
+                </span>
+              )}
+            </h2>
+            <p className="text-xs text-blue-200 mt-1">
+              모멘텀 수익률 대비 변동성 리스크 고려 포트폴리오
+            </p>
+          </div>
           <div className="mt-2 md:mt-0 w-full md:w-auto">
             <button 
               onClick={() => setShowModelSwap(true)}
-              className="w-full md:w-auto bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition-all flex items-center justify-center gap-2 border border-blue-400/40"
+              className="w-full md:w-auto bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-5 py-2.5 rounded-xl text-sm font-extrabold shadow-xl transition-all flex items-center justify-center gap-2 border border-blue-400/40 active:scale-95 cursor-pointer"
             >
-              <span>🔄 모델 교체 & 성과 비교</span>
-              {currentModel && <span className="bg-blue-900/80 px-2 py-0.5 text-xs rounded text-blue-200 border border-blue-400/30">현재: {currentModel.model}</span>}
+              <span className="text-base">🔄</span>
+              <span>모델 교체 & 리밸런싱</span>
+              {currentModel && (
+                <span className="bg-black/40 px-2 py-0.5 text-xs rounded text-blue-200 border border-blue-400/30 font-mono">
+                  {currentModel.model} ({currentModel.weights.w1}/{currentModel.weights.w5}/{currentModel.weights.w20}%)
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -655,11 +679,30 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               {/* Modal Body */}
               <div className="p-4 sm:p-6 space-y-6">
                 
-                {/* 1. Model Selector Ribbon */}
-                <div>
-                  <div className="text-xs font-bold text-gray-300 mb-2 flex items-center justify-between">
-                    <span>🎯 교체할 후보 모델 선택 (총 21개 모델 제공)</span>
-                    {modelsLoading && <span className="text-xs text-blue-400 animate-pulse">⏳ 시뮬레이션 데이터를 불러오는 중...</span>}
+                {/* 1. Model Selector Ribbon & Dropdown */}
+                <div className="space-y-2">
+                  <div className="text-xs font-bold text-gray-300 flex flex-wrap items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-sm font-extrabold text-blue-300">
+                      <span>🎯</span> 교체할 후보 모델 선택 (총 21개 모델 제공)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-gray-400">모델 바로 선택:</span>
+                      <select
+                        value={selectedSwapModel?.model || ''}
+                        onChange={(e) => {
+                          const target = modelsList.find((m: any) => m.model === e.target.value);
+                          if (target) setSelectedSwapModel(target);
+                        }}
+                        className="bg-gray-800 border border-gray-600 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:border-blue-400 cursor-pointer"
+                      >
+                        {modelsList.map((m: any) => (
+                          <option key={m.model} value={m.model}>
+                            {m.model} (1일:{m.weights.w1}% | 5일:{m.weights.w5}% | 20일:{m.weights.w20}%) — 수익률: {m.total_ret >= 0 ? '+' : ''}{m.total_ret.toFixed(1)}%
+                          </option>
+                        ))}
+                      </select>
+                      {modelsLoading && <span className="text-xs text-blue-400 animate-pulse">⏳ 로딩중...</span>}
+                    </div>
                   </div>
                   
                   <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-700">
@@ -670,11 +713,11 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                         <button
                           key={m.model}
                           onClick={() => setSelectedSwapModel(m)}
-                          className={`flex-shrink-0 px-3 py-2 rounded-xl text-left border transition-all min-w-[120px] ${
+                          className={`flex-shrink-0 px-3 py-2 rounded-xl text-left border transition-all min-w-[125px] cursor-pointer ${
                             isSelected
-                              ? 'bg-blue-600 border-blue-400 text-white shadow-lg shadow-blue-900/50 scale-105'
+                              ? 'bg-blue-600 border-blue-400 text-white shadow-lg shadow-blue-900/50 scale-105 font-bold'
                               : isCurrent
-                              ? 'bg-indigo-900/50 border-indigo-500 text-indigo-200'
+                              ? 'bg-indigo-900/60 border-indigo-400 text-indigo-100'
                               : 'bg-gray-800/80 border-gray-700 text-gray-300 hover:bg-gray-700'
                           }`}
                         >
@@ -682,7 +725,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                             <span className="font-bold text-xs">{m.model}</span>
                             {isCurrent && <span className="text-[10px] bg-indigo-500 text-white px-1 rounded font-bold">현재</span>}
                           </div>
-                          <div className="text-[10px] opacity-80 mt-1 font-mono">
+                          <div className="text-[10px] opacity-90 mt-1 font-mono">
                             {m.weights.w1}/{m.weights.w5}/{m.weights.w20}%
                           </div>
                           <div className="text-[11px] font-extrabold mt-1 font-mono text-emerald-400">
@@ -1001,28 +1044,34 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               </div>
 
               {/* Modal Footer Actions */}
-              <div className="p-4 border-t border-gray-800 bg-gray-900/90 flex flex-col sm:flex-row justify-between items-center gap-3 sticky bottom-0 z-20">
-                <div className="text-xs text-gray-400 text-center sm:text-left">
+              <div className="p-4 sm:p-5 border-t border-gray-800 bg-gray-900/95 flex flex-col sm:flex-row justify-between items-center gap-4 sticky bottom-0 z-20 shadow-2xl">
+                <div className="text-xs text-gray-300 text-center sm:text-left space-y-1">
                   {selectedSwapModel && (
-                    <span>
-                      선택 모델: <strong className="text-blue-300 font-mono">{selectedSwapModel.model}</strong> (가중치 1일:{selectedSwapModel.weights.w1}%, 5일:{selectedSwapModel.weights.w5}%, 20일:{selectedSwapModel.weights.w20}%)
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="bg-blue-900/60 border border-blue-500/40 text-blue-200 px-2.5 py-1 rounded font-mono font-bold">
+                        🎯 교체 대상: <strong>{selectedSwapModel.model}</strong>
+                      </span>
+                      <span className="text-gray-300 font-mono">
+                        (비중 1일: <strong className="text-blue-400">{selectedSwapModel.weights.w1}%</strong> | 5일: <strong className="text-purple-400">{selectedSwapModel.weights.w5}%</strong> | 20일: <strong className="text-amber-400">{selectedSwapModel.weights.w20}%</strong>)
+                      </span>
+                    </div>
                   )}
                 </div>
 
-                <div className="flex gap-2 w-full sm:w-auto">
+                <div className="flex gap-3 w-full sm:w-auto">
                   <button
                     onClick={() => setShowModelSwap(false)}
-                    className="flex-1 sm:flex-none px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm font-bold transition-colors"
+                    className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-xl text-sm font-bold transition-colors cursor-pointer"
                   >
                     취소
                   </button>
                   <button
                     disabled={!selectedSwapModel}
                     onClick={handleApplyModelSwap}
-                    className="flex-1 sm:flex-none px-5 py-2 bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 text-white rounded-lg text-sm font-extrabold shadow-lg transition-all disabled:opacity-50"
+                    className="flex-1 sm:flex-none px-6 py-2.5 bg-gradient-to-r from-blue-600 via-emerald-600 to-teal-600 hover:from-blue-500 hover:to-teal-500 text-white rounded-xl text-sm font-extrabold shadow-xl transition-all disabled:opacity-50 active:scale-95 flex items-center justify-center gap-2 border border-emerald-400/40 cursor-pointer"
                   >
-                    🚀 {selectedSwapModel?.model || '선택 모델'} (으)로 교체 적용 & DB 저장
+                    <span>💾</span>
+                    <span>{selectedSwapModel?.model || '선택 모델'} 교체 저장 & 시뮬레이션 재계산</span>
                   </button>
                 </div>
               </div>
