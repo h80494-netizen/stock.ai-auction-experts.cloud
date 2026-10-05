@@ -2,35 +2,35 @@
 import React, { useState } from 'react';
 
 export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks, stocks }: any) {
-  // 필터 조건 활성화 (중복 선택 가능)
+  // 필터 조건 활성화 (중복 선택 가능, 현실적인 스케일 기본값 설정)
   const [useRoe, setUseRoe] = useState<boolean>(true);
-  const [minRoe, setMinRoe] = useState<number>(10);
+  const [minRoe, setMinRoe] = useState<number>(0);
   const [maxRoe, setMaxRoe] = useState<number>(100);
 
   const [useOpMargin, setUseOpMargin] = useState<boolean>(false);
-  const [minOpMargin, setMinOpMargin] = useState<number>(5);
+  const [minOpMargin, setMinOpMargin] = useState<number>(3);
 
   const [useRevenue, setUseRevenue] = useState<boolean>(false);
-  const [minRevenue, setMinRevenue] = useState<number>(500); // 500억 원 이상
+  const [minRevenue, setMinRevenue] = useState<number>(100); // 100억 원 이상
 
   const [useOp, setUseOp] = useState<boolean>(false);
-  const [minOp, setMinOp] = useState<number>(50); // 50억 원 이상
+  const [minOp, setMinOp] = useState<number>(10); // 10억 원 이상
 
   const [useNetProfit, setUseNetProfit] = useState<boolean>(false);
-  const [minNetProfit, setMinNetProfit] = useState<number>(30); // 30억 원 이상
+  const [minNetProfit, setMinNetProfit] = useState<number>(10); // 10억 원 이상
 
-  // YoY (전년대비) 개선 조건 필터
+  // YoY (전년대비) 개선 조건 필터 (현실적 기본값: +0%p / +0% 이상)
   const [useYoyRoeUp, setUseYoyRoeUp] = useState<boolean>(false);
-  const [minYoyRoeDiff, setMinYoyRoeDiff] = useState<number>(1.0); // +1.0%p 이상
+  const [minYoyRoeDiff, setMinYoyRoeDiff] = useState<number>(0.0); // +0.0%p 이상 (유지 또는 상승)
 
   const [useYoyRevUp, setUseYoyRevUp] = useState<boolean>(false);
-  const [minYoyRevGrowth, setMinYoyRevGrowth] = useState<number>(5.0); // +5.0% 이상
+  const [minYoyRevGrowth, setMinYoyRevGrowth] = useState<number>(0.0); // +0.0% 이상
 
   const [useYoyOpUp, setUseYoyOpUp] = useState<boolean>(false);
-  const [minYoyOpGrowth, setMinYoyOpGrowth] = useState<number>(10.0); // +10.0% 이상
+  const [minYoyOpGrowth, setMinYoyOpGrowth] = useState<number>(0.0); // +0.0% 이상
 
   const [useYoyNpUp, setUseYoyNpUp] = useState<boolean>(false);
-  const [minYoyNpGrowth, setMinYoyNpGrowth] = useState<number>(10.0); // +10.0% 이상
+  const [minYoyNpGrowth, setMinYoyNpGrowth] = useState<number>(0.0); // +0.0% 이상
 
   const [useYoyPriceUp, setUseYoyPriceUp] = useState<boolean>(false);
   const [minYoyPriceGrowth, setMinYoyPriceGrowth] = useState<number>(0.0); // +0% 이상 (상승)
@@ -166,7 +166,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 <span className="w-12 text-[11px] text-gray-400">최소:</span>
                 <input
                   type="range"
-                  min="-20" max="50" step="1"
+                  min="-50" max="100" step="1"
                   value={minRoe}
                   disabled={!useRoe}
                   onChange={(e) => setMinRoe(Number(e.target.value))}
@@ -177,7 +177,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   value={minRoe}
                   disabled={!useRoe}
                   onChange={(e) => setMinRoe(Number(e.target.value))}
-                  className="w-14 bg-gray-800 border border-gray-700 text-center rounded px-1 text-xs text-white"
+                  className="w-14 bg-gray-800 border border-gray-700 text-center rounded px-1 text-xs text-white font-mono"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -195,7 +195,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   value={maxRoe}
                   disabled={!useRoe}
                   onChange={(e) => setMaxRoe(Number(e.target.value))}
-                  className="w-14 bg-gray-800 border border-gray-700 text-center rounded px-1 text-xs text-white"
+                  className="w-14 bg-gray-800 border border-gray-700 text-center rounded px-1 text-xs text-white font-mono"
                 />
               </div>
             </div>
@@ -218,7 +218,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="-10" max="40" step="1"
+                min="-30" max="50" step="1"
                 value={minOpMargin}
                 disabled={!useOpMargin}
                 onChange={(e) => setMinOpMargin(Number(e.target.value))}
@@ -251,7 +251,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="0" max="10000" step="100"
+                min="0" max="10000" step="50"
                 value={minRevenue}
                 disabled={!useRevenue}
                 onChange={(e) => setMinRevenue(Number(e.target.value))}
@@ -284,7 +284,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="-100" max="1000" step="10"
+                min="-500" max="2000" step="10"
                 value={minOp}
                 disabled={!useOp}
                 onChange={(e) => setMinOp(Number(e.target.value))}
@@ -317,7 +317,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="-100" max="1000" step="10"
+                min="-500" max="2000" step="10"
                 value={minNetProfit}
                 disabled={!useNetProfit}
                 onChange={(e) => setMinNetProfit(Number(e.target.value))}
@@ -360,7 +360,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="0" max="20" step="0.5"
+                min="-10" max="30" step="0.5"
                 value={minYoyRoeDiff}
                 disabled={!useYoyRoeUp}
                 onChange={(e) => setMinYoyRoeDiff(Number(e.target.value))}
@@ -394,7 +394,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="0" max="100" step="5"
+                min="-20" max="100" step="1"
                 value={minYoyRevGrowth}
                 disabled={!useYoyRevUp}
                 onChange={(e) => setMinYoyRevGrowth(Number(e.target.value))}
@@ -427,7 +427,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="0" max="200" step="5"
+                min="-20" max="200" step="1"
                 value={minYoyOpGrowth}
                 disabled={!useYoyOpUp}
                 onChange={(e) => setMinYoyOpGrowth(Number(e.target.value))}
@@ -460,7 +460,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="0" max="200" step="5"
+                min="-20" max="200" step="1"
                 value={minYoyNpGrowth}
                 disabled={!useYoyNpUp}
                 onChange={(e) => setMinYoyNpGrowth(Number(e.target.value))}
@@ -493,7 +493,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <div className="pt-2 flex items-center gap-2">
               <input
                 type="range"
-                min="-20" max="100" step="5"
+                min="-50" max="100" step="5"
                 value={minYoyPriceGrowth}
                 disabled={!useYoyPriceUp}
                 onChange={(e) => setMinYoyPriceGrowth(Number(e.target.value))}

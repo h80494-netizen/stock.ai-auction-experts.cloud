@@ -421,6 +421,24 @@ def get_dart_screener_results(conditions: dict):
     # 1. 모든 dart_financials 데이터를 ticker별로 조회하여 최신 TTM과 전년 동분기 TTM 매칭
     c.execute("SELECT * FROM dart_financials ORDER BY ticker ASC, year DESC, quarter DESC")
     all_rows = [dict(r) for r in c.fetchall()]
+    
+    # 만약 dart_financials 데이터가 부족할 경우 기존 financials 및 stocks 테이블에서 fallback 조회
+    if not all_rows:
+        c.execute('''
+            SELECT f.ticker, f.period as year, '11011' as quarter,
+                   (f.net_profit * 100000000) as net_profit,
+                   (f.operating_profit * 100000000) as operating_profit,
+                   (f.equity * 100000000) as equity,
+                   (f.net_profit * 100000000) as net_profit_ttm,
+                   (f.operating_profit * 100000000) as operating_profit_ttm,
+                   (f.net_profit * 10) as revenue_ttm,
+                   f.roe as roe_ttm,
+                   ((f.operating_profit / NULLIF(f.net_profit*10, 0))*100) as op_margin_ttm
+            FROM financials f
+            ORDER BY f.ticker ASC, f.id DESC
+        ''')
+        all_rows = [dict(r) for r in c.fetchall()]
+
     conn.close()
     
     # ticker별 그룹화
@@ -501,22 +519,30 @@ def get_dart_screener_results(conditions: dict):
         # 전년대비(YoY) 지표 상승 필터링
         if conditions.get('use_yoy_roe_up', False):
             min_diff = float(conditions.get('min_yoy_roe_diff', 0))
-            if yoy_roe_diff < min_diff:
+            if prev_item and yoy_roe_diff < min_diff:
+                continue
+            if not prev_item and min_diff > 0:
                 continue
                 
         if conditions.get('use_yoy_rev_up', False):
             min_rev_g = float(conditions.get('min_yoy_rev_growth', 0))
-            if yoy_rev_growth < min_rev_g:
+            if prev_item and yoy_rev_growth < min_rev_g:
+                continue
+            if not prev_item and min_rev_g > 0:
                 continue
                 
         if conditions.get('use_yoy_op_up', False):
             min_op_g = float(conditions.get('min_yoy_op_growth', 0))
-            if yoy_op_growth < min_op_g:
+            if prev_item and yoy_op_growth < min_op_g:
+                continue
+            if not prev_item and min_op_g > 0:
                 continue
                 
         if conditions.get('use_yoy_np_up', False):
             min_np_g = float(conditions.get('min_yoy_np_growth', 0))
-            if yoy_np_growth < min_np_g:
+            if prev_item and yoy_np_growth < min_np_g:
+                continue
+            if not prev_item and min_np_g > 0:
                 continue
 
         results.append({
