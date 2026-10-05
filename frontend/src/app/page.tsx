@@ -21,8 +21,12 @@ import TetrisScreenerView from '@/components/TetrisScreenerView';
 import FCFComparisonView from '@/components/FCFComparisonView';
 import DartLabFinancialView from '@/components/DartLabFinancialView';
 import AnalystReportsView from '@/components/AnalystReportsView';
+import PrivateAccessGate from '@/components/PrivateAccessGate';
 
 export default function Home() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+
   const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
@@ -30,6 +34,17 @@ export default function Home() {
   const [globalData, setGlobalData] = useState<any>({ indices: [], stocks: [] });
   const [news, setNews] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // 초기 인증 상태 확인 (localStorage)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const auth = localStorage.getItem('stock_terminal_auth');
+      if (auth === 'true') {
+        setIsAuthenticated(true);
+      }
+    }
+    setAuthChecked(true);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -93,6 +108,18 @@ export default function Home() {
   }, []);
 
   const [forceCategory, setForceCategory] = useState<string | null>(null);
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#070709] text-white font-sans">
+        <div className="animate-pulse text-sm text-gray-400">보안 세션 확인 중...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <PrivateAccessGate onAuthenticate={() => setIsAuthenticated(true)} />;
+  }
 
   if (loading) {
     return (
@@ -170,9 +197,24 @@ export default function Home() {
 
       {/* Main Navbar */}
       <nav className="h-auto min-h-14 bg-[#0a0a0a] border-b border-gray-800 flex flex-col md:flex-row items-start md:items-center justify-between px-4 py-2">
-        <h1 className="text-xl font-black tracking-tighter mb-2 md:mb-0 shrink-0">
-          STOCK<span className="text-red-600">CODING</span> TERMINAL
-        </h1>
+        <div className="flex items-center justify-between w-full md:w-auto mb-2 md:mb-0 shrink-0">
+          <h1 className="text-xl font-black tracking-tighter">
+            STOCK<span className="text-red-600">CODING</span> TERMINAL
+          </h1>
+          <button
+            onClick={() => {
+              if (typeof window !== 'undefined') {
+                localStorage.removeItem('stock_terminal_auth');
+              }
+              setIsAuthenticated(false);
+            }}
+            title="보안 접속 잠금"
+            className="md:hidden ml-2 px-2 py-1 text-[11px] bg-gray-900 hover:bg-gray-800 border border-gray-700 text-gray-400 hover:text-white rounded transition-all flex items-center gap-1"
+          >
+            <span>🔒</span>
+            <span>잠금</span>
+          </button>
+        </div>
         <div className="flex gap-1 w-full md:w-auto overflow-x-auto hide-scrollbar pb-1">
           <button
             onClick={() => setActiveTab('globalnews')}
@@ -324,6 +366,19 @@ export default function Home() {
             }`}
           >
             파생/수급 랩
+          </button>
+          <button
+            onClick={() => {
+              if (typeof window !== 'undefined') {
+                localStorage.removeItem('stock_terminal_auth');
+              }
+              setIsAuthenticated(false);
+            }}
+            title="보안 접속 잠금"
+            className="hidden md:flex ml-2 px-3 py-1 text-xs bg-gray-900 hover:bg-gray-800 border border-gray-700 text-gray-400 hover:text-white rounded transition-all items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer font-bold"
+          >
+            <span>🔒</span>
+            <span>보안 잠금</span>
           </button>
         </div>
       </nav>
