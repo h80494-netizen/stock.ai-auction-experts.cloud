@@ -98,6 +98,20 @@ def init_db():
             realized_pnl REAL
         )
     ''')
+
+    # 사용자 승인 요청 및 비밀번호 관리 테이블
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_access_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            email TEXT,
+            requested_password TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT,
+            approved_at TEXT
+        )
+    ''')
     
     # 보유 잔고 테이블
     c.execute('''
@@ -743,5 +757,111 @@ def recalculate_all_ttm_financials():
             pass
     print(f"[TTM Batch] Recalculation complete!")
 
+def create_user_request(name: str, phone: str, email: str, requested_password: str):
+    import datetime
+    conn = get_db_connection()
+    c = conn.cursor()
+    created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('''
+        INSERT INTO user_access_requests (name, phone, email, requested_password, status, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)
+    ''', (name, phone, email, requested_password, created_at))
+    conn.commit()
+    req_id = c.lastrowid
+    conn.close()
+    return req_id
+
+def get_all_user_requests():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id, name, phone, email, requested_password, status, created_at, approved_at FROM user_access_requests ORDER BY id DESC')
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def update_user_request_status(request_id: int, status: str):
+    import datetime
+    conn = get_db_connection()
+    c = conn.cursor()
+    approved_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == 'approved' else None
+    c.execute('''
+        UPDATE user_access_requests
+        SET status = ?, approved_at = ?
+        WHERE id = ?
+    ''', (status, approved_at, request_id))
+    conn.commit()
+    conn.close()
+
+def verify_user_password(password: str):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    # 마스터 관리자 비밀번호 (주인장)
+    if password == admin_master:
+        return {"authenticated": True, "is_admin": True, "name": "주인장(관리자)"}
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, name, requested_password, status FROM user_access_requests
+        WHERE requested_password = ? AND status = 'approved'
+    ''', (password,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        return {"authenticated": True, "is_admin": False, "name": row["name"]}
+    
+    return {"authenticated": False, "is_admin": False, "name": None}
+
+def change_user_password(name: str, phone: str, current_password: str, new_password: str):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    
+    # 관리자 비밀번호 변경 요청인 경우 (마스터 계정)
+    if current_password == admin_master and (name == "주인장" or name == "관리자" or not name):
+        # 환경변수 메모리 변경
+        os.environ["ADMIN_MASTER_PASSWORD"] = new_password
+        return {"success": True, "message": "주인장(관리자) 비밀번호가 성공적으로 변경되었습니다."}
+
+    # 일반 회원 비밀번호 변경
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, name, phone, requested_password, status FROM user_access_requests
+        WHERE name = ? AND phone = ? AND requested_password = ?
+    ''', (name.strip(), phone.strip(), current_password.strip()))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
+        return {"success": False, "message": "성함, 연락처 또는 현재 비밀번호가 일치하지 않습니다."}
+    
+    if row["status"] != "approved":
+        conn.close()
+        return {"success": False, "message": "아직 관리자 승인이 완료되지 않은 계정입니다."}
+    
+    # 새 비밀번호로 업데이트
+    c.execute('''
+        UPDATE user_access_requests
+        SET requested_password = ?
+        WHERE id = ?
+    ''', (new_password.strip(), row["id"]))
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": f"{name} 님의 비밀번호가 성공적으로 변경되었습니다."}
+
+def admin_update_user_password(request_id: int, new_password: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        UPDATE user_access_requests
+        SET requested_password = ?
+        WHERE id = ?
+    ''', (new_password.strip(), request_id))
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": "회원 비밀번호가 수정되었습니다."}
+
 # Initialize DB when imported
 init_db()
+

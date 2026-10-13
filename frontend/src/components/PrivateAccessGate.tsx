@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import ChangePasswordModal from './ChangePasswordModal';
 
 interface PrivateAccessGateProps {
   onAuthenticate: (authenticated: boolean) => void;
@@ -9,29 +10,94 @@ interface PrivateAccessGateProps {
 export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateProps) {
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  // 모달 상태
   const [showSignupModal, setShowSignupModal] = useState(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
   const [showDonationModal, setShowDonationModal] = useState(false);
 
+  // 신청 폼 상태
+  const [signupForm, setSignupForm] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    requested_password: ''
+  });
+  const [signupMsg, setSignupMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   // 비밀번호 확인 및 로그인 처리
-  const handleLogin = (e?: React.FormEvent) => {
+  const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMsg('');
 
-    if (!password.trim()) {
+    const trimmedPassword = password.trim();
+    if (!trimmedPassword) {
       setErrorMsg('비밀번호를 입력해 주세요.');
       return;
     }
 
-    // 허용되는 기본 접속 비밀번호 (예: 1234, 0000, 7777, stock2026 등 손쉬운 비밀번호 및 회원 비밀번호)
-    // 입력된 어떠한 비밀번호든 승인해주거나 특정 마스터 패스워드 허용
-    if (password.length >= 2) {
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('stock_terminal_auth', 'true');
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: trimmedPassword })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.authenticated) {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('stock_terminal_auth', 'true');
+          if (data.is_admin) {
+            sessionStorage.setItem('stock_terminal_is_admin', 'true');
+          } else {
+            sessionStorage.removeItem('stock_terminal_is_admin');
+          }
+          if (data.name) {
+            sessionStorage.setItem('stock_terminal_user_name', data.name);
+          }
+          localStorage.removeItem('stock_terminal_auth');
+        }
+        onAuthenticate(true);
+      } else {
+        setErrorMsg(data.detail || '올바르지 않거나 아직 승인되지 않은 비밀번호입니다.');
       }
-      onAuthenticate(true);
-    } else {
-      setErrorMsg('올바른 비밀번호를 입력해 주세요.');
+    } catch (err) {
+      console.error(err);
+      setErrorMsg('서버와 통신 중 오류가 발생했거나 승인되지 않은 비밀번호입니다.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 가입 및 비밀번호 신청 제출
+  const handleSignupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSignupMsg(null);
+
+    if (!signupForm.name.trim() || !signupForm.phone.trim() || !signupForm.requested_password.trim()) {
+      setSignupMsg({ type: 'error', text: '성함, 연락처, 사용 희망 비밀번호를 입력해 주세요.' });
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/register-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(signupForm)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSignupMsg({ type: 'success', text: data.message || '가입 신청이 완료되었습니다. 관리자 승인 후 접속 가능합니다.' });
+        setSignupForm({ name: '', phone: '', email: '', requested_password: '' });
+      } else {
+        setSignupMsg({ type: 'error', text: data.detail || '신청 등록 중 오류가 발생했습니다.' });
+      }
+    } catch (err) {
+      console.error(err);
+      setSignupMsg({ type: 'error', text: '서버와 통신할 수 없습니다.' });
     }
   };
 
@@ -61,7 +127,8 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
             <span>접속 비밀번호 안내</span>
           </div>
           <ul className="list-disc list-inside space-y-1 text-gray-300 leading-relaxed pl-1">
-            <li>정식 승인 회원: 가입 신청 시 등록한 본인의 비밀번호 입력</li>
+            <li>정식 승인 회원: 가입 신청 후 주인장 승인을 받은 고유 비밀번호 입력</li>
+            <li>주인장/관리자: 관리자 마스터 비밀번호로 접속하여 시스템 관리</li>
           </ul>
         </div>
 
@@ -70,7 +137,7 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
           <div>
             <input
               type="password"
-              placeholder="비밀번호 입력 (월일 4자리 또는 본인 설정 비밀번호)"
+              placeholder="비밀번호 입력 (승인받은 고유 비밀번호)"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full bg-[#1b1c23] border border-gray-700/80 focus:border-cyan-500 rounded-xl px-4 py-3.5 text-sm text-white placeholder-gray-500 outline-none transition-all shadow-inner font-mono"
@@ -79,16 +146,17 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
           </div>
 
           {errorMsg && (
-            <div className="text-red-400 text-xs text-center font-semibold bg-red-950/40 border border-red-800/60 p-2 rounded-lg">
+            <div className="text-red-400 text-xs text-center font-semibold bg-red-950/40 border border-red-800/60 p-2.5 rounded-lg">
               {errorMsg}
             </div>
           )}
 
           <button
             type="submit"
-            className="w-full bg-white hover:bg-gray-200 text-black font-extrabold text-base py-3.5 rounded-xl transition-all shadow-lg active:scale-[0.99] cursor-pointer"
+            disabled={isLoading}
+            className="w-full bg-white hover:bg-gray-200 disabled:bg-gray-600 text-black font-extrabold text-base py-3.5 rounded-xl transition-all shadow-lg active:scale-[0.99] cursor-pointer"
           >
-            입장하기
+            {isLoading ? '검증 중...' : '입장하기'}
           </button>
         </form>
 
@@ -96,12 +164,25 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
         <div className="space-y-2.5 pt-2">
           <div className="grid grid-cols-2 gap-2.5">
             <button
-              onClick={() => setShowSignupModal(true)}
+              onClick={() => {
+                setSignupMsg(null);
+                setShowSignupModal(true);
+              }}
               className="bg-purple-950/40 hover:bg-purple-900/60 border border-purple-600/50 text-purple-200 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
             >
               <span>👤+</span>
               <span>가입/비밀번호 신청</span>
             </button>
+            <button
+              onClick={() => setShowChangePasswordModal(true)}
+              className="bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-600/50 text-cyan-200 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+            >
+              <span>🔑</span>
+              <span>비밀번호 변경</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5">
             <button
               onClick={() => setShowContactModal(true)}
               className="bg-teal-950/40 hover:bg-teal-900/60 border border-teal-600/50 text-teal-200 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
@@ -109,15 +190,14 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
               <span>💬</span>
               <span>소통 및 문의란</span>
             </button>
+            <button
+              onClick={() => setShowDonationModal(true)}
+              className="bg-amber-950/40 hover:bg-amber-900/60 border border-amber-500/50 text-amber-300 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+            >
+              <span>☕</span>
+              <span>서버 운영 후원</span>
+            </button>
           </div>
-
-          <button
-            onClick={() => setShowDonationModal(true)}
-            className="w-full bg-amber-950/40 hover:bg-amber-900/60 border border-amber-500/50 text-amber-300 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-          >
-            <span>☕</span>
-            <span>서버 운영 후원하기 (Donation)</span>
-          </button>
         </div>
 
       </div>
@@ -125,30 +205,101 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
       {/* 1. 가입/비밀번호 신청 모달 */}
       {showSignupModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#121318] border border-purple-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+          <div className="bg-[#121318] border border-purple-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl relative">
             <h3 className="text-lg font-bold text-purple-300 flex items-center gap-2">
               <span>👤+</span>
-              <span>가입 및 비밀번호 신청</span>
+              <span>가입 및 승인 비밀번호 신청</span>
             </h3>
             <p className="text-xs text-gray-300 leading-relaxed">
-              AI 주식 투자 터미널 이용을 위한 회원가입 신청 안내입니다.<br/>
-              관리자에게 사용하실 비밀번호(월일 4자리 등)를 신청해 주세요.
+              성함과 개인정보를 작성하여 승인 요청을 등록해 주세요.<br/>
+              관리자(주인장) 승인 후 요청하신 비밀번호로 접속이 가능합니다.
             </p>
-            <div className="bg-gray-900 p-3 rounded-xl text-xs font-mono text-purple-200 border border-gray-800">
-              담당자 문의: support@ai-auction-experts.cloud<br/>
-              운영팀 연락처: 관리자 직통 승인 시스템
-            </div>
-            <button
-              onClick={() => setShowSignupModal(false)}
-              className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 rounded-xl text-xs transition-all"
-            >
-              닫기
-            </button>
+
+            <form onSubmit={handleSignupSubmit} className="space-y-3 pt-2">
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">성함 / 닉네임 *</label>
+                <input
+                  type="text"
+                  placeholder="예: 홍길동"
+                  value={signupForm.name}
+                  onChange={(e) => setSignupForm({ ...signupForm, name: e.target.value })}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-purple-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">연락처 *</label>
+                <input
+                  type="text"
+                  placeholder="예: 010-1234-5678"
+                  value={signupForm.phone}
+                  onChange={(e) => setSignupForm({ ...signupForm, phone: e.target.value })}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-purple-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">이메일 (선택)</label>
+                <input
+                  type="email"
+                  placeholder="예: user@example.com"
+                  value={signupForm.email}
+                  onChange={(e) => setSignupForm({ ...signupForm, email: e.target.value })}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-purple-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">사용 희망 고유 비밀번호 *</label>
+                <input
+                  type="password"
+                  placeholder="사용하고자 하는 비밀번호 (4자리 이상)"
+                  value={signupForm.requested_password}
+                  onChange={(e) => setSignupForm({ ...signupForm, requested_password: e.target.value })}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-purple-500 font-mono"
+                  required
+                />
+              </div>
+
+              {signupMsg && (
+                <div className={`text-xs p-2.5 rounded-lg border font-semibold ${
+                  signupMsg.type === 'success' 
+                    ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-300' 
+                    : 'bg-red-950/50 border-red-700/60 text-red-300'
+                }`}>
+                  {signupMsg.text}
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowSignupModal(false)}
+                  className="w-1/3 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2 rounded-xl text-xs transition-all"
+                >
+                  닫기
+                </button>
+                <button
+                  type="submit"
+                  className="w-2/3 bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 rounded-xl text-xs transition-all shadow-lg"
+                >
+                  승인 요청하기
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
-      {/* 2. 소통 및 문의란 모달 */}
+      {/* 2. 비밀번호 변경 모달 */}
+      <ChangePasswordModal
+        isOpen={showChangePasswordModal}
+        onClose={() => setShowChangePasswordModal(false)}
+      />
+
+      {/* 3. 소통 및 문의란 모달 */}
       {showContactModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#121318] border border-teal-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
@@ -173,7 +324,7 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
         </div>
       )}
 
-      {/* 3. 서버 운영 후원하기 모달 */}
+      {/* 4. 서버 운영 후원하기 모달 */}
       {showDonationModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#121318] border border-amber-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">

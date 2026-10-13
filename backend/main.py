@@ -25,7 +25,14 @@ from excel_parser import load_kospi_data, get_spot_news
 from global_aggregator import get_global_data, get_aggregated_news
 from trader import execute_morning_buy, BrokerageAPI
 from valuation import ValuationRequest, calculate_rim
-from competitor_analyzer import get_sectors, get_sector_news, get_ticker_fundamentals
+from database import (
+    create_user_request,
+    get_all_user_requests,
+    update_user_request_status,
+    verify_user_password,
+    change_user_password,
+    admin_update_user_password
+)
 
 app = FastAPI(title="AI Stock Analyst API")
 
@@ -1311,6 +1318,98 @@ def api_detailed_trading_ledger(date: str = None):
 def api_pnl_history():
     return api_ledger_history()
 
+@app.get("/api/ledger-chart-data")
+def api_ledger_chart_data():
+    """
+    Returns comparative cumulative return data for 매수주문 strategy vs KOSPI index (^KS11).
+    """
+    try:
+        from database import get_ledger_history
+        import yfinance as yf
+        from datetime import datetime, timedelta
+
+        ledger_rows = get_ledger_history()
+        ledger_rows_asc = sorted(ledger_rows, key=lambda x: x.get('date', ''))
+
+        if not ledger_rows_asc:
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=60)
+        else:
+            first_date_str = ledger_rows_asc[0].get('date')
+            try:
+                start_dt = datetime.strptime(first_date_str, "%Y-%m-%d") - timedelta(days=7)
+            except Exception:
+                start_dt = datetime.now() - timedelta(days=60)
+            end_dt = datetime.now()
+
+        # Fetch KOSPI daily history via yfinance (^KS11)
+        kospi_df = yf.download("^KS11", start=start_dt.strftime("%Y-%m-%d"), end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"), progress=False)
+
+        kospi_map = {}
+        if not kospi_df.empty:
+            if hasattr(kospi_df.columns, 'levels') and 'Close' in kospi_df.columns.get_level_values(0):
+                close_series = kospi_df['Close']['^KS11'] if '^KS11' in kospi_df['Close'] else kospi_df['Close'].iloc[:, 0]
+            elif 'Close' in kospi_df:
+                close_series = kospi_df['Close']
+            else:
+                close_series = kospi_df.iloc[:, 3]
+
+            for idx, val in close_series.items():
+                date_str = idx.strftime("%Y-%m-%d")
+                kospi_map[date_str] = float(val)
+
+        ledger_map = {row['date']: row for row in ledger_rows_asc}
+
+        all_dates = sorted(list(set(list(ledger_map.keys()) + list(kospi_map.keys()))))
+        
+        if ledger_rows_asc:
+            min_date = ledger_rows_asc[0]['date']
+            all_dates = [d for d in all_dates if d >= min_date]
+        
+        if not all_dates:
+            return []
+
+        base_kospi = None
+        for d in sorted(kospi_map.keys()):
+            if base_kospi is None or d <= all_dates[0]:
+                base_kospi = kospi_map[d]
+
+        chart_data = []
+        cum_strategy_multiplier = 1.0
+        last_strategy_ret = 0.0
+        last_kospi_ret = 0.0
+
+        for d in all_dates:
+            if d in kospi_map and base_kospi and base_kospi > 0:
+                k_price = kospi_map[d]
+                kospi_ret = round(((k_price - base_kospi) / base_kospi) * 100, 2)
+                last_kospi_ret = kospi_ret
+            else:
+                kospi_ret = last_kospi_ret
+
+            if d in ledger_map:
+                daily_row = ledger_map[d]
+                r_rate = daily_row.get('return_rate', 0.0) or 0.0
+                cum_strategy_multiplier *= (1.0 + r_rate / 100.0)
+                strategy_ret = round((cum_strategy_multiplier - 1.0) * 100, 2)
+                last_strategy_ret = strategy_ret
+                net_pnl = daily_row.get('net_pnl', 0)
+            else:
+                strategy_ret = last_strategy_ret
+                net_pnl = 0
+
+            chart_data.append({
+                "date": d,
+                "kospi_return": kospi_ret,
+                "strategy_return": strategy_ret,
+                "net_pnl": net_pnl
+            })
+
+        return chart_data
+    except Exception as e:
+        print(f"Ledger chart data error: {e}")
+        return []
+
 _holdings_price_cache = {}
 _holdings_cache_time = 0
 
@@ -2281,6 +2380,105 @@ def api_export_market_scan():
     df.to_excel(temp_path, index=False)
     
     return FileResponse(temp_path, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename='market_scan_data.xlsx')
+
+# ==================== 사용자 가입/비밀번호 신청 및 관리자 승인 API ====================
+
+class RegisterRequestModel(BaseModel):
+    name: str
+    phone: str
+    email: str = ""
+    requested_password: str
+
+@app.post("/api/auth/register-request")
+def register_access_request(req: RegisterRequestModel):
+    if not req.name.strip() or not req.phone.strip() or not req.requested_password.strip():
+        raise HTTPException(status_code=400, detail="성함, 연락처, 희망 비밀번호를 모두 입력해 주세요.")
+    
+    if len(req.requested_password.strip()) < 2:
+        raise HTTPException(status_code=400, detail="비밀번호는 최소 2자리 이상이어야 합니다.")
+        
+    req_id = create_user_request(
+        req.name.strip(),
+        req.phone.strip(),
+        req.email.strip() if req.email else "",
+        req.requested_password.strip()
+    )
+    return {
+        "status": "success",
+        "message": "가입 및 비밀번호 신청이 성공적으로 접수되었습니다. 관리자(주인장) 승인 후 접속 가능합니다.",
+        "id": req_id
+    }
+
+class LoginRequestModel(BaseModel):
+    password: str
+
+@app.post("/api/auth/login")
+def check_user_login(req: LoginRequestModel):
+    res = verify_user_password(req.password.strip())
+    if not res["authenticated"]:
+        raise HTTPException(status_code=401, detail="올바르지 않거나 승인되지 않은 비밀번호입니다.")
+    return res
+
+class ChangePasswordModel(BaseModel):
+    name: str = ""
+    phone: str = ""
+    current_password: str
+    new_password: str
+
+@app.post("/api/auth/change-password")
+def api_change_password(req: ChangePasswordModel):
+    if not req.current_password or not req.new_password:
+        raise HTTPException(status_code=400, detail="현재 비밀번호와 새 비밀번호를 모두 입력해 주세요.")
+    if len(req.new_password.strip()) < 4:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자리 이상이어야 합니다.")
+    res = change_user_password(req.name, req.phone, req.current_password, req.new_password)
+    if not res["success"]:
+        raise HTTPException(status_code=400, detail=res["message"])
+    return res
+
+class AdminAuthModel(BaseModel):
+    admin_password: str
+
+@app.post("/api/auth/admin/requests")
+def get_user_requests_admin(req: AdminAuthModel):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    if req.admin_password != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    requests = get_all_user_requests()
+    return {"status": "success", "data": requests}
+
+class AdminApproveModel(BaseModel):
+    admin_password: str
+    request_id: int
+    status: str # 'approved' or 'rejected' or 'pending'
+
+@app.post("/api/auth/admin/approve")
+def approve_user_request_admin(req: AdminApproveModel):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    if req.admin_password != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    if req.status not in ["approved", "rejected", "pending"]:
+        raise HTTPException(status_code=400, detail="올바르지 않은 상태값입니다.")
+    update_user_request_status(req.request_id, req.status)
+    return {"status": "success", "message": f"요청이 성공적으로 {req.status} 변경되었습니다."}
+
+class AdminPasswordResetModel(BaseModel):
+    admin_password: str
+    request_id: int
+    new_password: str
+
+@app.post("/api/auth/admin/reset-password")
+def api_admin_reset_password(req: AdminPasswordResetModel):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    if req.admin_password != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    if not req.new_password or len(req.new_password.strip()) < 4:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자리 이상이어야 합니다.")
+    res = admin_update_user_password(req.request_id, req.new_password)
+    return res
 
 if __name__ == "__main__":
     import uvicorn

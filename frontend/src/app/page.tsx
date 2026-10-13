@@ -22,10 +22,16 @@ import FCFComparisonView from '@/components/FCFComparisonView';
 import DartLabFinancialView from '@/components/DartLabFinancialView';
 import AnalystReportsView from '@/components/AnalystReportsView';
 import PrivateAccessGate from '@/components/PrivateAccessGate';
+import AdminApprovalModal from '@/components/AdminApprovalModal';
+import ChangePasswordModal from '@/components/ChangePasswordModal';
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [userName, setUserName] = useState<string>('');
+  const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
 
   const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
@@ -35,12 +41,19 @@ export default function Home() {
   const [news, setNews] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 초기 인증 상태 확인 (localStorage)
+  // 초기 인증 상태 확인 (sessionStorage 사용: 브라우저 닫으면 세션 종료)
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const auth = localStorage.getItem('stock_terminal_auth');
+      // 레거시 localStorage 데이터 정리
+      localStorage.removeItem('stock_terminal_auth');
+
+      const auth = sessionStorage.getItem('stock_terminal_auth');
       if (auth === 'true') {
         setIsAuthenticated(true);
+        if (sessionStorage.getItem('stock_terminal_is_admin') === 'true') {
+          setIsAdmin(true);
+        }
+        setUserName(sessionStorage.getItem('stock_terminal_user_name') || '');
       }
     }
     setAuthChecked(true);
@@ -118,7 +131,21 @@ export default function Home() {
   }
 
   if (!isAuthenticated) {
-    return <PrivateAccessGate onAuthenticate={() => setIsAuthenticated(true)} />;
+    return (
+      <PrivateAccessGate
+        onAuthenticate={() => {
+          setIsAuthenticated(true);
+          if (typeof window !== 'undefined') {
+            if (sessionStorage.getItem('stock_terminal_is_admin') === 'true') {
+              setIsAdmin(true);
+            } else {
+              setIsAdmin(false);
+            }
+            setUserName(sessionStorage.getItem('stock_terminal_user_name') || '');
+          }
+        }}
+      />
+    );
   }
 
   if (loading) {
@@ -197,22 +224,50 @@ export default function Home() {
 
       {/* Main Navbar */}
       <nav className="h-auto min-h-14 bg-[#0a0a0a] border-b border-gray-800 flex flex-col md:flex-row items-start md:items-center justify-between px-4 py-2">
-        <div className="flex items-center justify-between w-full md:w-auto mb-2 md:mb-0 shrink-0">
-          <h1 className="text-xl font-black tracking-tighter">
+        <div className="flex items-center justify-between w-full md:w-auto mb-2 md:mb-0 shrink-0 gap-2 flex-wrap">
+          <h1 className="text-xl font-black tracking-tighter mr-2">
             STOCK<span className="text-red-600">CODING</span> TERMINAL
           </h1>
+
+          {/* 오직 관리자(주인장)에게만 노출되는 승인 관리 버튼 */}
+          {isAdmin && (
+            <button
+              onClick={() => setShowAdminModal(true)}
+              title="회원 가입 및 비밀번호 승인 DB 관리 (관리자 전용)"
+              className="px-2.5 py-1 text-xs bg-red-950/80 hover:bg-red-900 border border-red-500 text-red-200 hover:text-white rounded-lg transition-all flex items-center gap-1.5 shadow cursor-pointer font-bold animate-pulse"
+            >
+              <span>👑</span>
+              <span>회원 승인 DB 관리</span>
+            </button>
+          )}
+
+          {/* 모든 사용자 비밀번호 변경 버튼 */}
+          <button
+            onClick={() => setShowChangePasswordModal(true)}
+            title="비밀번호 변경"
+            className="px-2.5 py-1 text-xs bg-cyan-950/60 hover:bg-cyan-900 border border-cyan-700/60 text-cyan-200 hover:text-white rounded-lg transition-all flex items-center gap-1 shadow-sm cursor-pointer font-semibold"
+          >
+            <span>🔑</span>
+            <span>비밀번호 변경</span>
+          </button>
+
+          {/* 로그아웃 버튼 */}
           <button
             onClick={() => {
               if (typeof window !== 'undefined') {
+                sessionStorage.removeItem('stock_terminal_auth');
+                sessionStorage.removeItem('stock_terminal_is_admin');
+                sessionStorage.removeItem('stock_terminal_user_name');
                 localStorage.removeItem('stock_terminal_auth');
               }
+              setIsAdmin(false);
               setIsAuthenticated(false);
             }}
-            title="보안 접속 잠금"
-            className="md:hidden ml-2 px-2 py-1 text-[11px] bg-gray-900 hover:bg-gray-800 border border-gray-700 text-gray-400 hover:text-white rounded transition-all flex items-center gap-1"
+            title="세션 종료 및 비밀번호 재인증"
+            className="px-2.5 py-1 text-xs bg-gray-900 hover:bg-red-950/80 border border-gray-700 hover:border-red-700/60 text-gray-300 hover:text-red-200 rounded-lg transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
           >
             <span>🔒</span>
-            <span>잠금</span>
+            <span className="font-semibold">로그아웃</span>
           </button>
         </div>
         <div className="flex gap-1 w-full md:w-auto overflow-x-auto hide-scrollbar pb-1">
@@ -431,6 +486,21 @@ export default function Home() {
         <div>CONNECTED | LIVE DATA</div>
         <div>MARKET OPEN</div>
       </footer>
+
+      {/* 관리자 승인 관리 모달 (오직 관리자일 때만 렌더) */}
+      {isAdmin && (
+        <AdminApprovalModal
+          isOpen={showAdminModal}
+          onClose={() => setShowAdminModal(false)}
+        />
+      )}
+
+      {/* 비밀번호 변경 모달 */}
+      <ChangePasswordModal
+        isOpen={showChangePasswordModal}
+        onClose={() => setShowChangePasswordModal(false)}
+        defaultName={userName}
+      />
     </div>
   );
 }
