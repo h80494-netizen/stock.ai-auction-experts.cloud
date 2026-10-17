@@ -29,9 +29,26 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
     let targets: { time: string, value: number }[] = [];
     if (fundamentals && fundamentals.target_history && Array.isArray(fundamentals.target_history)) {
       const lastPrice = sortedData[sortedData.length - 1].close;
+
+      const parseTargetVal = (t: any): number => {
+        if (t.value && !isNaN(t.value) && Number(t.value) > 0) {
+          return Number(t.value);
+        }
+        if (typeof t.text === 'string') {
+          const matches = t.text.match(/[\d,]+/g);
+          if (matches && matches.length > 0) {
+            const numStr = matches[matches.length - 1].replace(/,/g, '');
+            const val = parseFloat(numStr);
+            if (!isNaN(val) && val > 0) return val;
+          }
+        }
+        return 0;
+      };
+
       targets = fundamentals.target_history
-        .filter((t: any) => t.value && !isNaN(t.value) && t.value > lastPrice * 0.1)
-        .map((t: any) => ({ time: t.time, value: t.value }));
+        .map((t: any) => ({ time: t.time, value: parseTargetVal(t) }))
+        .filter((t: any) => t.value > 0 && t.value > lastPrice * 0.05);
+
       targets.sort((a, b) => (a.time > b.time ? 1 : a.time < b.time ? -1 : 0));
     }
 
@@ -49,6 +66,12 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
           targetIdx++;
         }
         row.targetPrice = currentTarget;
+      });
+    } else if (fundamentals && fundamentals.targetMean && fundamentals.targetMean > 0) {
+      // targets가 없지만 targetMean이 있는 경우 전체 수평선으로 연결
+      const meanVal = Number(fundamentals.targetMean);
+      merged.forEach(row => {
+        row.targetPrice = meanVal;
       });
     }
 

@@ -213,7 +213,8 @@ def get_naver_target_history(code: str) -> list:
                         "position": "aboveBar",
                         "color": "#ff9800",
                         "shape": "circle",
-                        "text": f"목표가: {int(y):,}"
+                        "text": f"목표가: {int(y):,}",
+                        "value": float(y)
                     })
             # Highlight the most recent target price
             if history:

@@ -1911,38 +1911,68 @@ def api_get_fundamentals(ticker: str):
         target_history = []
         if is_krx:
             code = pure_ticker
-            from routers.reports import get_analyst_reports
-            recent_reports = get_analyst_reports(code, days=180).get("items", [])
             
-            # Extract targets and format them for the chart
-            for rep in recent_reports:
-                tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
-                if tp_str.isdigit() and int(tp_str) > 0:
-                    target_history.append({
-                        "time": rep["date"],
-                        "position": "aboveBar",
-                        "color": "rgba(255, 152, 0, 0.4)",
-                        "shape": "circle",
-                        "text": f"{rep.get('broker', '증권사')} 목표가: {int(tp_str):,}",
-                        "value": float(tp_str)
-                    })
+            # 1. 네이버 WiseReport 실시간 목표가 시계열(최신 2026년 10월까지) 수집
+            try:
+                from ingestion.scrapers.naver_scraper import get_naver_target_history
+                nv_history = get_naver_target_history(code)
+                if nv_history:
+                    for item in nv_history:
+                        target_history.append(item)
+            except Exception as e:
+                print(f"Error fetching Naver target history for {code}: {e}")
+
+            # 2. 개별 증권사 리포트 목표가
+            try:
+                from routers.reports import get_analyst_reports
+                recent_reports = get_analyst_reports(code, days=180).get("items", [])
+                for rep in recent_reports:
+                    tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
+                    if tp_str.isdigit() and int(tp_str) > 0:
+                        target_history.append({
+                            "time": rep["date"],
+                            "position": "aboveBar",
+                            "color": "rgba(255, 152, 0, 0.4)",
+                            "shape": "circle",
+                            "text": f"{rep.get('broker', '증권사')} 목표가: {int(tp_str):,}",
+                            "value": float(tp_str)
+                        })
+            except Exception as e:
+                pass
                     
-            from database import get_analyst_target_history
-            db_history = get_analyst_target_history(code)
-            for item in db_history:
-                target_history.append({
-                    "time": item["time"],
-                    "position": "aboveBar",
-                    "color": "#ff9800",
-                    "shape": "circle",
-                    "text": item["text"] if item.get("text") else f"목표가: {int(item['target_price']):,}",
-                    "value": float(item['target_price'])
-                })
+            # 3. DB 저장된 목표가 이력
+            try:
+                from database import get_analyst_target_history
+                db_history = get_analyst_target_history(code)
+                for item in db_history:
+                    val = float(item.get('target_price', 0))
+                    target_history.append({
+                        "time": item["time"],
+                        "position": "aboveBar",
+                        "color": "#ff9800",
+                        "shape": "circle",
+                        "text": item["text"] if item.get("text") else f"목표가: {int(val):,}",
+                        "value": val
+                    })
+            except Exception as e:
+                pass
             
+            # 중복 제거 (time, text 기준)
+            seen_entries = set()
+            unique_targets = []
+            for item in target_history:
+                key = (item.get("time"), item.get("text"))
+                if key not in seen_entries:
+                    seen_entries.add(key)
+                    unique_targets.append(item)
+            target_history = unique_targets
+
             if target_history:
                 target_history = sorted(target_history, key=lambda x: x["time"])
-                if targetMean == 0:
-                    targetMean = target_history[-1]["value"]
+                # 최신 목표가로 targetMean 갱신
+                latest_with_val = [t for t in target_history if t.get("value", 0) > 0]
+                if latest_with_val:
+                    targetMean = latest_with_val[-1]["value"]
         else:
             try:
                 from utils.yf_util import get_yf_ticker

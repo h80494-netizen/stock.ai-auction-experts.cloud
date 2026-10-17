@@ -291,11 +291,64 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
     });
   }, [targetData, filter, countryFilter]);
 
-  // Fetch chart data for KISChart
+  // 실시간 최신 목표가 갱신 함수 (2026년 7월 13일 이후 최신 목표가 실시간 반영)
+  const refreshStockTarget = async (ticker: string) => {
+    try {
+      const res = await fetch(`/api/fundamentals/${ticker}`);
+      if (!res.ok) return;
+      const fund = await res.json();
+      if (!fund || fund.error) return;
+
+      let trend = 'FLAT';
+      let target1mAgo = 0;
+      let currentTarget = fund.targetMean || 0;
+      
+      if (fund.target_history && fund.target_history.length > 0) {
+        const history = [...fund.target_history].sort((a: any, b: any) => new Date(b.time).getTime() - new Date(a.time).getTime());
+        const latest = history[0].text || String(history[0].value || '');
+        const past = history.length > 1 ? (history[1].text || String(history[1].value || '')) : null;
+        
+        const getNum = (text: string) => {
+          const parts = text.match(/[\d,]+/g);
+          return parts ? parseInt(parts[parts.length - 1].replace(/,/g, ''), 10) : 0;
+        };
+        
+        let targetLatestVal = getNum(latest) || currentTarget;
+        target1mAgo = past ? getNum(past) : 0;
+        
+        if (latest.includes("상향") || latest.includes("Up") || (target1mAgo > 0 && targetLatestVal > target1mAgo)) {
+            trend = 'UP';
+        } else if (latest.includes("하향") || latest.includes("Down") || (target1mAgo > 0 && targetLatestVal < target1mAgo)) {
+            trend = 'DOWN';
+        }
+      }
+
+      const updated = {
+        target1mAgo,
+        currentTarget,
+        trend,
+        analystCount: fund.analyst_count || 0,
+        fundamentals: fund,
+        latestTargetDate: fund.target_history?.[fund.target_history.length - 1]?.time || ''
+      };
+
+      targetCache[ticker] = { ...(targetCache[ticker] || {}), ...updated };
+      
+      setSelectedStock((prev: any) => (prev?.ticker === ticker ? { ...prev, ...updated } : prev));
+      setTargetData(prev => prev.map(s => (s.ticker === ticker ? { ...s, ...updated } : s)));
+    } catch (e) {
+      console.error("Refresh stock target failed", e);
+    }
+  };
+
+  // Fetch chart data for KISChart and refresh live target
   useEffect(() => {
-    if (!selectedStock || !selectedStock.fundamentals) return;
+    if (!selectedStock) return;
     let isMounted = true;
     let pollInterval: NodeJS.Timeout;
+
+    // 백그라운드 최신 목표가 실시간 갱신 실행
+    refreshStockTarget(selectedStock.ticker);
 
     const fetchData = async () => {
       try {
@@ -322,7 +375,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [selectedStock]);
+  }, [selectedStock?.ticker]);
 
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
@@ -391,6 +444,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
                     onNavigateToStock(item.ticker);
                   }
                   setSelectedStock(item);
+                  refreshStockTarget(item.ticker);
                 }}
                 className={`grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.5fr] gap-1 px-2 py-2 cursor-pointer border-b border-gray-900/50 hover:bg-gray-800 transition-colors text-[11px]
                   ${isSelected ? 'bg-blue-900/30 border-l-2 border-l-blue-500' : (i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]')}
