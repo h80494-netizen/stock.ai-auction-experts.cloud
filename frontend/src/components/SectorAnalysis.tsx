@@ -222,27 +222,95 @@ export default function SectorAnalysis() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col bg-[#050505] overflow-y-auto lg:overflow-x-hidden min-h-[600px] lg:min-h-0">
-        <div className="flex-1 flex flex-col lg:flex-row min-h-0">
-          {selectedStocks.length > 0 ? (
-            selectedStocks.map((stock, i) => (
-              <div key={stock.ticker} className={`flex-1 p-4 overflow-y-auto lg:border-l ${i > 0 ? 'border-t lg:border-t-0 border-gray-800' : 'border-transparent'}`}>
-                {renderStockView(stock)}
-              </div>
-            ))
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-gray-600 text-lg">좌측에서 종목을 선택해주세요.</div>
-          )}
-        </div>
-        
-        {/* Spread Chart Area for Pairs Trading */}
-        {selectedStocks.length === 2 && (
-          <div className="h-[400px] border-t border-gray-800 p-4 shrink-0 flex flex-col">
-            <h3 className="text-lg font-bold text-gray-200 mb-2">페어트레이딩 (스프레드 및 회귀분석)</h3>
-            <div className="flex-1 relative">
-              {pairsLoading && <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/50 text-gray-400">회귀분석 및 스프레드 계산 중...</div>}
-              {pairsData && <PairsChartRenderer data={pairsData} t1={selectedStocks[0].name} t2={selectedStocks[1].name} />}
+      <div className="flex-1 flex flex-col bg-[#050505] overflow-y-auto min-h-0">
+        {selectedStocks.length === 2 ? (
+          /* 2개 종목 페어트레이딩 비교 모드 */
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* 상단: 두 종목의 핵심 기업 화면 (나란히 배치, 잘림 없이 컴팩트한 크기) */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-3 border-b border-gray-800 shrink-0 bg-[#0d0d0d]">
+              {selectedStocks.map((stock) => {
+                const fundamentals = fundamentalsData[stock.ticker];
+                return (
+                  <div key={stock.ticker} className="bg-[#141414] border border-gray-800 rounded-lg p-3 shadow-md flex flex-col justify-between">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="overflow-hidden pr-2">
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-base font-bold text-white truncate">{stock.name}</h2>
+                          <span className="text-xs text-gray-500 font-mono">{stock.ticker}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-gray-800 text-gray-300 shrink-0">{stock.country}</span>
+                        </div>
+                        <p className="text-xs text-gray-400 truncate mt-0.5">{stock.description}</p>
+                      </div>
+                      <button 
+                        onClick={() => handleSelectStock(stock)}
+                        className="text-gray-500 hover:text-red-400 text-xs px-1.5 py-0.5 rounded hover:bg-gray-800 transition-colors shrink-0"
+                        title="선택 해제"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {/* 4대 핵심 펀더멘탈 지표 (가로 4열 배치로 절대 짤리지 않음) */}
+                    <div className="grid grid-cols-4 gap-2 mt-1">
+                      <div className="bg-[#1a1a1a] border border-gray-800/80 p-1.5 rounded text-center">
+                        <div className="text-gray-400 text-[10px] font-medium">PER</div>
+                        <div className="text-xs font-bold text-white mt-0.5 truncate">
+                          {fundamentals?.per && fundamentals.per !== 'N/A' && fundamentals.per > 0 ? fundamentals.per : '-'}
+                        </div>
+                      </div>
+                      <div className="bg-[#1a1a1a] border border-gray-800/80 p-1.5 rounded text-center">
+                        <div className="text-gray-400 text-[10px] font-medium">PBR</div>
+                        <div className="text-xs font-bold text-white mt-0.5 truncate">
+                          {fundamentals?.pbr && fundamentals.pbr !== 'N/A' && fundamentals.pbr > 0 ? fundamentals.pbr : '-'}
+                        </div>
+                      </div>
+                      <div className="bg-[#1a1a1a] border border-gray-800/80 p-1.5 rounded text-center">
+                        <div className="text-gray-400 text-[10px] font-medium">예상 EPS</div>
+                        <div className="text-xs font-bold text-white mt-0.5 truncate">
+                          {fundamentals?.eps && fundamentals.eps !== 'N/A' ? Number(fundamentals.eps).toLocaleString() : '-'}
+                        </div>
+                      </div>
+                      <div className="bg-[#1a1a1a] border border-gray-800/80 p-1.5 rounded text-center">
+                        <div className="text-gray-400 text-[10px] font-medium">ROE</div>
+                        <div className="text-xs font-bold text-white mt-0.5 truncate">
+                          {fundamentals?.roe && fundamentals.roe !== 'N/A' ? `${fundamentals.roe}%` : '-'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+
+            {/* 하단: 페어트레이딩 (스프레드 및 회귀분석) 차트 */}
+            <div className="flex-1 flex flex-col p-4 min-h-[360px] bg-[#050505]">
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-sm font-bold text-gray-200 flex items-center gap-2">
+                  <span className="text-indigo-400">📈 페어트레이딩</span>
+                  <span className="text-gray-400 text-xs font-normal">(스프레드 및 회귀분석)</span>
+                </h3>
+                <div className="text-xs text-gray-400">
+                  비교: <strong className="text-white">{selectedStocks[0].name}</strong> vs <strong className="text-white">{selectedStocks[1].name}</strong>
+                </div>
+              </div>
+              <div className="flex-1 relative bg-[#0a0a0a] border border-gray-800 rounded-lg p-2 overflow-hidden min-h-[300px]">
+                {pairsLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/60 text-gray-300 animate-pulse text-sm">
+                    회귀분석 및 스프레드 계산 중...
+                  </div>
+                )}
+                {pairsData && <PairsChartRenderer data={pairsData} t1={selectedStocks[0].name} t2={selectedStocks[1].name} />}
+              </div>
+            </div>
+          </div>
+        ) : selectedStocks.length === 1 ? (
+          /* 1개 종목 상세 분석 모드 */
+          <div className="flex-1 p-4 overflow-y-auto">
+            {renderStockView(selectedStocks[0])}
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-gray-600 text-base">
+            좌측에서 종목을 선택해주세요. (최대 2개 비교 가능)
           </div>
         )}
       </div>
