@@ -3,11 +3,41 @@ import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import datetime
 
-# Set Korean font
-matplotlib.rcParams['font.family'] = 'Malgun Gothic'
-matplotlib.rcParams['axes.unicode_minus'] = False
+# Set Korean font dynamically across Windows/Linux/macOS
+def set_korean_font():
+    system_fonts = [f.name for f in fm.fontManager.ttflist]
+    korean_fonts = ['Malgun Gothic', 'NanumGothic', 'NanumBarunGothic', 'AppleGothic', 'Noto Sans CJK KR']
+    
+    selected_font = None
+    for kf in korean_fonts:
+        if kf in system_fonts:
+            selected_font = kf
+            break
+            
+    if selected_font:
+        matplotlib.rcParams['font.family'] = selected_font
+    else:
+        nanum_paths = [
+            '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
+            '/usr/share/fonts/nanum/NanumGothic.ttf'
+        ]
+        font_found = False
+        for path in nanum_paths:
+            if os.path.exists(path):
+                fm.fontManager.addfont(path)
+                font_prop = fm.FontProperties(fname=path)
+                matplotlib.rcParams['font.family'] = font_prop.get_name()
+                font_found = True
+                break
+        if not font_found:
+            matplotlib.rcParams['font.family'] = 'sans-serif'
+            
+    matplotlib.rcParams['axes.unicode_minus'] = False
+
+set_korean_font()
 
 OUTPUT_DIR = '../frontend/public/charts'
 if not os.path.exists(OUTPUT_DIR):

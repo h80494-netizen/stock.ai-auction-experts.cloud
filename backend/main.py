@@ -151,18 +151,26 @@ def get_dart_fundamentals(ticker: str):
     clean_ticker = to_pure_ticker(ticker)
     financials = db.get_dart_financials(clean_ticker)
     
-    # If not found in DB, try to fetch it live (for demonstration or fallback)
-    if not financials:
-        from ingestion.scrapers.dart_scraper import dart_scraper
-        current_year = "2023" # Fallback year
-        data = dart_scraper.get_financials(clean_ticker, current_year, "11011")
-        if data:
-            db.insert_dart_financials(
-                clean_ticker, data["year"], data["quarter"],
-                data["assets"], data["equity"], data["liabilities"],
-                data["revenue"], data["operating_profit"], data["net_profit"]
-            )
-            financials = db.get_dart_financials(clean_ticker)
+    # DB에 데이터가 없거나 12개 분기 미만인 경우 DART 실시간 12분기 수집 수행
+    if not financials or len(financials) < 12:
+        try:
+            from ingestion.scrapers.dart_scraper import dart_scraper
+            data_12q = dart_scraper.get_financials_12quarters(clean_ticker)
+            if data_12q:
+                for d in data_12q:
+                    db.insert_dart_financials(
+                        clean_ticker, d["year"], d["quarter"],
+                        d["assets"], d["equity"], d["liabilities"],
+                        d["revenue"], d["operating_profit"], d["net_profit"]
+                    )
+                # TTM 재계산
+                try:
+                    db.calculate_and_save_ttm_financials(clean_ticker)
+                except Exception:
+                    pass
+                financials = db.get_dart_financials(clean_ticker)
+        except Exception as e:
+            print(f"Error fetching 12 quarters DART data for {clean_ticker}: {e}")
             
     return {"ticker": clean_ticker, "financials": financials}
 
@@ -688,12 +696,15 @@ def api_get_global_news_ranking():
     try:
         from ingestion.scrapers.global_news_scraper import get_global_news_ranking
         ranking = get_global_news_ranking()
-        _global_news_ranking_cache = ranking
-        _last_news_ranking_fetch = time.time()
-        return ranking
+        if ranking:
+            _global_news_ranking_cache = ranking
+            _last_news_ranking_fetch = time.time()
+            return ranking
+        elif _global_news_ranking_cache is not None:
+            return _global_news_ranking_cache
+        return []
     except Exception as e:
         print("Failed to fetch global news ranking", e)
-        # Return fallback cache if possible
         if _global_news_ranking_cache is not None:
             return _global_news_ranking_cache
         return []
@@ -706,8 +717,7 @@ def api_get_foreign_top_stocks(threshold: float = 5.0, limit: int = 20, force_re
     """
     try:
         from kis_foreign_scanner import get_foreign_net_buy_stocks
-        # force_refresh 매개변수는 kis_foreign_scanner 에서는 현재 지원하지 않으므로 생략
-        stocks = get_foreign_net_buy_stocks(threshold=threshold, limit=limit)
+        stocks = get_foreign_net_buy_stocks(threshold=threshold, limit=limit, force_refresh=force_refresh)
         return stocks
     except Exception as e:
         print(f"Error in api_get_foreign_top_stocks: {e}")
@@ -733,7 +743,7 @@ def api_get_realtime_prices(tickers: str = ""):
     results = {}
     
     from kis_instance import kis_client
-    import naver_finance_scraper as naver_scraper
+    from naver_finance_scraper import naver_scraper
     import yfinance as yf
 
     missing_tickers = []
@@ -1663,9 +1673,7 @@ def get_kis_price(ticker: str):
 
 @app.post("/api/kis/order/{ticker}")
 def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = ""):
-    # --- 가상 모의투자 (Paper Trading) 로직 ---
-    # KIS API 연동 오류를 우회하기 위해 DB 기록만 남기는 방식으로 대체합니다.
-    success = True
+    # --- 가상 모의투자 (Paper Trading) 및 KIS 연동 로직 ---
     pure_ticker = to_pure_ticker(ticker)
     is_kr = is_korean_stock(ticker)
     final_ticker = pure_ticker if is_kr else ticker
@@ -1673,24 +1681,55 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
     from database import update_holding, get_stock
     adj_qty = qty if type == "buy" else -qty
     
-    actual_price = price
-    if actual_price == 0:
+    # 실시간 최신 시장가 우선 조회 (어제 가격이나 과거 캐시 매수 방지)
+    live_price = 0
+    from kis_instance import kis_client
+    if kis_client:
+        try:
+            live_price = kis_client.get_current_price(pure_ticker)
+        except Exception:
+            live_price = 0
+
+    if live_price <= 0:
         try:
             from naver_finance_scraper import naver_scraper
-            actual_price = naver_scraper.get_current_price_detail(pure_ticker)['price']
-        except:
-            pass
-            
-    if actual_price == 0:
+            detail = naver_scraper.get_current_price_detail(pure_ticker)
+            if detail and detail.get('price', 0) > 0:
+                live_price = detail['price']
+        except Exception:
+            live_price = 0
+
+    # 실시간 시장가가 조회되면 실시간 현재가로 확정 체결, 실패 시 클라이언트 제시가 사용
+    actual_price = live_price if live_price > 0 else price
+    if actual_price <= 0:
         stock = get_stock(pure_ticker) or get_stock(ticker)
         if stock and stock.get("price"):
             actual_price = stock["price"]
         else:
             actual_price = 1 # fallback
-            
+
+    # KIS API 계좌 실주문 시도 (모의/실전 연동되어 있을 경우)
+    real_api_success = False
+    if kis_client:
+        try:
+            if type == "buy":
+                # 시장가(0) 또는 실시간가로 주문
+                real_api_success = kis_client.order_buy(pure_ticker, qty, int(actual_price))
+            elif type == "sell":
+                real_api_success = kis_client.order_sell(pure_ticker, qty, int(actual_price))
+        except Exception as e:
+            print(f"[KIS Order API Notice] Live order call: {e}")
+
+    # 가상 모의투자 원장/잔고 기록 업데이트 (단가: 최신 실시간 현재가)
     update_holding(final_ticker, name or final_ticker, adj_qty, actual_price)
         
-    return {"ticker": final_ticker, "success": True, "real_api_success": success, "type": type}
+    return {
+        "ticker": final_ticker, 
+        "success": True, 
+        "real_api_success": real_api_success, 
+        "type": type,
+        "executed_price": actual_price
+    }
 
 @with_retry(max_retries=3, initial_delay=1.0)
 def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = ""):

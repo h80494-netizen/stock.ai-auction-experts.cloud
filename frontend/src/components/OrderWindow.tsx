@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 export default function OrderWindow({ stocks }: { stocks: any[] }) {
   // Default investment amount: 100,000,000 won (1억 원)
@@ -120,29 +121,55 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return () => clearInterval(interval);
   }, [fetchForeignStocks, threshold]);
 
-  // 9시 5분 시점에 고정된 종목 리스트를 기준으로 UI 표시, 실시간 비중만 병합 (threshold 미달 종목 100% 원천 제거)
+  // 9시 5분 시점에 고정된 종목 리스트를 기준으로 UI 표시, 실시간 비중 및 수치(거래량, 순매수, 현재가) 병합
   const orderStocks = useMemo(() => {
-    if (frozenStocks.length > 0) {
-      return frozenStocks.map(fs => {
-        const realtimeData = foreignOrderStocks.find(rs => rs.ticker === fs.ticker);
-        const fallbackData = computedStocks.find(cs => cs.ticker === fs.ticker || cs.ticker === `KRX:${fs.ticker}`);
+    const baseList = frozenStocks.length > 0 ? frozenStocks : foreignOrderStocks;
+    if (baseList.length > 0) {
+      return baseList.map(fs => {
+        const cleanFs = (fs.clean_ticker || fs.ticker || '').split(':').pop() || '';
+        const realtimeData = foreignOrderStocks.find(rs => {
+          const cleanRs = (rs.clean_ticker || rs.ticker || '').split(':').pop() || '';
+          return cleanRs === cleanFs || rs.ticker === fs.ticker;
+        });
+        const fallbackData = computedStocks.find(cs => {
+          const cleanCs = (cs.clean_ticker || cs.ticker || '').split(':').pop() || '';
+          return cleanCs === cleanFs || cs.ticker === fs.ticker;
+        });
         
         let liveRatio = fs.foreign_ratio !== undefined ? fs.foreign_ratio : (fs.foreignRatio || 0);
+        let liveNetBuy = fs.foreign_net_buy !== undefined ? fs.foreign_net_buy : (fs.foreignSumCurrent || 0);
+        let liveVol = fs.total_volume || fs.volume || 0;
+        let livePrice = fs.price || 0;
+        let liveChangePct = fs.changePct || 0;
+
         if (realtimeData) {
-           liveRatio = realtimeData.foreign_ratio !== undefined ? realtimeData.foreign_ratio : (realtimeData.foreignRatio || 0);
+          liveRatio = realtimeData.currentRatio !== undefined ? realtimeData.currentRatio : (realtimeData.foreign_ratio !== undefined ? realtimeData.foreign_ratio : (realtimeData.foreignRatio || liveRatio));
+          if (realtimeData.foreign_net_buy !== undefined) liveNetBuy = realtimeData.foreign_net_buy;
+          if (realtimeData.total_volume || realtimeData.volume) liveVol = realtimeData.total_volume || realtimeData.volume;
+          if (realtimeData.price) livePrice = realtimeData.price;
+          if (realtimeData.changePct !== undefined) liveChangePct = realtimeData.changePct;
         } else if (fallbackData) {
-           liveRatio = fallbackData.foreignRatio || 0;
+          liveRatio = fallbackData.foreignRatio || liveRatio;
+          if (fallbackData.foreign_net_buy !== undefined) liveNetBuy = fallbackData.foreign_net_buy;
+          if (fallbackData.total_volume || fallbackData.volume) liveVol = fallbackData.total_volume || fallbackData.volume;
+          if (fallbackData.price) livePrice = fallbackData.price;
         }
 
-        const ratio0905 = fs.foreign_ratio !== undefined ? fs.foreign_ratio : (fs.foreignRatio || 0);
+        const ratio0905 = fs.ratio0905 !== undefined ? fs.ratio0905 : (fs.foreign_ratio !== undefined ? fs.foreign_ratio : (fs.foreignRatio || 0));
 
         return {
           ...fs,
+          price: livePrice,
+          changePct: liveChangePct,
+          foreign_net_buy: liveNetBuy,
+          volume: liveVol,
+          total_volume: liveVol,
           ratio0905,
-          currentRatio: liveRatio
+          currentRatio: liveRatio,
+          foreign_ratio: liveRatio
         };
       })
-      .filter(fs => fs.ratio0905 >= threshold)
+      .filter(fs => (fs.ratio0905 !== undefined ? fs.ratio0905 : fs.currentRatio) >= threshold)
       .slice(0, 20);
     }
     return [];
@@ -188,9 +215,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return () => clearInterval(interval);
   }, [orderStocks, holdings]);
 
-  // PnL History & Detailed Ledger State
+  // PnL History & Detailed Ledger & Chart State
   const [pnlHistory, setPnlHistory] = useState<any[]>([]);
   const [detailedLedger, setDetailedLedger] = useState<any[]>([]);
+  const [chartData, setChartData] = useState<any[]>([]);
   const [showLedger, setShowLedger] = useState(false);
   const [showHoldingsModal, setShowHoldingsModal] = useState(false);
 
@@ -220,6 +248,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       if (resDetailed.ok) {
         const dataDetailed = await resDetailed.json();
         setDetailedLedger(Array.isArray(dataDetailed) ? dataDetailed : []);
+      }
+    } catch (e) { console.error(e); }
+
+    try {
+      const resChart = await fetch('/api/ledger-chart-data');
+      if (resChart.ok) {
+        const dataChart = await resChart.json();
+        setChartData(Array.isArray(dataChart) ? dataChart : []);
       }
     } catch (e) { console.error(e); }
   };
@@ -312,9 +348,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const batch = orderStocks.slice(i, i + batchSize);
       const promises = batch.map(async (stock) => {
         if (stock.ratio0905 !== undefined && stock.ratio0905 < threshold) return 0;
-        const cleanTicker = stock.ticker.split(':').pop() || stock.ticker;
-        const liveP = livePrices[stock.ticker] || livePrices[`KRX:${stock.ticker}`] || stock.price || 0;
-        const price = liveP; 
+        const cleanTicker = stock.clean_ticker || stock.ticker.split(':').pop() || stock.ticker;
+        let liveP = livePrices[stock.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`] || stock.price || 0;
+        
+        // 실시간 가격 안전 검증: 0원이거나 전일 종가 누락 방지 위해 API 즉시 호출 보강
+        if (liveP <= 0) {
+          try {
+            const pRes = await fetch(`/api/realtime-prices?tickers=${cleanTicker}`);
+            if (pRes.ok) {
+              const pData = await pRes.json();
+              liveP = pData[cleanTicker] || pData[`KRX:${cleanTicker}`] || pData[stock.ticker] || 0;
+            }
+          } catch(e) {}
+        }
+        
+        const price = liveP > 0 ? liveP : (stock.price || 0); 
         if (price <= 0) return 0; 
         
         const qty = Math.floor(amountPerStock / price);
@@ -341,11 +389,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const handleBuySingle = async (ticker: string, name: string, price: number, qty: number) => {
     try {
       const cleanTicker = ticker.split(':').pop() || ticker;
-      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${price}&name=${encodeURIComponent(name)}`, { method: 'POST' });
+      let finalPrice = price;
+      if (finalPrice <= 0) {
+        try {
+          const pRes = await fetch(`/api/realtime-prices?tickers=${cleanTicker}`);
+          if (pRes.ok) {
+            const pData = await pRes.json();
+            finalPrice = pData[cleanTicker] || pData[`KRX:${cleanTicker}`] || pData[ticker] || 0;
+          }
+        } catch(e) {}
+      }
+      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${finalPrice}&name=${encodeURIComponent(name)}`, { method: 'POST' });
       if (!res.ok) throw new Error(res.statusText || 'API Error');
       const data = await res.json();
       if (data.success) {
-        alert(`${cleanTicker} 종목 ${qty}주 매수 주문이 한국투자증권(모의투자)에 성공적으로 접수되었습니다.`);
+        alert(`${cleanTicker} 종목 ${qty}주 매수 주문이 한국투자증권(모의투자)에 성공적으로 접수되었습니다. (체결단가: ${(data.executed_price || finalPrice).toLocaleString()}원)`);
         await fetchHoldings();
       } else {
         alert(`${cleanTicker} 매수 주문 실패: ${data.error || '알 수 없는 오류'}`);
@@ -595,7 +653,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                 const changeColor = stock.changePct > 0 ? 'text-red-400' : (stock.changePct < 0 ? 'text-blue-400' : 'text-gray-400');
 
                 const netBuy = stock.foreign_net_buy !== undefined ? stock.foreign_net_buy : (stock.foreignSumCurrent || 0);
-                const currentRatio = stock.foreign_ratio !== undefined ? stock.foreign_ratio : (stock.foreignRatio || 0);
+                const currentRatio = stock.currentRatio !== undefined ? stock.currentRatio : (stock.foreign_ratio !== undefined ? stock.foreign_ratio : (stock.foreignRatio || 0));
                 const snapRatio = stock.ratio0905 !== undefined ? stock.ratio0905 : currentRatio;
                 const totalVol = stock.total_volume || stock.volume || stock.totalVol || 0;
 
@@ -717,12 +775,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                         : ((h as any).ratio0905 !== undefined ? (h as any).ratio0905 : undefined));
 
                     // 실시간 비중 (장중 실시간 외국계 창구 순매수량 / 총거래량 수치)
-                    let liveRatio: number = foreignMatch?.foreign_ratio !== undefined 
-                      ? foreignMatch.foreign_ratio 
-                      : (foreignMatch?.foreignRatio !== undefined 
-                        ? foreignMatch.foreignRatio 
-                        : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
-                          : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0)));
+                    let liveRatio: number = foreignMatch?.currentRatio !== undefined
+                      ? foreignMatch.currentRatio
+                      : (foreignMatch?.foreign_ratio !== undefined 
+                        ? foreignMatch.foreign_ratio 
+                        : (foreignMatch?.foreignRatio !== undefined 
+                          ? foreignMatch.foreignRatio 
+                          : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
+                            : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0))));
                     
                     return (
                       <tr key={h.ticker} className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
@@ -982,6 +1042,73 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                 </button>
               </div>
               <div className="p-4 overflow-y-auto space-y-6">
+                {/* Comparative Cumulative Return Chart */}
+                <div className="bg-[#0a0a0a] border border-gray-800 rounded-lg p-4">
+                  <div className="flex justify-between items-center mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-gray-200">📈 누적 수익률 비교 차트 (KOSPI 지수 vs 매수주문 전략)</span>
+                    </div>
+                    <div className="flex items-center gap-4 text-xs font-mono">
+                      <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                        <span className="w-3 h-0.5 bg-emerald-400 inline-block"></span>
+                        매수주문 누적 수익률
+                      </span>
+                      <span className="flex items-center gap-1.5 text-purple-400 font-bold">
+                        <span className="w-3 h-0.5 bg-purple-400 inline-block"></span>
+                        KOSPI 지수 누적 수익률
+                      </span>
+                    </div>
+                  </div>
+                  {chartData.length > 0 ? (
+                    <div className="h-56 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                          <XAxis dataKey="date" stroke="#666" tick={{ fill: '#888', fontSize: 11 }} />
+                          <YAxis stroke="#666" tick={{ fill: '#888', fontSize: 11 }} unit="%" />
+                          <Tooltip 
+                            content={({ active, payload, label }: any) => {
+                              if (active && payload && payload.length) {
+                                const data = payload[0].payload;
+                                const stratRet = data.strategy_return;
+                                const kospiRet = data.kospi_return;
+                                const netPnl = data.net_pnl;
+                                return (
+                                  <div className="bg-[#18181b] border border-gray-700 p-2.5 rounded shadow-xl text-xs font-mono space-y-1 z-50">
+                                    <div className="text-gray-400 font-bold border-b border-gray-700 pb-1 mb-1">{label}</div>
+                                    <div className="flex justify-between gap-4 text-emerald-400 font-bold">
+                                      <span>매수주문 누적:</span>
+                                      <span>{stratRet > 0 ? '+' : ''}{stratRet}%</span>
+                                    </div>
+                                    <div className="flex justify-between gap-4 text-purple-400 font-bold">
+                                      <span>KOSPI 지수 누적:</span>
+                                      <span>{kospiRet > 0 ? '+' : ''}{kospiRet}%</span>
+                                    </div>
+                                    {netPnl !== undefined && netPnl !== 0 && (
+                                      <div className={`flex justify-between gap-4 font-bold border-t border-gray-800 pt-1 mt-1 ${netPnl > 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                        <span>당일 순손익:</span>
+                                        <span>{netPnl > 0 ? '+' : ''}{netPnl.toLocaleString()}원</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              }
+                              return null;
+                            }}
+                          />
+                          <ReferenceLine y={0} stroke="#444" strokeDasharray="3 3" />
+                          <Line type="monotone" dataKey="strategy_return" name="매수주문 누적수익률" stroke="#10b981" strokeWidth={2.5} dot={{ r: 3, fill: '#10b981' }} activeDot={{ r: 5 }} />
+                          <Line type="monotone" dataKey="kospi_return" name="KOSPI 누적수익률" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={{ r: 2, fill: '#a855f7' }} activeDot={{ r: 4 }} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <div className="py-8 text-center text-gray-500 text-xs font-bold">
+                      차트를 표시할 거래 내역 또는 KOSPI 지수 데이터를 로딩 중입니다...
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-sm font-bold text-gray-300">📊 일별 종합 정산 원장</span>
                   <span className="text-sm font-mono text-gray-400 font-bold bg-[#0a0a0a] px-3 py-1 rounded border border-gray-800">

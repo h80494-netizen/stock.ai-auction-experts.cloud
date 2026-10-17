@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import ChangePasswordModal from './ChangePasswordModal';
+import AdminApprovalModal from './AdminApprovalModal';
 
 interface PrivateAccessGateProps {
   onAuthenticate: (authenticated: boolean) => void;
@@ -15,8 +16,27 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
   // 모달 상태
   const [showSignupModal, setShowSignupModal] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [showAdminModal, setShowAdminModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
   const [showDonationModal, setShowDonationModal] = useState(false);
+
+  // 히든 관리자 모드 연속 클릭 감지 (5회 클릭 시 오픈)
+  const clickCountRef = useRef(0);
+  const clickTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleSecretAdminTrigger = () => {
+    clickCountRef.current += 1;
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+
+    if (clickCountRef.current >= 3) {
+      clickCountRef.current = 0;
+      setShowAdminModal(true);
+    } else {
+      clickTimerRef.current = setTimeout(() => {
+        clickCountRef.current = 0;
+      }, 1000);
+    }
+  };
 
   // 신청 폼 상태
   const [signupForm, setSignupForm] = useState({
@@ -110,9 +130,23 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
       {/* Main Access Card */}
       <div className="w-full max-w-[500px] bg-[#121318]/90 border border-gray-800/80 rounded-2xl shadow-2xl p-6 sm:p-8 backdrop-blur-xl relative z-10 space-y-6">
         
-        {/* Title Header */}
-        <div className="text-center space-y-1">
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight font-serif">
+        {/* 극도로 은폐된 스텔스 관리자 인증 버튼 (일반 유저에게는 안 보이나 마우스 오버 시만 살짝 반응) */}
+        <button
+          onClick={() => setShowAdminModal(true)}
+          className="absolute top-4 right-4 text-gray-800 hover:text-gray-500 opacity-20 hover:opacity-100 text-[10px] transition-all cursor-pointer p-1"
+          title="Admin Verification"
+          tabIndex={-1}
+        >
+          🔒
+        </button>
+        
+        {/* Title Header (3회 클릭 시 관리자 인증 창 오픈) */}
+        <div 
+          onClick={handleSecretAdminTrigger} 
+          className="text-center space-y-1 cursor-pointer select-none active:opacity-80 transition-opacity"
+          title="Private Access"
+        >
+          <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight font-serif hover:text-gray-100">
             Private Access
           </h1>
           <p className="text-xs sm:text-sm text-gray-400 font-medium tracking-wide">
@@ -348,6 +382,12 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
           </div>
         </div>
       )}
+
+      {/* 5. 관리자 비밀번호 승인 관리 모달 (비밀 트리거로 호출) */}
+      <AdminApprovalModal
+        isOpen={showAdminModal}
+        onClose={() => setShowAdminModal(false)}
+      />
 
     </div>
   );

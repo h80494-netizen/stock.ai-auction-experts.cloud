@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 시스템 의존성 설치
+# 시스템 의존성 및 한글 폰트 설치
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    fonts-nanum \
+    fontconfig \
+    && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 # 종속성 복사 및 설치

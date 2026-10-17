@@ -9,13 +9,15 @@ REMOTE_USER="ubuntu"     # ubuntu, ec2-user 등
 REMOTE_DIR="~/stock_project/backend"
 # -----------------
 
-echo "AWS 서버($AWS_IP)에 KIS 순매수 스캐너 스크립트를 배포합니다..."
+echo "AWS 서버($AWS_IP)에 백엔드 파일(main.py, kis_foreign_scanner.py)을 배포합니다..."
 
 # 1. 파일 복사 (scp 사용)
-scp -i "$SSH_KEY_PATH" ./kis_foreign_scanner.py $REMOTE_USER@$AWS_IP:$REMOTE_DIR/
+scp -i "$SSH_KEY_PATH" ./kis_foreign_scanner.py ./main.py $REMOTE_USER@$AWS_IP:$REMOTE_DIR/
 
 if [ $? -eq 0 ]; then
     echo "파일 전송 완료!"
+    echo "원격 서버의 백엔드 서비스를 재시작합니다..."
+    ssh -i "$SSH_KEY_PATH" $REMOTE_USER@$AWS_IP "sudo systemctl restart stock-backend 2>/dev/null || pkill -f 'uvicorn main:app' && cd $REMOTE_DIR && nohup uvicorn main:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &"
 else
     echo "파일 전송 실패. SSH 키 경로와 IP를 확인해 주세요."
     exit 1

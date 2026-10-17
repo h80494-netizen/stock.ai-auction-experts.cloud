@@ -49,52 +49,94 @@ def analyze_news(title, publisher, timestamp):
         ]
     }
 
+def fetch_news_from_google(name, ticker, market_code):
+    """
+    yfinance 조회가 불가할 때 Google News RSS를 통해 실시간 글로벌 뉴스를 수집합니다.
+    """
+    from .country_news_scraper import get_google_news_rss
+    from email.utils import parsedate_to_datetime
+    
+    query = name
+    raw_items = get_google_news_rss(query, market_code)
+    if not raw_items and market_code != 'US':
+        # 영문 티커나 보조 검색어로 재시도
+        raw_items = get_google_news_rss(ticker.split('.')[0], 'US')
+        
+    converted = []
+    for item in raw_items:
+        ts = int(time.time())
+        if item.get("published"):
+            try:
+                dt = parsedate_to_datetime(item["published"])
+                ts = int(dt.timestamp())
+            except Exception:
+                pass
+        converted.append({
+            "title": item.get("title", ""),
+            "publisher": item.get("source", "Google News"),
+            "link": item.get("link", ""),
+            "timestamp": ts,
+            "providerPublishTime": ts
+        })
+    return converted
+
 def fetch_stock_news(name, ticker, market_code):
     try:
-        t = yf.Ticker(ticker)
-        news = t.news
-        
         top_news = []
         total_score = 0
-        news_count = len(news)
+        news_items = []
         
+        # 1. yfinance 시도 (yfinance MCP 규칙 및 기본 연동 존중)
+        try:
+            t = yf.Ticker(ticker)
+            raw_news = t.news
+            if raw_news and isinstance(raw_news, list):
+                for item in raw_news:
+                    n = item.get('content', item) if isinstance(item, dict) else item
+                    publisher = n.get('publisher')
+                    if not publisher and isinstance(n.get('provider'), dict):
+                        publisher = n['provider'].get('displayName')
+                    if not publisher:
+                        publisher = 'Yahoo Finance'
+                    title = n.get('title', '')
+                    link = n.get('link') or (n.get('clickThroughUrl', {}).get('url') if isinstance(n.get('clickThroughUrl'), dict) else '') or (n.get('canonicalUrl', {}).get('url') if isinstance(n.get('canonicalUrl'), dict) else '') or ''
+                    ts = n.get('providerPublishTime', 0)
+                    if not ts and n.get('pubDate'):
+                        try:
+                            pub_str = n['pubDate'].replace('Z', '+00:00')
+                            dt = datetime.fromisoformat(pub_str)
+                            ts = int(dt.timestamp())
+                        except Exception:
+                            ts = 0
+                    if title:
+                        news_items.append({
+                            "title": title,
+                            "publisher": publisher,
+                            "link": link,
+                            "timestamp": ts
+                        })
+        except Exception:
+            pass
+
+        # 2. yfinance 결과가 없거나 부족한 경우 Google News RSS로 보강
+        if len(news_items) < 3:
+            g_items = fetch_news_from_google(name, ticker, market_code)
+            for gi in g_items:
+                if not any(gi["title"] == ni["title"] for ni in news_items):
+                    news_items.append(gi)
+
+        news_count = len(news_items)
         if news_count == 0:
             return None
             
-        for item in news[:5]: # Take top 5 news
-            # Handle new yfinance format where news details are inside 'content'
-            n = item.get('content', item) if isinstance(item, dict) else item
-            
-            # Extract publisher
-            publisher = n.get('publisher')
-            if not publisher and isinstance(n.get('provider'), dict):
-                publisher = n['provider'].get('displayName')
-            if not publisher:
-                publisher = 'Yahoo Finance'
-                
+        for idx, n in enumerate(news_items[:5]): # 상위 최대 5개 뉴스
             title = n.get('title', '')
-            
-            # Extract link
-            link = n.get('link')
-            if not link and isinstance(n.get('clickThroughUrl'), dict):
-                link = n['clickThroughUrl'].get('url')
-            if not link and isinstance(n.get('canonicalUrl'), dict):
-                link = n['canonicalUrl'].get('url')
-            if not link:
-                link = ''
-                
-            # Extract timestamp
-            timestamp = n.get('providerPublishTime', 0)
-            if not timestamp and n.get('pubDate'):
-                try:
-                    pub_str = n['pubDate'].replace('Z', '+00:00')
-                    dt = datetime.fromisoformat(pub_str)
-                    timestamp = int(dt.timestamp())
-                except:
-                    pass
+            publisher = n.get('publisher', 'Global Media')
+            link = n.get('link', '')
+            timestamp = n.get('timestamp', int(time.time()))
             
             analyzed = analyze_news(title, publisher, timestamp)
-            analyzed["id"] = f"{ticker}_{timestamp}_{len(top_news)}"
+            analyzed["id"] = f"{ticker}_{timestamp}_{idx}"
             analyzed["summary"] = title
             analyzed["url"] = link
             
@@ -106,7 +148,7 @@ def fetch_stock_news(name, ticker, market_code):
             top_news.append(analyzed)
             total_score += analyzed["importance_score"]
             
-        avg_score = total_score / len(top_news) if top_news else 0
+        avg_score = total_score / len(top_news) if top_news else 50.0
         
         # Generate decisive_comment
         KEYWORD_KO = {
