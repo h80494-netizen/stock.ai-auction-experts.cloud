@@ -60,15 +60,23 @@ function TradingViewWidget({ symbol, defaultInterval = "D" }: { symbol: string, 
     if (!container.current) return;
     container.current.innerHTML = "";
 
+    // Check if symbol is a bond yield or commodity/macro index that requires line/area chart (style 3)
+    let effectiveSymbol = tvSymbol;
+    if (effectiveSymbol === "NYMEX:RB1!") effectiveSymbol = "AMEX:UGA";
+    else if (effectiveSymbol === "NYMEX:HO1!") effectiveSymbol = "AMEX:USL";
+
+    const isYieldOrMacro = effectiveSymbol.startsWith("FRED:") || effectiveSymbol.startsWith("TVC:") || effectiveSymbol.includes("10Y") || effectiveSymbol.includes("03Y") || effectiveSymbol.includes("02Y");
+    const chartStyle = isYieldOrMacro ? "3" : "1";
+
     const loadWidget = () => {
       if (typeof (window as any).TradingView !== 'undefined') {
         new (window as any).TradingView.widget({
           "autosize": true,
-          "symbol": tvSymbol,
+          "symbol": effectiveSymbol,
           "interval": interval,
           "timezone": "Asia/Seoul",
           "theme": "dark",
-          "style": "1",
+          "style": chartStyle,
           "locale": "kr",
           "enable_publishing": false,
           "backgroundColor": "rgba(19, 23, 34, 1)",

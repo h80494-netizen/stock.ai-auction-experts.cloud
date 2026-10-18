@@ -29,8 +29,11 @@ export default function GlobalIndicesView() {
     '채권': [
       { name: "한국 10년물 국채", symbol: "TVC:KR10Y", link: "https://kr.tradingview.com/symbols/TVC-KR10Y/" },
       { name: "한국 3년물 국채", symbol: "TVC:KR03Y", link: "https://kr.tradingview.com/symbols/TVC-KR03Y/" },
-      { name: "미국 10년물 국채", symbol: "TVC:US10Y", link: "https://kr.tradingview.com/symbols/TVC-US10Y/" },
-      { name: "미국 2년물 국채", symbol: "TVC:US02Y", link: "https://kr.tradingview.com/symbols/TVC-US02Y/" }
+      { name: "미국 10년물 국채", symbol: "FRED:DGS10", link: "https://kr.tradingview.com/symbols/TVC-US10Y/" },
+      { name: "미국 2년물 국채", symbol: "FRED:DGS2", link: "https://kr.tradingview.com/symbols/TVC-US02Y/" },
+      { name: "일본 10년물 국채", symbol: "FRED:IRLTLT01JPM156N", link: "https://kr.tradingview.com/symbols/TVC-JP10Y/" },
+      { name: "독일 10년물 국채", symbol: "FRED:IRLTLT01DEM156N", link: "https://kr.tradingview.com/symbols/TVC-DE10Y/" },
+      { name: "프랑스 10년물 국채", symbol: "FRED:IRLTLT01FRM156N", link: "https://kr.tradingview.com/symbols/TVC-FR10Y/" }
     ]
   };
 
@@ -43,7 +46,7 @@ export default function GlobalIndicesView() {
     '에너지': [
       { name: "WTI 원유 (Crude Oil)", symbol: "USOIL", link: "https://kr.tradingview.com/symbols/TVC-USOIL/" },
       { name: "천연가스 (Natural Gas)", symbol: "NATGAS", link: "https://kr.tradingview.com/symbols/TVC-NATGAS/" },
-      { name: "가솔린 (RBOB Gasoline)", symbol: "NYMEX:RB1!", link: "https://kr.tradingview.com/symbols/NYMEX-RB1!/" },
+      { name: "가솔린 (RBOB Gasoline)", symbol: "AMEX:UGA", link: "https://kr.tradingview.com/symbols/NYMEX-RB1!/" },
       { name: "난방유 (Heating Oil)", symbol: "NYMEX:HO1!", link: "https://kr.tradingview.com/symbols/NYMEX-HO1!/" }
     ],
     '비철/희토류': [
@@ -113,28 +116,49 @@ export default function GlobalIndicesView() {
       {/* Grid of Charts */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 pb-10">
         {getActiveItems().map(item => {
-          const apiInfo = indicesData.find(d => d.symbol === item.symbol);
-          const displayPrice = apiInfo?.price ? apiInfo.price.toLocaleString() : null;
+          const apiInfo = indicesData.find(d => d.symbol === item.symbol || d.name === item.name);
+          const isBond = activeCategory === '채권' || apiInfo?.is_yield;
+
+          let displayPrice: string | null = null;
           const displayChange = apiInfo?.changePct !== undefined ? apiInfo.changePct : null;
-          const changeColor = displayChange !== null && displayChange > 0 ? 'text-red-400' : (displayChange !== null && displayChange < 0 ? 'text-blue-400' : 'text-gray-400');
+          const changeVal = apiInfo?.change !== undefined ? apiInfo.change : null;
+
+          if (apiInfo?.price !== undefined && apiInfo.price !== null) {
+            if (isBond) {
+              // 채권 금리(%): 소수점 2자리
+              displayPrice = `${Number(apiInfo.price).toFixed(2)}%`;
+            } else if (item.symbol.includes('USD') || item.symbol.includes('USOIL') || item.symbol.includes('NATGAS') || item.symbol.includes('UGA') || !item.symbol.startsWith('KRX:')) {
+              displayPrice = `$${Number(apiInfo.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+            } else {
+              displayPrice = Number(apiInfo.price).toLocaleString();
+            }
+          }
+
+          const changeColor = displayChange !== null && displayChange > 0 
+            ? 'text-red-400' 
+            : (displayChange !== null && displayChange < 0 ? 'text-blue-400' : 'text-gray-400');
           
           return (
           <div key={item.symbol} className="bg-[#111] border border-gray-800 rounded p-4 flex flex-col h-[400px]">
             <div className="flex justify-between items-center mb-2">
-              <h3 className="font-bold text-gray-200">
-                {item.name}
+              <h3 className="font-bold text-gray-200 flex items-baseline">
+                <span>{item.name}</span>
                 {displayPrice && (
-                   <span className="ml-3 font-mono">
+                   <span className="ml-3 font-mono font-bold text-yellow-400 text-sm">
                      {displayPrice} 
-                     <span className={`ml-2 text-sm ${changeColor}`}>
-                       ({displayChange > 0 ? '+' : ''}{displayChange}%)
-                     </span>
+                     {displayChange !== null && (
+                       <span className={`ml-2 text-xs font-semibold ${changeColor}`}>
+                         ({displayChange > 0 ? '+' : ''}
+                         {isBond && changeVal !== null ? `${changeVal > 0 ? '+' : ''}${changeVal.toFixed(2)}%p, ` : ''}
+                         {displayChange > 0 ? '+' : ''}{displayChange}%)
+                       </span>
+                     )}
                    </span>
                 )}
               </h3>
               {('link' in item) && (item as any).link && (
                 <a href={(item as any).link} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
-                  TradingView에서 지수 원본 보기 ↗
+                  TradingView에서 원본 보기 ↗
                 </a>
               )}
             </div>

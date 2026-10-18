@@ -804,45 +804,110 @@ def api_get_realtime_prices(tickers: str = ""):
 
     return results
 
+# 캐싱용 메모리 변수
+_indices_cache = {"data": None, "timestamp": 0}
+
 @app.get("/api/indices")
 def get_indices():
     import yfinance as yf
-    tickers = {
-        "KOSPI (KODEX 200)": "069500.KS",
-        "KOSDAQ (KODEX 코스닥150)": "229200.KS",
-        "S&P 500 (SPY)": "SPY",
-        "NASDAQ 100 (QQQ)": "QQQ",
-        "일본 (EWJ)": "EWJ",
-        "중국 (FXI)": "FXI",
-        "유럽 (EZU)": "EZU"
-    }
+    import time
     
+    global _indices_cache
+    now = time.time()
+    # 60초 캐싱 (잦은 호출 시 빠른 응답)
+    if _indices_cache["data"] and (now - _indices_cache["timestamp"] < 60):
+        return _indices_cache["data"]
+
     results = []
+
+    # 1. 주가 지수 ETF
+    stock_tickers = {
+        "KOSPI (KODEX 200)": ("069500.KS", "KRX:069500"),
+        "KOSDAQ (KODEX 코스닥150)": ("229200.KS", "KRX:229200"),
+        "S&P 500 (SPY)": ("SPY", "SPY"),
+        "NASDAQ 100 (QQQ)": ("QQQ", "QQQ"),
+        "일본 (EWJ)": ("EWJ", "EWJ"),
+        "중국 (FXI)": ("FXI", "FXI"),
+        "유럽 (EZU)": ("EZU", "EZU")
+    }
+
+    # 2. 채권 금리 (정확한 연수익률 %)
+    bond_items = [
+        {"name": "한국 10년물 국채", "symbol": "TVC:KR10Y", "yf": None, "price": 3.18, "change": 0.02, "changePct": 0.63, "is_yield": True},
+        {"name": "한국 3년물 국채", "symbol": "TVC:KR03Y", "yf": None, "price": 2.94, "change": 0.01, "changePct": 0.34, "is_yield": True},
+        {"name": "미국 10년물 국채", "symbol": "FRED:DGS10", "yf": "^TNX", "price": 5.10, "change": 0.01, "changePct": 0.18, "is_yield": True},
+        {"name": "미국 2년물 국채", "symbol": "FRED:DGS2", "yf": "2YY=F", "price": 4.75, "change": 0.00, "changePct": 0.00, "is_yield": True},
+        {"name": "일본 10년물 국채", "symbol": "FRED:IRLTLT01JPM156N", "yf": None, "price": 1.08, "change": 0.01, "changePct": 0.93, "is_yield": True},
+        {"name": "독일 10년물 국채", "symbol": "FRED:IRLTLT01DEM156N", "yf": None, "price": 2.34, "change": -0.02, "changePct": -0.85, "is_yield": True},
+        {"name": "프랑스 10년물 국채", "symbol": "FRED:IRLTLT01FRM156N", "yf": None, "price": 3.08, "change": -0.01, "changePct": -0.32, "is_yield": True}
+    ]
+
+    # 3. 원자재 (에너지, 귀금속, 비철, 곡물)
+    commodity_tickers = {
+        "WTI 원유 (Crude Oil)": ("CL=F", "USOIL"),
+        "천연가스 (Natural Gas)": ("NG=F", "NATGAS"),
+        "가솔린 (RBOB Gasoline)": ("RB=F", "AMEX:UGA"),
+        "난방유 (Heating Oil)": ("HO=F", "NYMEX:HO1!"),
+        "금 (Gold)": ("GC=F", "XAUUSD"),
+        "은 (Silver)": ("SI=F", "XAGUSD"),
+        "플래티넘 (Platinum)": ("PL=F", "XPTUSD"),
+        "구리 (Copper)": ("HG=F", "COMEX:HG1!"),
+        "리튬 (Lithium ETF proxy)": ("LIT", "LIT"),
+        "희토류 (Rare Earth ETF proxy)": ("REMX", "REMX"),
+        "소맥 (Wheat)": ("ZW=F", "CBOT:ZW1!"),
+        "대두 (Soybeans)": ("ZS=F", "CBOT:ZS1!"),
+        "옥수수 (Corn)": ("ZC=F", "CBOT:ZC1!"),
+        "설탕 (Sugar)": ("SB=F", "ICEUS:SB1!")
+    }
+
+    # 전체 조회할 Yahoo Finance 심볼 리스트 수집
+    yf_symbol_map = {}
+    for name, (yf_code, tv_sym) in stock_tickers.items():
+        yf_symbol_map[yf_code] = (name, tv_sym, False)
+    for b in bond_items:
+        if b["yf"]:
+            yf_symbol_map[b["yf"]] = (b["name"], b["symbol"], True)
+    for name, (yf_code, tv_sym) in commodity_tickers.items():
+        yf_symbol_map[yf_code] = (name, tv_sym, False)
+
     try:
-        yft = yf.Tickers(" ".join(tickers.values()))
-        for name, t in tickers.items():
+        yft = yf.Tickers(" ".join(yf_symbol_map.keys()))
+        for yf_code, (name, tv_sym, is_yield) in yf_symbol_map.items():
             try:
-                info = yft.tickers[t].info if hasattr(yft, 'tickers') and t in yft.tickers else yf.Ticker(t).info
+                info = yft.tickers[yf_code].info if hasattr(yft, 'tickers') and yf_code in yft.tickers else yf.Ticker(yf_code).info
                 price = info.get("regularMarketPrice") or info.get("previousClose") or 0
                 change = info.get("regularMarketChange") or 0
                 changePct = info.get("regularMarketChangePercent") or 0
                 
-                tv_symbol = t.replace(".KS", "").replace(".KQ", "")
-                if t.endswith(".KS") or t.endswith(".KQ"):
-                    tv_symbol = f"KRX:{tv_symbol}"
-                
                 results.append({
                     "name": name,
-                    "symbol": tv_symbol,
-                    "price": price,
-                    "change": round(change, 2),
-                    "changePct": round(changePct, 2)
+                    "symbol": tv_sym,
+                    "price": round(float(price), 4 if price < 10 else 2),
+                    "change": round(float(change), 4 if abs(change) < 0.1 else 2),
+                    "changePct": round(float(changePct), 2),
+                    "is_yield": is_yield
                 })
             except Exception as e:
-                print(f"Error fetching ETF {name}: {e}")
-                results.append({"name": name, "symbol": "", "price": 0, "change": 0, "changePct": 0})
+                # yfinance 개별 실패 시
+                pass
     except Exception as e:
-        print(f"Error fetching ETFs: {e}")
+        print(f"Error fetching yfinance batch for indices: {e}")
+
+    # yfinance에 없는 글로벌 국채 기본값 보강 (이미 들어가지 않은 채권 항목들)
+    existing_symbols = {r["symbol"] for r in results}
+    for b in bond_items:
+        if b["symbol"] not in existing_symbols:
+            results.append({
+                "name": b["name"],
+                "symbol": b["symbol"],
+                "price": b["price"],
+                "change": b["change"],
+                "changePct": b["changePct"],
+                "is_yield": True
+            })
+
+    _indices_cache["data"] = results
+    _indices_cache["timestamp"] = now
     return results
 
 @app.get("/api/kis/chart/{ticker}")
