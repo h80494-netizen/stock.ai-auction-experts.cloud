@@ -101,7 +101,7 @@ def start_scheduler():
     threading.Thread(target=update_etf_data, daemon=True).start()
     
     scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
-    scheduler.add_job(auto_trader.job_1525_sell_order, CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Seoul'))
+    scheduler.add_job(auto_trader.job_1520_sell_order, CronTrigger(hour=15, minute=20, day_of_week='mon-fri', timezone='Asia/Seoul'))
     scheduler.add_job(auto_trader.job_1531_ledger_record, CronTrigger(hour=15, minute=31, day_of_week='mon-fri', timezone='Asia/Seoul'))
     
     # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
@@ -731,16 +731,15 @@ def api_get_market_top50(market: str):
     from global_aggregator import get_market_top50
     return get_market_top50(market)
 
-@app.get("/api/realtime-prices")
-def api_get_realtime_prices(tickers: str = ""):
+def get_realtime_quote_dict(tickers_str: str) -> dict:
     """
-    Returns real-time prices for requested tickers (comma-separated).
-    Queries KIS API or Naver Scraper first, with yfinance as fallback.
+    지정된 종목들의 실시간 시세 및 전일대비 등락률, 거래량 상세 조회 공통 함수
+    반환 포맷: { ticker: { "price": int/float, "change": int/float, "changePct": float, "volume": int } }
     """
-    if not tickers: return {}
+    if not tickers_str: return {}
     
-    ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
-    results = {}
+    ticker_list = [t.strip() for t in tickers_str.split(",") if t.strip()]
+    quotes = {}
     
     from kis_instance import kis_client
     from naver_finance_scraper import naver_scraper
@@ -750,32 +749,36 @@ def api_get_realtime_prices(tickers: str = ""):
     
     for original_t in ticker_list:
         pure_ticker = original_t.split(":")[-1]
-        price = 0
+        detail = None
         
-        # 1. Try KIS Client if available
+        # 1. KIS Client 상세 현재가 조회 시도 (전일대비 등락률 포함)
         if kis_client:
             try:
-                price = kis_client.get_current_price(pure_ticker)
+                detail = kis_client.get_current_price_detail(pure_ticker)
             except Exception:
-                price = 0
+                detail = None
                 
-        # 2. Try Naver Scraper fallback if price is 0
-        if price <= 0:
+        # 2. KIS 실패 또는 주가 0일 때 Naver Scraper 상세 조회 (전일대비 등락률 포함)
+        if not detail or detail.get('price', 0) <= 0:
             try:
                 detail = naver_scraper.get_current_price_detail(pure_ticker)
-                if detail and detail.get('price', 0) > 0:
-                    price = detail['price']
             except Exception:
-                price = 0
+                detail = None
 
-        if price > 0:
-            results[original_t] = price
-            results[pure_ticker] = price
-            results[f"KRX:{pure_ticker}"] = price
+        if detail and detail.get('price', 0) > 0:
+            q_val = {
+                "price": detail.get('price', 0),
+                "change": detail.get('change', 0),
+                "changePct": round(float(detail.get('changePct', 0.0)), 2),
+                "volume": detail.get('volume', 0)
+            }
+            quotes[original_t] = q_val
+            quotes[pure_ticker] = q_val
+            quotes[f"KRX:{pure_ticker}"] = q_val
         else:
             missing_tickers.append(original_t)
 
-    # 3. Fallback to yfinance for missing/overseas tickers
+    # 3. 해외주식/누락종목 yfinance fallback
     if missing_tickers:
         yf_tickers = []
         yf_map = {}
@@ -789,20 +792,50 @@ def api_get_realtime_prices(tickers: str = ""):
             for yf_t, orig_t in yf_map.items():
                 pure_t = orig_t.split(":")[-1]
                 try:
-                    hist = yf_data.tickers[yf_t].history(period="1d")
+                    hist = yf_data.tickers[yf_t].history(period="2d")
                     if not hist.empty:
                         p_val = float(hist['Close'].iloc[-1])
-                        results[orig_t] = p_val
-                        results[pure_t] = p_val
-                        results[f"KRX:{pure_t}"] = p_val
+                        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else p_val
+                        change = p_val - prev_close
+                        change_pct = round((change / prev_close) * 100, 2) if prev_close > 0 else 0.0
+                        vol = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+                        q_val = {
+                            "price": p_val,
+                            "change": change,
+                            "changePct": change_pct,
+                            "volume": vol
+                        }
                     else:
-                        results[orig_t] = 0
+                        q_val = {"price": 0, "change": 0, "changePct": 0.0, "volume": 0}
+                    quotes[orig_t] = q_val
+                    quotes[pure_t] = q_val
+                    quotes[f"KRX:{pure_t}"] = q_val
                 except Exception:
-                    results[orig_t] = 0
+                    q_val = {"price": 0, "change": 0, "changePct": 0.0, "volume": 0}
+                    quotes[orig_t] = q_val
+                    quotes[pure_t] = q_val
+                    quotes[f"KRX:{pure_t}"] = q_val
         except Exception as e:
-            print(f"yfinance fallback error in realtime-prices: {e}")
+            print(f"yfinance fallback error in quotes: {e}")
 
-    return results
+    return quotes
+
+@app.get("/api/realtime-quotes")
+def api_get_realtime_quotes(tickers: str = ""):
+    """
+    Returns real-time quotes including price, change, changePct (전일대비 등락률), and volume.
+    """
+    return get_realtime_quote_dict(tickers)
+
+@app.get("/api/realtime-prices")
+def api_get_realtime_prices(tickers: str = ""):
+    """
+    Returns real-time prices for requested tickers (comma-separated).
+    Maintains backward compatibility with price-only format while using full quote resolver.
+    """
+    quotes = get_realtime_quote_dict(tickers)
+    return {k: v["price"] for k, v in quotes.items()}
+
 
 # 캐싱용 메모리 변수
 _indices_cache = {"data": None, "timestamp": 0}
@@ -1289,78 +1322,282 @@ def api_stock_news(ticker: str, name: str = "", market: str = "KR"):
 
 
 from pydantic import BaseModel
+import threading as _threading_mod
+
+_sell_all_lock = _threading_mod.Lock()
+_buy_order_lock = _threading_mod.Lock()
+_reserved_close_sell_date: str = ""
+
+
 class SellAllRequest(BaseModel):
     amount: float
 
+
+@app.get("/api/kis/order-status")
+def api_kis_order_status():
+    from datetime import datetime, timedelta
+    from database import can_execute_initial_buy, get_today_buy_total
+    from trading_config import get_trading_config
+
+    today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+    cfg = get_trading_config()
+    can_buy, reason = can_execute_initial_buy(today_str)
+    return {
+        "date": today_str,
+        "already_bought_today": not can_buy,
+        "reason": reason,
+        "today_buy_total": get_today_buy_total(today_str),
+        "reserved_close_sell": (_reserved_close_sell_date == today_str),
+        "max_total_capital": cfg["max_total_capital"],
+        "max_stocks": cfg["max_stocks"],
+        "max_per_stock_capital": cfg["max_per_stock_capital"],
+    }
+
+
 @app.post("/api/kis/sell-all")
-def api_kis_sell_all(buy: float = 0, sell: float = 0):
+def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
     """
-    Realizes the profit/loss and records it to the database.
-    Calculates fees (0.015%) and tax (0.2%).
+    일괄 매도 처리 (단일 스레드 잠금 및 멱등 정산 보장):
+    - mode="close" (기본값): 종가 일괄 매도
+      1) 15:20 이전: 15:20 장마감 동시호가 매도 주문 단 1회 예약 접수
+      2) 15:20 ~ 15:30: 15:20 동시호가 시장가 매도 주문 즉시 전송 후 15:30:30 자동 체결 정산 (단 1회)
+      3) 15:30 이후: 당일 확정 종가 기준으로 즉시 정산 및 원장 기록
+    - mode="market": 장중 즉시 시장가 매도 (수동 비상 매도용)
     """
+    global _reserved_close_sell_date
     try:
-        from database import get_holdings, clear_holdings, add_ledger_record, get_stock
-        from datetime import datetime
+        from database import get_holdings, clear_holdings, add_ledger_record, record_trading_sell_all, add_realized_pnl
+        from trading_config import get_trading_config, calculate_settlement_metrics
+        from datetime import datetime, timedelta
         from kis_instance import kis_client
         import threading
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        
+        import time
+
+        now_kst = datetime.utcnow() + timedelta(hours=9)
+        today_str = now_kst.strftime("%Y-%m-%d")
+        kst_hour = now_kst.hour
+        kst_minute = now_kst.minute
+
         holdings = get_holdings()
         if not holdings:
             return {"success": False, "error": "No holdings"}
-            
-        total_buy = 0.0
-        total_sell = 0.0
-        
-        # Dispatch sell orders asynchronously in background thread so HTTP response is instant
-        if kis_client:
-            def _place_sell_orders_bg(items):
-                for h_item in items:
+
+        def _execute_closing_settlement_now():
+            """15:30 확정 종가를 조회하여 거래원장에 단 1회 손익을 기록하고 잔고를 비움"""
+            global _reserved_close_sell_date
+            with _sell_all_lock:
+                live_holdings = get_holdings()
+                if not live_holdings:
+                    print("[일괄매도정산스킵] 이미 정산 완료되어 보유 잔고가 없습니다.")
+                    return 0.0, 0.0
+
+                cfg = get_trading_config()
+                max_per_stock = float(cfg["max_per_stock_capital"])
+                max_total = float(cfg["max_total_capital"])
+
+                tot_b = 0.0
+                tot_s = 0.0
+                items_to_record = []
+
+                for h in live_holdings:
+                    pure_t = h['ticker'].split(':')[-1]
+                    bp = float(h.get('buyPrice', h.get('buy_price', 0)) or 0)
+                    qty = int(h['qty'] or 0)
+                    if bp > 0:
+                        qty = min(qty, int(max_per_stock // bp))
+                    if qty <= 0:
+                        continue
+
+                    # 1. KIS 확정 종가 조회 (캐시 미사용)
+                    cp = 0
+                    if kis_client and hasattr(kis_client, 'get_closing_price'):
+                        try:
+                            cp = kis_client.get_closing_price(pure_t)
+                        except Exception as err:
+                            print(f"[{pure_t}] get_closing_price error: {err}")
+                            cp = 0
+                    elif kis_client:
+                        try:
+                            cp = kis_client.get_current_price(pure_t, use_cache=False)
+                        except Exception:
+                            cp = 0
+
+                    # 2. 네이버 모바일 금융 fallback (15:30 이후 종가)
+                    if cp <= 0:
+                        try:
+                            from naver_finance_scraper import naver_scraper
+                            detail = naver_scraper.get_current_price_detail(pure_t)
+                            if detail and detail.get('price', 0) > 0:
+                                cp = int(detail['price'])
+                        except Exception:
+                            pass
+
+                    # 3. 공공데이터포털 KRX 일봉 종가 fallback
+                    if cp <= 0:
+                        try:
+                            from public_data_api import get_stock_history
+                            hist = get_stock_history(pure_t, count=5)
+                            if hist and hist[-1].get('close', 0) > 0:
+                                cp = int(hist[-1]['close'])
+                        except Exception:
+                            pass
+
+                    if cp <= 0:
+                        cp = bp  # 최후의 fallback
+
+                    tot_b += qty * bp
+                    tot_s += qty * cp
+                    item_pnl = (cp - bp) * qty
+                    items_to_record.append({
+                        'ticker': pure_t,
+                        'name': h.get('name', pure_t),
+                        'qty': qty,
+                        'buy_price': bp,
+                        'sell_price': cp,
+                        'pnl': item_pnl
+                    })
+
+                if tot_b > max_total and tot_b > 0:
+                    scale = max_total / tot_b
+                    tot_b = round(tot_b * scale, 2)
+                    tot_s = round(tot_s * scale, 2)
+
+                metrics = calculate_settlement_metrics(tot_b, tot_s)
+                fees = metrics["fees"]
+                tax = metrics["tax"]
+                pnl = metrics["net_pnl"]
+                rr = metrics["return_rate"]
+
+                # 거래원장 및 실현손익 확정 기록 (멱등 UPSERT)
+                add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr)
+                record_trading_sell_all(today_str, items_to_record)
+                add_realized_pnl(today_str, pnl)
+                clear_holdings()
+                _reserved_close_sell_date = ""
+                print(f"[일괄매도정산완료] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
+                return pnl, rr
+
+        # -------------------------------------------------------------
+        # Case A: 종가 일괄 매도 (mode == "close")
+        # -------------------------------------------------------------
+        if mode == "close":
+            # 1) 15시 20분 이전인 경우: 15시 20분 동시호가 주문 대기 예약 (당일 중복 예약 스레드 생성 원천 차단)
+            if kst_hour < 15 or (kst_hour == 15 and kst_minute < 20):
+                with _sell_all_lock:
+                    if _reserved_close_sell_date == today_str:
+                        return {
+                            "success": True,
+                            "status": "RESERVED_1520",
+                            "already_reserved": True,
+                            "message": "이미 금일 15시 20분 장마감 동시호가 일괄매도가 예약되어 있습니다."
+                        }
+                    _reserved_close_sell_date = today_str
+
+                def _schedule_close_sell_flow():
+                    now_cur = datetime.utcnow() + timedelta(hours=9)
+                    target_1520 = now_cur.replace(hour=15, minute=20, second=0, microsecond=0)
+                    wait_sec = (target_1520 - now_cur).total_seconds()
+                    if wait_sec > 0:
+                        print(f"[종가매도예약] 15:20 장마감 동시호가까지 {wait_sec:.0f}초 대기 후 매도 주문 전송...")
+                        time.sleep(wait_sec)
+
+                    cur_holdings = get_holdings()
+                    if kis_client and cur_holdings:
+                        for h_item in cur_holdings:
+                            try:
+                                clean_t = h_item['ticker'].split(':')[-1]
+                                kis_client.order_sell(clean_t, h_item['qty'], 0)
+                                time.sleep(0.12)
+                            except Exception as o_err:
+                                print(f"[종가매도예약주문오류] {h_item['ticker']}: {o_err}")
+
+                    now_cur2 = datetime.utcnow() + timedelta(hours=9)
+                    target_1530 = now_cur2.replace(hour=15, minute=30, second=30, microsecond=0)
+                    wait_sec2 = (target_1530 - now_cur2).total_seconds()
+                    if wait_sec2 > 0:
+                        print(f"[종가매도예약] 15:30:30 확정 종가 형성까지 {wait_sec2:.0f}초 대기 후 정산...")
+                        time.sleep(wait_sec2)
+
+                    _execute_closing_settlement_now()
+
+                threading.Thread(target=_schedule_close_sell_flow, daemon=True).start()
+                return {
+                    "success": True,
+                    "status": "RESERVED_1520",
+                    "message": "15시 20분 장마감 동시호가에 매도주문이 예약되었습니다. 15시 30분을 기준으로 최종 종가에 체결 정산됩니다."
+                }
+
+            # 2) 15시 20분 ~ 15시 30분 사이인 경우: 지금 즉시 동시호가 매도 주문 전송 후 15:30:30에 정산 (단 1회)
+            elif kst_hour == 15 and (20 <= kst_minute < 30):
+                with _sell_all_lock:
+                    if _reserved_close_sell_date == today_str:
+                        return {
+                            "success": True,
+                            "status": "PENDING_CLOSE_1530",
+                            "already_reserved": True,
+                            "message": "이미 15시 20분 동시호가 일괄매도 정산이 대기 중입니다."
+                        }
+                    _reserved_close_sell_date = today_str
+
+                if kis_client:
+                    for h_item in holdings:
+                        try:
+                            clean_t = h_item['ticker'].split(':')[-1]
+                            kis_client.order_sell(clean_t, h_item['qty'], 0)
+                            time.sleep(0.12)
+                        except Exception as o_err:
+                            print(f"[동시호가매도주문오류] {h_item['ticker']}: {o_err}")
+
+                def _wait_and_settle():
+                    now_cur = datetime.utcnow() + timedelta(hours=9)
+                    target_1530 = now_cur.replace(hour=15, minute=30, second=30, microsecond=0)
+                    wait_sec = (target_1530 - now_cur).total_seconds()
+                    if wait_sec > 0:
+                        print(f"[동시호가정산대기] 15:30:30까지 {wait_sec:.0f}초 대기 후 확정 종가 정산 실행...")
+                        time.sleep(wait_sec)
+                    _execute_closing_settlement_now()
+
+                threading.Thread(target=_wait_and_settle, daemon=True).start()
+                return {
+                    "success": True,
+                    "status": "PENDING_CLOSE_1530",
+                    "message": "15시 20분 동시호가 시장가 매도 주문이 정상 접수되었습니다. 15시 30분 장마감 후 최종 종가로 자동 정산됩니다."
+                }
+
+            # 3) 15시 30분 이후인 경우: 이미 장이 마감되었으므로 15:30 확정 종가로 즉시 정산
+            else:
+                pnl, rr = _execute_closing_settlement_now()
+                return {
+                    "success": True,
+                    "status": "COMPLETED",
+                    "recorded_date": today_str,
+                    "net_pnl": pnl,
+                    "return_rate": rr,
+                    "message": "15시 30분 최종 종가 기준으로 일괄 매도 정산이 완료되었습니다."
+                }
+
+        # -------------------------------------------------------------
+        # Case B: 장중 즉시 시장가 매도 (mode == "market")
+        # -------------------------------------------------------------
+        else:
+            if kis_client:
+                for h_item in holdings:
                     try:
                         clean_t = h_item['ticker'].split(':')[-1]
                         kis_client.order_sell(clean_t, h_item['qty'], 0)
-                    except Exception as order_err:
-                        print(f"Background sell order skip/err for {h_item['ticker']}: {order_err}")
+                    except Exception as o_err:
+                        print(f"[즉시매도오류] {h_item['ticker']}: {o_err}")
 
-            threading.Thread(target=_place_sell_orders_bg, args=(list(holdings),), daemon=True).start()
+            pnl, rr = _execute_closing_settlement_now()
+            return {
+                "success": True,
+                "status": "COMPLETED",
+                "recorded_date": today_str,
+                "net_pnl": pnl,
+                "return_rate": rr,
+                "message": "장중 즉시 시장가로 매도 처리가 완료되었습니다."
+            }
 
-        for h in holdings:
-            pure_t = h['ticker'].split(':')[-1]
-            current_price = 0
-            if kis_client:
-                try:
-                    current_price = kis_client.get_current_price(pure_t)
-                except Exception:
-                    current_price = 0
-                    
-            if current_price == 0:
-                try:
-                    s_info = get_stock(pure_t)
-                    if s_info and s_info.get('price'):
-                        current_price = float(s_info['price'])
-                except Exception:
-                    pass
-            
-            if current_price == 0:
-                current_price = h.get('buyPrice', h.get('buy_price', 0))
-                
-            bp = h.get('buyPrice', h.get('buy_price', 0))
-            total_buy += h['qty'] * bp
-            total_sell += h['qty'] * current_price
-            
-        if buy > 0 and sell > 0:
-            total_buy = buy
-            total_sell = sell
-            
-        fees = (total_buy + total_sell) * 0.00015
-        tax = total_sell * 0.0020
-        net_pnl = total_sell - total_buy - fees - tax
-        return_rate = (net_pnl / total_buy) * 100 if total_buy > 0 else 0
-        
-        add_ledger_record(today_str, total_buy, total_sell, fees, tax, net_pnl, return_rate)
-        clear_holdings()
-        
-        return {"success": True, "recorded_date": today_str, "net_pnl": net_pnl}
     except Exception as e:
         print(f"Sell-all error: {e}")
         return {"success": False, "error": str(e)}
@@ -1737,18 +1974,23 @@ def get_kis_price(ticker: str):
     return {"ticker": pure_ticker if is_korean_stock(ticker) else ticker, "price": price}
 
 @app.post("/api/kis/order/{ticker}")
-def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = ""):
-    # --- 가상 모의투자 (Paper Trading) 및 KIS 연동 로직 ---
+def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = "", batch_id: str = ""):
+    # --- 가상 모의투자 (Paper Trading) 및 KIS 연동 로직 (최초 매수 외 추가매수 차단 + 총 1억/종목당 500만원 한도 엄수) ---
+    from datetime import datetime, timedelta
+    from database import update_holding, get_stock, can_execute_initial_buy, get_today_buy_total, record_trading_buy, record_trading_sell_all
+    from trading_config import get_trading_config
+    from kis_instance import kis_client
+
     pure_ticker = to_pure_ticker(ticker)
     is_kr = is_korean_stock(ticker)
     final_ticker = pure_ticker if is_kr else ticker
+    today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
 
-    from database import update_holding, get_stock
-    adj_qty = qty if type == "buy" else -qty
-    
+    if qty <= 0:
+        return {"ticker": final_ticker, "success": False, "error": "주문 수량은 1주 이상이어야 합니다."}
+
     # 실시간 최신 시장가 우선 조회 (어제 가격이나 과거 캐시 매수 방지)
     live_price = 0
-    from kis_instance import kis_client
     if kis_client:
         try:
             live_price = kis_client.get_current_price(pure_ticker)
@@ -1764,37 +2006,80 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
         except Exception:
             live_price = 0
 
-    # 실시간 시장가가 조회되면 실시간 현재가로 확정 체결, 실패 시 클라이언트 제시가 사용
     actual_price = live_price if live_price > 0 else price
     if actual_price <= 0:
         stock = get_stock(pure_ticker) or get_stock(ticker)
         if stock and stock.get("price"):
             actual_price = stock["price"]
         else:
-            actual_price = 1 # fallback
+            return {"ticker": final_ticker, "success": False, "error": "유효한 현재가를 확인할 수 없습니다."}
 
-    # KIS API 계좌 실주문 시도 (모의/실전 연동되어 있을 경우)
-    real_api_success = False
-    if kis_client:
-        try:
-            if type == "buy":
-                # 시장가(0) 또는 실시간가로 주문
-                real_api_success = kis_client.order_buy(pure_ticker, qty, int(actual_price))
-            elif type == "sell":
+    if type == "buy":
+        cfg = get_trading_config()
+        max_total = float(cfg["max_total_capital"])
+        max_per_stock = float(cfg["max_per_stock_capital"])
+
+        with _buy_order_lock:
+            allowed, reason = can_execute_initial_buy(today_str, pure_ticker, batch_id=batch_id)
+            if not allowed:
+                return {"ticker": final_ticker, "success": False, "error": reason}
+
+            # 실시간 체결단가 기준으로 종목당 한도(500만원) 및 당일 총 한도(1억원) 이내로 수량 재산정
+            max_qty_stock = int(max_per_stock // actual_price)
+            remaining_budget = max(0.0, max_total - get_today_buy_total(today_str))
+            max_qty_total = int(remaining_budget // actual_price)
+            capped_qty = min(qty, max_qty_stock, max_qty_total)
+
+            if capped_qty <= 0:
+                return {
+                    "ticker": final_ticker,
+                    "success": False,
+                    "error": f"매수 한도(총 {int(max_total):,}원 / 종목당 {int(max_per_stock):,}원) 초과로 주문할 수 없습니다.",
+                }
+
+            real_api_success = False
+            if kis_client:
+                try:
+                    real_api_success = kis_client.order_buy(pure_ticker, capped_qty, int(actual_price))
+                except Exception as e:
+                    print(f"[KIS Order API Notice] Live buy call: {e}")
+
+            update_holding(final_ticker, name or final_ticker, capped_qty, actual_price)
+            record_trading_buy(today_str, pure_ticker, name or pure_ticker, actual_price, capped_qty, batch_id=batch_id)
+
+            return {
+                "ticker": final_ticker,
+                "success": True,
+                "real_api_success": real_api_success,
+                "type": type,
+                "executed_price": actual_price,
+                "executed_qty": capped_qty,
+            }
+    else:
+        real_api_success = False
+        if kis_client:
+            try:
                 real_api_success = kis_client.order_sell(pure_ticker, qty, int(actual_price))
-        except Exception as e:
-            print(f"[KIS Order API Notice] Live order call: {e}")
+            except Exception as e:
+                print(f"[KIS Order API Notice] Live sell call: {e}")
 
-    # 가상 모의투자 원장/잔고 기록 업데이트 (단가: 최신 실시간 현재가)
-    update_holding(final_ticker, name or final_ticker, adj_qty, actual_price)
-        
-    return {
-        "ticker": final_ticker, 
-        "success": True, 
-        "real_api_success": real_api_success, 
-        "type": type,
-        "executed_price": actual_price
-    }
+        update_holding(final_ticker, name or final_ticker, -qty, actual_price)
+        record_trading_sell_all(today_str, [{
+            'ticker': pure_ticker,
+            'name': name or pure_ticker,
+            'qty': qty,
+            'buy_price': actual_price,
+            'sell_price': actual_price,
+            'pnl': 0.0
+        }])
+        return {
+            "ticker": final_ticker,
+            "success": True,
+            "real_api_success": real_api_success,
+            "type": type,
+            "executed_price": actual_price,
+            "executed_qty": qty,
+        }
 
 @with_retry(max_retries=3, initial_delay=1.0)
 def _fallback_chart(ticker: str, period: str, is_overseas: bool, excd: str = ""):
@@ -1973,77 +2258,64 @@ def api_get_fundamentals(ticker: str):
             print("yfinance info fetch error/timeout:", e)
         
         # Generate target price history for chart markers
-        target_history = []
+        raw_targets = []
         if is_krx:
             code = pure_ticker
             
-            # 1. 네이버 WiseReport 실시간 목표가 시계열(최신 2026년 10월까지) 수집
+            # 1. 개별 증권사 리포트 목표가 (실시간 DB)
+            try:
+                from routers.reports import get_analyst_reports
+                recent_reports = get_analyst_reports(code, days=365).get("items", [])
+                for rep in recent_reports:
+                    tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
+                    if tp_str.isdigit() and int(tp_str) > 0:
+                        broker_name = rep.get('broker', '').strip() or '증권사'
+                        raw_targets.append({
+                            "time": rep["date"],
+                            "broker": broker_name,
+                            "text": f"{broker_name} 목표가: {int(tp_str):,}",
+                            "value": float(tp_str)
+                        })
+            except Exception as e:
+                print(f"Error fetching analyst reports for {code}: {e}")
+
+            # 2. 네이버 WiseReport 컨센서스 목표가 시계열
             try:
                 from ingestion.scrapers.naver_scraper import get_naver_target_history
                 nv_history = get_naver_target_history(code)
                 if nv_history:
                     for item in nv_history:
-                        target_history.append(item)
+                        if item.get("value", 0) > 0:
+                            raw_targets.append({
+                                "time": item["time"],
+                                "broker": "WiseReport 컨센서스",
+                                "text": item.get("text", f"목표가: {int(item['value']):,}"),
+                                "value": float(item["value"])
+                            })
             except Exception as e:
                 print(f"Error fetching Naver target history for {code}: {e}")
 
-            # 2. 개별 증권사 리포트 목표가
-            try:
-                from routers.reports import get_analyst_reports
-                recent_reports = get_analyst_reports(code, days=180).get("items", [])
-                for rep in recent_reports:
-                    tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
-                    if tp_str.isdigit() and int(tp_str) > 0:
-                        target_history.append({
-                            "time": rep["date"],
-                            "position": "aboveBar",
-                            "color": "rgba(255, 152, 0, 0.4)",
-                            "shape": "circle",
-                            "text": f"{rep.get('broker', '증권사')} 목표가: {int(tp_str):,}",
-                            "value": float(tp_str)
-                        })
-            except Exception as e:
-                pass
-                    
-            # 3. DB 저장된 목표가 이력
+            # 3. DB 저장된 목표가 이력 (7월 13일 고정 더미 배제)
             try:
                 from database import get_analyst_target_history
                 db_history = get_analyst_target_history(code)
                 for item in db_history:
                     val = float(item.get('target_price', 0))
-                    target_history.append({
-                        "time": item["time"],
-                        "position": "aboveBar",
-                        "color": "#ff9800",
-                        "shape": "circle",
-                        "text": item["text"] if item.get("text") else f"목표가: {int(val):,}",
-                        "value": val
-                    })
+                    # 7월 13일 더미나 0원 배제
+                    if val > 0 and not (item.get("time") == "2026-07-13" and "저장된 목표가" in str(item.get("text", ""))):
+                        raw_targets.append({
+                            "time": item["time"],
+                            "broker": "증권사",
+                            "text": item["text"] if item.get("text") else f"목표가: {int(val):,}",
+                            "value": val
+                        })
             except Exception as e:
                 pass
-            
-            # 중복 제거 (time, text 기준)
-            seen_entries = set()
-            unique_targets = []
-            for item in target_history:
-                key = (item.get("time"), item.get("text"))
-                if key not in seen_entries:
-                    seen_entries.add(key)
-                    unique_targets.append(item)
-            target_history = unique_targets
-
-            if target_history:
-                target_history = sorted(target_history, key=lambda x: x["time"])
-                # 최신 목표가로 targetMean 갱신
-                latest_with_val = [t for t in target_history if t.get("value", 0) > 0]
-                if latest_with_val:
-                    targetMean = latest_with_val[-1]["value"]
         else:
             try:
                 from utils.yf_util import get_yf_ticker
                 upgrades = get_yf_ticker(yf_ticker).upgrades_downgrades
                 if upgrades is not None and not upgrades.empty:
-                    # Take the last 50 upgrades/downgrades
                     recent = upgrades.head(50)
                     for date, row in recent.iterrows():
                         firm = row.get('Firm', 'Analyst')
@@ -2054,39 +2326,62 @@ def api_get_fundamentals(ticker: str):
                         text_str = f"{firm} {action} {to_grade}"
                         if pd.notna(pt) and pt > 0:
                             text_str += f" (목표가: {pt})"
-                        
-                        dt_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split()[0]
-                        target_history.append({
-                            "time": dt_str,
-                            "position": "aboveBar",
-                            "color": "#ff9800",
-                            "shape": "circle",
-                            "text": text_str,
-                            "value": float(pt) if pd.notna(pt) else 0
-                        })
+                            dt_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split()[0]
+                            raw_targets.append({
+                                "time": dt_str,
+                                "broker": str(firm),
+                                "text": text_str,
+                                "value": float(pt)
+                            })
             except Exception as e:
                 print("Error fetching US analyst targets:", e)
 
-        # AI Targets (Saved by user)
-        from database import get_all_ai_targets
-        ai_targets_db = get_all_ai_targets(ticker)
-        
-        if ai_targets_db:
-            # Map DB format to chart marker format
-            for db_t in ai_targets_db:
-                # db_t is {'time': '2026-07-13', 'value': 559}
-                target_history.append({
-                    "time": db_t["time"],
-                    "position": "aboveBar",
-                    "color": "#26a69a",
-                    "shape": "arrowDown",
-                    "text": f"저장된 목표가: {int(db_t['value']):,}",
-                    "value": db_t["value"]
-                })
-        
-        # Sort combined history by date ascending (oldest first)
+        # 4. 동일 날짜 목표가 그룹화 및 '당일 평균값' 산출 (7월 13일 고정 더미 완전 배제)
+        from collections import defaultdict
+        daily_groups = defaultdict(list)
+        for t in raw_targets:
+            # 7월 13일자 과거 더미 및 0 이하 값 배제
+            if t.get("value", 0) <= 0:
+                continue
+            if t.get("time") == "2026-07-13" and ("저장된 목표가" in t.get("text", "") or t.get("broker") == "저장"):
+                continue
+            daily_groups[t["time"]].append(t)
+
+        target_history = []
+        for date_str in sorted(daily_groups.keys()):
+            items = daily_groups[date_str]
+            vals = [item["value"] for item in items if item["value"] > 0]
+            if not vals:
+                continue
+            
+            # 당일 평균값 산출
+            avg_val = round(sum(vals) / len(vals), 0 if is_krx else 2)
+            
+            # 설명 텍스트 구성
+            if len(items) == 1:
+                summary_text = items[0]["text"]
+            else:
+                brokers_str = ", ".join([f"{it.get('broker', '증권사')} {int(it['value']):,}" if is_krx else f"{it.get('broker', '')} ${it['value']}" for it in items[:4]])
+                if len(items) > 4:
+                    brokers_str += f" 외 {len(items)-4}곳"
+                summary_text = f"당일 평균: {int(avg_val):,}원 ({len(items)}개사: {brokers_str})" if is_krx else f"Avg: ${avg_val} ({len(items)} firms: {brokers_str})"
+
+            target_history.append({
+                "time": date_str,
+                "position": "aboveBar",
+                "color": "#ff9800" if len(items) == 1 else "#e65100",
+                "shape": "circle",
+                "text": summary_text,
+                "value": float(avg_val),
+                "daily_mean": float(avg_val),
+                "count": len(items),
+                "items": [{"broker": it.get("broker", ""), "value": it["value"]} for it in items]
+            })
+
+        # 최신 목표가로 targetMean 갱신
         if target_history:
             target_history = sorted(target_history, key=lambda x: x["time"])
+            targetMean = target_history[-1]["value"]
             
         # Yearly EPS trend (try to get financials)
         eps_trend = []

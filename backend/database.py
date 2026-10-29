@@ -197,9 +197,16 @@ def init_db():
             sell_price REAL,
             qty INTEGER,
             pnl REAL,
-            status TEXT
+            status TEXT,
+            batch_id TEXT,
+            created_at TEXT
         )
     ''')
+    for extra_col in ["batch_id TEXT", "created_at TEXT"]:
+        try:
+            c.execute(f"ALTER TABLE trading_ledger ADD COLUMN {extra_col}")
+        except Exception:
+            pass
     
     conn.commit()
     conn.close()
@@ -581,17 +588,26 @@ def get_dart_screener_results(conditions: dict):
 
     return results
 
+def _ensure_trading_ledger_columns(c):
+    for extra_col in ["batch_id TEXT", "created_at TEXT"]:
+        try:
+            c.execute(f"ALTER TABLE trading_ledger ADD COLUMN {extra_col}")
+        except Exception:
+            pass
+
+
 def add_realized_pnl(date: str, amount: float):
+    """일자별 실현손익을 멱등성 있게 확정 기록(덮어쓰기)하여 중복 합산을 방지합니다."""
     conn = get_db_connection()
     c = conn.cursor()
-    # Check if date exists
-    c.execute('SELECT realized_pnl FROM pnl_history WHERE date = ?', (date,))
-    row = c.fetchone()
-    if row:
-        new_amount = row['realized_pnl'] + amount
-        c.execute('UPDATE pnl_history SET realized_pnl = ? WHERE date = ?', (new_amount, date))
-    else:
-        c.execute('INSERT INTO pnl_history (date, realized_pnl) VALUES (?, ?)', (date, amount))
+    c.execute(
+        '''
+        INSERT INTO pnl_history (date, realized_pnl)
+        VALUES (?, ?)
+        ON CONFLICT(date) DO UPDATE SET realized_pnl = excluded.realized_pnl
+        ''',
+        (date, amount),
+    )
     conn.commit()
     conn.close()
 
@@ -603,24 +619,111 @@ def get_pnl_history():
     conn.close()
     return [dict(row) for row in rows]
 
+def can_execute_initial_buy(trade_date: str, ticker: str = "", batch_id: str = "") -> tuple:
+    """
+    당일 최초 매수주문만 허용하고 이후 추가 매수를 원천 차단합니다.
+    반환값: (허용여부: bool, 사유: str)
+    """
+    from datetime import datetime, timedelta
+    from trading_config import get_trading_config
+
+    cfg = get_trading_config()
+    max_stocks = int(cfg["max_stocks"])
+    window_sec = int(cfg["initial_buy_window_sec"])
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
+
+    # 1) 이미 당일 정산 완료된 기록이 있으면 추가 매수 불가
+    c.execute("SELECT 1 FROM trade_ledger WHERE date = ?", (trade_date,))
+    if c.fetchone():
+        conn.close()
+        return False, "금일 매매 정산이 이미 완료되어 추가 매수가 불가합니다."
+
+    c.execute("SELECT id, ticker, status, batch_id, created_at FROM trading_ledger WHERE trade_date = ? ORDER BY id ASC", (trade_date,))
+    ledger_rows = c.fetchall()
+
+    if any(r["status"] == "SELL" for r in ledger_rows):
+        conn.close()
+        return False, "금일 매도 정산이 이미 진행되어 추가 매수가 불가합니다."
+
+    # 2) 동일 종목 중복/추가 매수 차단
+    if ticker:
+        pure_t = ticker.split(":")[-1]
+        c.execute("SELECT 1 FROM holdings WHERE ticker = ? OR ticker = ?", (ticker, pure_t))
+        if c.fetchone() or any((r["ticker"] or "").split(":")[-1] == pure_t for r in ledger_rows):
+            conn.close()
+            return False, f"{pure_t} 종목은 금일 이미 매수되어 추가 매수가 불가합니다."
+
+    # 3) 종목 수 한도 검사 (기본 20종목)
+    c.execute("SELECT COUNT(*) AS cnt FROM holdings")
+    h_cnt = int(c.fetchone()["cnt"] or 0)
+    distinct_tickers = set((r["ticker"] or "").split(":")[-1] for r in ledger_rows if r["ticker"])
+    if h_cnt >= max_stocks or len(distinct_tickers) >= max_stocks:
+        conn.close()
+        return False, f"최대 매수 종목 수({max_stocks}종목) 한도에 도달하여 추가 매수가 불가합니다."
+
+    # 4) 당일 최초 매수 세션 여부 검증
+    if ledger_rows or h_cnt > 0:
+        if not batch_id:
+            conn.close()
+            return False, "금일 최초 매수주문 이후 추가 매수는 허용되지 않습니다."
+
+        existing_batches = [r["batch_id"] for r in ledger_rows if r["batch_id"]]
+        if not existing_batches or batch_id not in existing_batches:
+            conn.close()
+            return False, "금일 최초 매수주문 이후 추가 매수는 허용되지 않습니다."
+
+        first_ts_str = next((r["created_at"] for r in ledger_rows if r["created_at"]), None)
+        if first_ts_str:
+            try:
+                first_dt = datetime.fromisoformat(first_ts_str)
+                now_kst = datetime.utcnow() + timedelta(hours=9)
+                if (now_kst - first_dt).total_seconds() > window_sec:
+                    conn.close()
+                    return False, "금일 최초 매수주문 가능 시간이 경과하여 추가 매수는 허용되지 않습니다."
+            except Exception:
+                pass
+
+    conn.close()
+    return True, "OK"
+
+def get_today_buy_total(trade_date: str) -> float:
+    """당일 누적 매수금액을 반환합니다."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(SUM(buy_price * qty), 0) AS total FROM holdings")
+    h_total = float(c.fetchone()["total"] or 0.0)
+    c.execute("SELECT COALESCE(SUM(buy_price * qty), 0) AS total FROM trading_ledger WHERE trade_date = ?", (trade_date,))
+    l_total = float(c.fetchone()["total"] or 0.0)
+    conn.close()
+    return max(h_total, l_total)
+
 def update_holding(ticker: str, name: str, qty: int, price: float):
+    from trading_config import get_trading_config
+    cfg = get_trading_config()
+    max_per_stock = float(cfg["max_per_stock_capital"])
+
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT * FROM holdings WHERE ticker = ?', (ticker,))
     row = c.fetchone()
     if row:
+        if qty > 0:
+            # 최초 매수 이후 동일 종목 추가 매수(수량 누적) 원천 차단
+            conn.close()
+            return
         new_qty = row['qty'] + qty
         if new_qty <= 0:
             c.execute('DELETE FROM holdings WHERE ticker = ?', (ticker,))
         else:
-            if qty > 0:
-                new_price = ((row['buy_price'] * row['qty']) + (price * qty)) / new_qty
-            else:
-                new_price = row['buy_price']
-            c.execute('UPDATE holdings SET qty = ?, buy_price = ? WHERE ticker = ?', (new_qty, new_price, ticker))
+            c.execute('UPDATE holdings SET qty = ?, buy_price = ? WHERE ticker = ?', (new_qty, row['buy_price'], ticker))
     else:
-        if qty > 0:
-            c.execute('INSERT INTO holdings (ticker, name, buy_price, qty) VALUES (?, ?, ?, ?)', (ticker, name, price, qty))
+        if qty > 0 and price > 0:
+            capped_qty = min(qty, int(max_per_stock // price))
+            if capped_qty > 0:
+                c.execute('INSERT INTO holdings (ticker, name, buy_price, qty) VALUES (?, ?, ?, ?)', (ticker, name, price, capped_qty))
     conn.commit()
     conn.close()
 
@@ -640,24 +743,108 @@ def clear_holdings():
     conn.close()
 
 def add_ledger_record(date: str, total_buy: float, total_sell: float, fees: float, tax: float, net_pnl: float, return_rate: float):
+    """
+    당일 일괄 매도 정산 결과를 trade_ledger에 멱등성 있게 덮어쓰기(UPSERT)합니다.
+    기존에 중복 스레드가 합산(+)하면서 1억 원 한도를 초과하던 문제를 원천 방지합니다.
+    """
+    from trading_config import get_trading_config, calculate_settlement_metrics
+    cfg = get_trading_config()
+    max_total = float(cfg["max_total_capital"])
+
+    if total_buy > max_total and total_buy > 0:
+        scale = max_total / total_buy
+        total_buy = round(total_buy * scale, 2)
+        total_sell = round(total_sell * scale, 2)
+        metrics = calculate_settlement_metrics(total_buy, total_sell)
+        fees = metrics["fees"]
+        tax = metrics["tax"]
+        net_pnl = metrics["net_pnl"]
+        return_rate = metrics["return_rate"]
+
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT * FROM trade_ledger WHERE date = ?', (date,))
-    row = c.fetchone()
-    if row:
-        new_buy = row['total_buy'] + total_buy
-        new_sell = row['total_sell'] + total_sell
-        new_fees = row['fees'] + fees
-        new_tax = row['tax'] + tax
-        new_pnl = row['net_pnl'] + net_pnl
-        new_rr = (new_pnl / new_buy) * 100 if new_buy > 0 else 0
-        c.execute('UPDATE trade_ledger SET total_buy=?, total_sell=?, fees=?, tax=?, net_pnl=?, return_rate=? WHERE date=?',
-                  (new_buy, new_sell, new_fees, new_tax, new_pnl, new_rr, date))
-    else:
-        c.execute('INSERT INTO trade_ledger (date, total_buy, total_sell, fees, tax, net_pnl, return_rate) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  (date, total_buy, total_sell, fees, tax, net_pnl, return_rate))
+    c.execute(
+        '''
+        INSERT INTO trade_ledger (date, total_buy, total_sell, fees, tax, net_pnl, return_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            total_buy = excluded.total_buy,
+            total_sell = excluded.total_sell,
+            fees = excluded.fees,
+            tax = excluded.tax,
+            net_pnl = excluded.net_pnl,
+            return_rate = excluded.return_rate
+        ''',
+        (date, total_buy, total_sell, fees, tax, net_pnl, return_rate),
+    )
     conn.commit()
     conn.close()
+
+def record_trading_buy(trade_date: str, ticker: str, name: str, buy_price: float, qty: int, batch_id: str = ""):
+    """
+    당일 최초 매수 주문 체결 내역을 상세 거래원장(trading_ledger)에 단일 기록합니다. (추가 매수 누적 금지)
+    """
+    from datetime import datetime, timedelta
+    from trading_config import get_trading_config
+
+    cfg = get_trading_config()
+    max_per_stock = float(cfg["max_per_stock_capital"])
+    if buy_price > 0:
+        qty = min(qty, int(max_per_stock // buy_price))
+    if qty <= 0:
+        return
+
+    now_kst_iso = (datetime.utcnow() + timedelta(hours=9)).isoformat(timespec="seconds")
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
+    c.execute("SELECT id FROM trading_ledger WHERE trade_date = ? AND ticker = ?", (trade_date, ticker))
+    row = c.fetchone()
+    if not row:
+        c.execute('''
+            INSERT INTO trading_ledger (trade_date, ticker, name, buy_price, qty, status, batch_id, created_at)
+            VALUES (?, ?, ?, ?, ?, 'BUY', ?, ?)
+        ''', (trade_date, ticker, name, buy_price, qty, batch_id or None, now_kst_iso))
+    conn.commit()
+    conn.close()
+
+def record_trading_sell_all(trade_date: str, sell_items: list):
+    """
+    일괄 매도시 각 종목의 매도가, 실현손익 및 SELL 상태를 trading_ledger에 멱등성 있게 확정 기록합니다.
+    sell_items: list of dict(ticker, name, qty, buy_price, sell_price, pnl)
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
+    for item in sell_items:
+        t = item['ticker']
+        sp = item['sell_price']
+        pnl = item['pnl']
+        bp = item['buy_price']
+        qty = item['qty']
+        name = item.get('name', t)
+
+        c.execute("SELECT id FROM trading_ledger WHERE trade_date = ? AND ticker = ? ORDER BY id ASC", (trade_date, t))
+        rows = c.fetchall()
+        if rows:
+            keep_id = rows[0]['id']
+            c.execute(
+                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL' WHERE id = ?",
+                (name, bp, sp, qty, pnl, keep_id),
+            )
+            if len(rows) > 1:
+                dup_ids = [r['id'] for r in rows[1:]]
+                placeholders = ",".join("?" for _ in dup_ids)
+                c.execute(f"DELETE FROM trading_ledger WHERE id IN ({placeholders})", dup_ids)
+        else:
+            c.execute('''
+                INSERT INTO trading_ledger (trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'SELL')
+            ''', (trade_date, t, name, bp, sp, qty, pnl))
+    conn.commit()
+    conn.close()
+
 
 def get_ledger_history():
     conn = get_db_connection()

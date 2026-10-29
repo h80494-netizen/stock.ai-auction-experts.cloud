@@ -2,13 +2,18 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 export default function OrderWindow({ stocks }: { stocks: any[] }) {
-  // Default investment amount: 100,000,000 won (1억 원)
+  const MAX_TOTAL_CAPITAL = 100000000;
+
+  // Default investment amount: 100,000,000 won (최대 1억 원 한도 고정)
   const [totalAmount, setTotalAmount] = useState<number>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('orderTotalAmount');
-      if (saved) return Number(saved);
+      if (saved) {
+        const parsed = Number(saved);
+        if (!isNaN(parsed) && parsed > 0) return Math.min(MAX_TOTAL_CAPITAL, parsed);
+      }
     }
-    return 100000000;
+    return MAX_TOTAL_CAPITAL;
   });
   
   // 종목당 한도는 20개 종목 기준 1/N 배정 (예: 1억 / 20 = 500만원 고정)
@@ -57,10 +62,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return Math.round((num + Number.EPSILON) * 100) / 100;
   }
 
-  // 9시 5분 스냅샷 관리 (고정된 리스트)
+  // 9시 5분 스냅샷 관리 (고정된 리스트, KST 기준)
   const [frozenStocks, setFrozenStocks] = useState<any[]>(() => {
     if (typeof window !== 'undefined') {
-      const today = new Date().toISOString().split('T')[0];
+      const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().split('T')[0];
       const savedDate = localStorage.getItem('frozen_date_0905');
       if (savedDate === today) {
         const savedData = localStorage.getItem('frozen_data_0905');
@@ -72,8 +77,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return [];
   });
 
-  // 강제 활성화 (테스트용)
-  const [forceEnable, setForceEnable] = useState(true);
+  // 09:05 이전 종목 조회 허용 토글 (추가 매수 우회 불가)
+  const [forceEnable, setForceEnable] = useState(false);
+  const [reservedSellToday, setReservedSellToday] = useState(false);
+  const [serverBoughtToday, setServerBoughtToday] = useState(false);
 
   // 백엔드 전종목 외국계 순매수 상위 API 호출 함수
   const fetchForeignStocks = useCallback(async (curThreshold: number, force: boolean = false) => {
@@ -190,8 +197,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   }[]>([]);
 
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [liveQuotes, setLiveQuotes] = useState<Record<string, { price: number; change: number; changePct: number; volume: number }>>({});
   
-  // Fetch real-time prices
+  // Fetch real-time prices & quotes (전일대비 등락률 포함)
   useEffect(() => {
     const fetchLivePrices = async () => {
       try {
@@ -201,17 +209,22 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         if (allTickersSet.size === 0) return;
 
         const tickersStr = Array.from(allTickersSet).join(',');
-        const res = await fetch(`/api/realtime-prices?tickers=${tickersStr}`);
+        const res = await fetch(`/api/realtime-quotes?tickers=${tickersStr}`);
         if (!res.ok) throw new Error(res.statusText || 'API Error');
         const data = await res.json();
         if (data && Object.keys(data).length > 0) {
-          setLivePrices(prev => ({ ...prev, ...data }));
+          setLiveQuotes(prev => ({ ...prev, ...data }));
+          const priceMap: Record<string, number> = {};
+          Object.keys(data).forEach(k => {
+            if (data[k]?.price) priceMap[k] = data[k].price;
+          });
+          setLivePrices(prev => ({ ...prev, ...priceMap }));
         }
       } catch (e) { console.error(e); }
     };
 
     fetchLivePrices();
-    const interval = setInterval(fetchLivePrices, 5000);
+    const interval = setInterval(fetchLivePrices, 4000);
     return () => clearInterval(interval);
   }, [orderStocks, holdings]);
 
@@ -252,6 +265,15 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     } catch (e) { console.error(e); }
 
     try {
+      const resStatus = await fetch('/api/kis/order-status');
+      if (resStatus.ok) {
+        const statusData = await resStatus.json();
+        setReservedSellToday(Boolean(statusData.reserved_close_sell));
+        setServerBoughtToday(Boolean(statusData.already_bought_today));
+      }
+    } catch (e) { console.error(e); }
+
+    try {
       const resChart = await fetch('/api/ledger-chart-data');
       if (resChart.ok) {
         const dataChart = await resChart.json();
@@ -270,8 +292,13 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return () => clearInterval(interval);
   }, []);
 
-  const todayStr = new Date().toISOString().split('T')[0];
-  const alreadyBoughtToday = pnlHistory.some(h => h.date === todayStr) || holdings.length > 0;
+  // KST(한국 표준시) 기준 오늘 날짜 및 최초 매수 완료 여부 판별 (최초 매수 후 추가 매수 엄격 제한)
+  const todayStr = new Date(Date.now() + 9 * 3600 * 1000).toISOString().split('T')[0];
+  const alreadyBoughtToday =
+    serverBoughtToday ||
+    pnlHistory.some(h => h.date === todayStr) ||
+    detailedLedger.some(r => r.trade_date === todayStr) ||
+    holdings.length > 0;
 
   // 매수 완료된 종목의 매입단가, 매수수량, 주문금액, 체결시간 스냅샷 관리
   const [buySnapshot, setBuySnapshot] = useState<Record<string, {price: number, qty: number, orderTotal: number, time?: string}>>({});
@@ -336,12 +363,17 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
 
   const handleBuyAll = async () => {
     if (orderStocks.length === 0) return;
-    if (!window.confirm(`총 ${orderStocks.length}종목에 대해 각각 최대 ${amountPerStock.toLocaleString()}원씩 일괄 매수(매도 3호가/시장가) 주문을 전송하시겠습니까?`)) {
+    if (alreadyBoughtToday) {
+      alert("금일 최초 매수주문이 이미 완료되어 추가 매수는 불가합니다.");
       return;
     }
-    
+    if (!window.confirm(`총 ${orderStocks.length}종목에 대해 각각 최대 ${amountPerStock.toLocaleString()}원(총 한도 ${totalAmount.toLocaleString()}원)씩 최초 일괄 매수 주문을 전송하시겠습니까?\n\n※ 최초 매수주문 이후 당일 추가 매수는 불가합니다.`)) {
+      return;
+    }
+
+    const batchId = `BATCH_${todayStr}_${Date.now()}`;
     let successCount = 0;
-    
+
     // 5종목씩 병렬 처리하여 속도 개선 및 KIS API rate limit 방지
     const batchSize = 5;
     for (let i = 0; i < orderStocks.length; i += batchSize) {
@@ -350,8 +382,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         if (stock.ratio0905 !== undefined && stock.ratio0905 < threshold) return 0;
         const cleanTicker = stock.clean_ticker || stock.ticker.split(':').pop() || stock.ticker;
         let liveP = livePrices[stock.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`] || stock.price || 0;
-        
-        // 실시간 가격 안전 검증: 0원이거나 전일 종가 누락 방지 위해 API 즉시 호출 보강
+
         if (liveP <= 0) {
           try {
             const pRes = await fetch(`/api/realtime-prices?tickers=${cleanTicker}`);
@@ -361,18 +392,18 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
             }
           } catch(e) {}
         }
-        
-        const price = liveP > 0 ? liveP : (stock.price || 0); 
-        if (price <= 0) return 0; 
-        
+
+        const price = liveP > 0 ? liveP : (stock.price || 0);
+        if (price <= 0) return 0;
+
         const qty = Math.floor(amountPerStock / price);
         if (qty <= 0) return 0;
-        
+
         try {
-          const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&price=${price}&type=buy&name=${encodeURIComponent(stock.name)}`, { method: 'POST' });
+          const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&price=${price}&type=buy&name=${encodeURIComponent(stock.name)}&batch_id=${encodeURIComponent(batchId)}`, { method: 'POST' });
           if (!res.ok) return 0;
           const data = await res.json();
-          return (data.success || data.error) ? 1 : 0;
+          return data.success ? 1 : 0;
         } catch (err) {
           console.error(err);
           return 0;
@@ -381,12 +412,17 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const results = await Promise.all(promises);
       successCount += results.reduce((sum: number, res) => sum + res, 0);
     }
-    
+
     await fetchHoldings();
-    alert(`${successCount}종목에 대해 일괄 매수 주문이 완료되었습니다.`);
+    await fetchLedger();
+    alert(`${successCount}종목에 대해 금일 최초 일괄 매수 주문이 완료되었습니다.`);
   };
 
   const handleBuySingle = async (ticker: string, name: string, price: number, qty: number) => {
+    if (alreadyBoughtToday) {
+      alert("금일 최초 매수주문 이후 추가 매수는 허용되지 않습니다.");
+      return;
+    }
     try {
       const cleanTicker = ticker.split(':').pop() || ticker;
       let finalPrice = price;
@@ -399,12 +435,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           }
         } catch(e) {}
       }
-      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${finalPrice}&name=${encodeURIComponent(name)}`, { method: 'POST' });
+      const singleBatchId = `SINGLE_${todayStr}_${Date.now()}`;
+      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${finalPrice}&name=${encodeURIComponent(name)}&batch_id=${encodeURIComponent(singleBatchId)}`, { method: 'POST' });
       if (!res.ok) throw new Error(res.statusText || 'API Error');
       const data = await res.json();
       if (data.success) {
-        alert(`${cleanTicker} 종목 ${qty}주 매수 주문이 한국투자증권(모의투자)에 성공적으로 접수되었습니다. (체결단가: ${(data.executed_price || finalPrice).toLocaleString()}원)`);
+        alert(`${cleanTicker} 종목 ${data.executed_qty || qty}주 매수 주문이 성공적으로 접수되었습니다. (체결단가: ${(data.executed_price || finalPrice).toLocaleString()}원)`);
         await fetchHoldings();
+        await fetchLedger();
       } else {
         alert(`${cleanTicker} 매수 주문 실패: ${data.error || '알 수 없는 오류'}`);
       }
@@ -437,31 +475,57 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       return;
     }
 
-    if (!window.confirm(`전체 보유 종목을 동시호가 시장가로 일괄 매도하시겠습니까? (예상 확정손익 ${portfolioSummary.totalPnL.toLocaleString()}원)`)) {
+    const now = new Date();
+    const utcHours = now.getUTCHours();
+    const kstHours = (utcHours + 9) % 24;
+    const kstMinutes = now.getUTCMinutes();
+    const timeValue = kstHours * 60 + kstMinutes;
+
+    if (reservedSellToday && timeValue < 15 * 60 + 30) {
+      alert("이미 금일 15시 20분 장마감 동시호가 종가매도가 예약되어 있습니다.");
       return;
     }
 
-    // Let backend handle the individual KIS sell orders via api_kis_sell_all
-    // so we don't delete holdings prematurely before recording ledger.
+    let confirmMsg = "";
+    if (timeValue < 15 * 60 + 20) {
+      confirmMsg = `[15:20 장마감 동시호가 종가 매도 예약]\n\n현재는 정규 장중입니다.\n15시 20분 장마감 동시호가에 매도주문이 접수되고, 15시 30분을 기준으로 최종 종가에 체결 정산되도록 예약하시겠습니까?\n\n(현재 예상손익: ${portfolioSummary.totalPnL.toLocaleString()}원)`;
+    } else if (timeValue < 15 * 60 + 30) {
+      confirmMsg = `[15:20 장마감 동시호가 매도 접수]\n\n현재는 장마감 동시호가 시간대(15:20~15:30)입니다.\n시장가 매도 주문을 즉시 전송하며, 15시 30분을 기준으로 최종 종가에 체결 정산됩니다. 진행하시겠습니까?\n\n(현재 예상손익: ${portfolioSummary.totalPnL.toLocaleString()}원)`;
+    } else {
+      confirmMsg = `[15:30 최종 종가 일괄 매도 정산]\n\n당일 15시 30분 최종 종가를 기준으로 보유 종목을 일괄 매도 정산하시겠습니까?\n\n(예상 확정손익: ${portfolioSummary.totalPnL.toLocaleString()}원)`;
+    }
+
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
 
     try {
-      const res = await fetch(`/api/kis/sell-all?buy=${portfolioSummary.totalBuyAmount}&sell=${portfolioSummary.totalCurrentAmount}`, { method: 'POST' });
+      const res = await fetch(`/api/kis/sell-all?mode=close`, { method: 'POST' });
       if (!res.ok) {
         alert("일괄매도 처리 중 서버 오류가 발생했습니다. (상태 코드: " + res.status + ")");
         return;
       }
       const data = await res.json();
-      
+
       if (data.success) {
-        await fetchHoldings();
-        await fetchLedger();
-        if (typeof window !== 'undefined') {
-          localStorage.removeItem('orderTotalAmount');
+        if (data.status === 'RESERVED_1520') {
+          setReservedSellToday(true);
+          alert(`✅ [예약 접수 완료]\n\n${data.message || '15시 20분 장마감 동시호가에 매도주문이 예약되었습니다.'}`);
+        } else if (data.status === 'PENDING_CLOSE_1530') {
+          setReservedSellToday(true);
+          alert(`✅ [동시호가 접수 완료]\n\n${data.message || '15시 20분 동시호가 시장가 매도 주문이 전송되었습니다.'}`);
+        } else {
+          setReservedSellToday(false);
+          await fetchHoldings();
+          await fetchLedger();
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('orderTotalAmount');
+          }
+          setTotalAmount(MAX_TOTAL_CAPITAL);
+          alert(`✅ [15:30 종가 일괄매도 완료]\n\n총 확정순이익 ${(data.net_pnl || 0).toLocaleString()}원이 거래원장에 성공적으로 기록되었습니다.`);
         }
-        setTotalAmount(100000000);
-        alert(`일괄매도(동시호가 시장가) 완료! 총 확정순이익 ${data.net_pnl.toLocaleString()}원이 거래원장에 기록되었습니다.`);
       } else {
-        alert(`일괄매도 실패: ${data.error}`);
+        alert(`일괄매도 실패: ${data.error || '알 수 없는 오류'}`);
       }
     } catch (e) {
       console.error(e);
@@ -472,7 +536,11 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value.replace(/,/g, ''));
     if (!isNaN(val)) {
-        setTotalAmount(val);
+      const clamped = Math.min(MAX_TOTAL_CAPITAL, Math.max(0, val));
+      setTotalAmount(clamped);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('orderTotalAmount', String(clamped));
+      }
     }
   };
 
@@ -540,7 +608,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
             </button>
             <label className="text-xs text-gray-400 cursor-pointer flex items-center">
               <input type="checkbox" className="mr-1" checked={forceEnable} onChange={e => setForceEnable(e.target.checked)} />
-              강제 활성화 (테스트용)
+              09:05 이전 조회 허용
             </label>
           </div>
         </div>
@@ -548,27 +616,27 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         <div className="flex gap-2 mb-3">
           {/* Investment Amount Input */}
           <div className="flex-1 bg-[#1a1a1a] border border-gray-800 rounded p-4 flex flex-col gap-2">
-            <label className="text-gray-400 font-bold text-sm mb-1 block">전체 투자 금액 (총액 설정)</label>
+            <label className="text-gray-400 font-bold text-sm mb-1 block">전체 투자 금액 (최대 1억 원 한도)</label>
             <div className="flex items-center gap-2">
               <input 
                 type="text" 
                 value={totalAmount.toLocaleString()} 
                 onChange={handleAmountChange}
-                disabled={alreadyBoughtToday && !forceEnable}
-                className={`bg-black border border-gray-700 rounded px-3 py-2 text-right font-mono font-bold w-full text-lg focus:outline-none focus:border-yellow-500 transition-colors ${alreadyBoughtToday && !forceEnable ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={alreadyBoughtToday}
+                className={`bg-black border border-gray-700 rounded px-3 py-2 text-right font-mono font-bold w-full text-lg focus:outline-none focus:border-yellow-500 transition-colors ${alreadyBoughtToday ? 'opacity-50 cursor-not-allowed' : ''}`}
               />
               <span className="text-gray-400 font-bold">원</span>
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              종목당 배정 금액 (1/N): <span className="font-mono text-gray-300">{Math.floor(amountPerStock).toLocaleString()}</span> 원
+              종목당 배정 금액 (1/20 한도): <span className="font-mono text-gray-300">{Math.floor(amountPerStock).toLocaleString()}</span> 원
             </div>
             <div className="flex gap-2 mt-2">
               <button 
                 onClick={handleBuyAll}
-                disabled={!isMarketOpenForStats || orderStocks.length === 0 || (!forceEnable && alreadyBoughtToday)}
+                disabled={!isMarketOpenForStats || orderStocks.length === 0 || alreadyBoughtToday}
                 className="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 text-white font-bold py-1.5 px-4 rounded transition-colors whitespace-nowrap flex-1"
               >
-                {(!forceEnable && alreadyBoughtToday) ? '금일 매수 완료' : '일괄 매수'}
+                {alreadyBoughtToday ? '금일 매수 완료 (추가매수 불가)' : '일괄 매수'}
               </button>
             </div>
           </div>
@@ -599,11 +667,11 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                </button>
                <button 
                   onClick={handleSellAll}
-                  disabled={holdings.length === 0}
-                  className="bg-blue-900/90 hover:bg-blue-700 disabled:bg-gray-800 border border-blue-500 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[80px]"
+                  disabled={holdings.length === 0 || reservedSellToday}
+                  className="bg-blue-900/90 hover:bg-blue-700 disabled:bg-gray-800 disabled:border-gray-700 border border-blue-500 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[80px]"
                >
-                 <span>일괄매도</span>
-                 <span className="text-[10px] text-blue-300 font-normal">(손익 확정)</span>
+                 <span>{reservedSellToday ? '종가매도 예약됨' : '일괄매도'}</span>
+                 <span className="text-[10px] text-blue-300 font-normal">{reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)'}</span>
                </button>
                <button 
                   onClick={() => setShowLedger(true)}
@@ -623,8 +691,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               <tr>
                 <th className="px-3 py-2 font-medium w-24">종목코드</th>
                 <th className="px-3 py-2 font-medium">종목명</th>
-                <th className="px-3 py-2 font-medium text-right">현재가</th>
-                <th className="px-3 py-2 font-medium text-right">등락률</th>
+                <th className="px-3 py-2 font-medium text-right text-white">현재가</th>
+                <th className="px-3 py-2 font-medium text-right text-yellow-300">등락률(전일대비)</th>
                 <th className="px-3 py-2 font-medium text-right text-purple-400">외국계순매수량</th>
                 <th className="px-3 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
                 <th className="px-3 py-2 font-medium text-right text-orange-400">실시간 비중</th>
@@ -644,13 +712,18 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               ) : orderStocks.length > 0 ? orderStocks.map((stock, i) => {
                 const cleanTicker = stock.clean_ticker || stock.ticker.split(':').pop() || stock.ticker;
                 const snap = buySnapshot[cleanTicker];
+                const quote = liveQuotes[cleanTicker] || liveQuotes[stock.ticker] || liveQuotes[`KRX:${cleanTicker}`];
                 
-                const liveP = livePrices[stock.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`] || stock.price || 0;
+                const liveP = (quote && quote.price > 0) ? quote.price : (livePrices[stock.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`] || stock.price || 0);
                 const priceForOrder = liveP > 0 ? liveP : (snap ? snap.price : (stock.price || 1));
                 const qty = snap ? snap.qty : Math.floor(amountPerStock / priceForOrder);
                 const orderTotal = snap ? snap.orderTotal : qty * priceForOrder;
-                const changePctStr = stock.changePct > 0 ? `+${stock.changePct}%` : `${stock.changePct}%`;
-                const changeColor = stock.changePct > 0 ? 'text-red-400' : (stock.changePct < 0 ? 'text-blue-400' : 'text-gray-400');
+                
+                const changePctVal = (quote && quote.changePct !== undefined && quote.changePct !== null)
+                  ? Number(quote.changePct)
+                  : Number(stock.changePct || 0);
+                const changePctStr = changePctVal > 0 ? `+${changePctVal.toFixed(2)}%` : `${changePctVal.toFixed(2)}%`;
+                const changeColor = changePctVal > 0 ? 'text-red-400' : (changePctVal < 0 ? 'text-blue-400' : 'text-gray-400');
 
                 const netBuy = stock.foreign_net_buy !== undefined ? stock.foreign_net_buy : (stock.foreignSumCurrent || 0);
                 const currentRatio = stock.currentRatio !== undefined ? stock.currentRatio : (stock.foreign_ratio !== undefined ? stock.foreign_ratio : (stock.foreignRatio || 0));
@@ -693,9 +766,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                       <div className="flex justify-center gap-1">
                         <button 
                           onClick={() => handleBuySingle(stock.ticker, stock.name, priceForOrder, qty)}
-                          className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-red-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors"
+                          disabled={alreadyBoughtToday}
+                          className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors"
                         >
-                          매수
+                          {alreadyBoughtToday ? '매수불가' : '매수'}
                         </button>
                         <button 
                           onClick={() => handleSellSingle(stock.ticker, qty)}

@@ -1,0 +1,8 @@
+{
+  "max_total_capital": 100000000.0,
+  "max_stocks": 20,
+  "max_per_stock_capital": 5000000.0,
+  "brokerage_fee_rate": 0.00015,
+  "securities_transaction_tax_rate": 0.0020,
+  "initial_buy_window_sec": 180
+}

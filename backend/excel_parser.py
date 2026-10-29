@@ -98,20 +98,6 @@ def update_kospi_prices_bg():
         except Exception as e:
             print("[Background] Update Error:", e)
             
-        try:
-            from datetime import datetime
-            now_time = datetime.now()
-            # If time is between 14:50 and 15:00
-            if now_time.hour == 14 and 50 <= now_time.minute <= 59:
-                from main import api_kis_sell_all
-                from database import get_holdings
-                if get_holdings():
-                    print("[Background] 14:50 detected. Auto-selling all holdings at market price.")
-                    res = api_kis_sell_all()
-                    print(f"[Background] Auto-sell result: {res}")
-        except Exception as se:
-            print("[Background] Auto-sell error:", se)
-            
         time.sleep(60) # Update every 1 minute
 
 def load_kospi_data():
