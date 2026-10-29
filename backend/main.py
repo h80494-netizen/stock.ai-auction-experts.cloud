@@ -1630,61 +1630,121 @@ def api_detailed_trading_ledger(date: str = None):
 def api_pnl_history():
     return api_ledger_history()
 
+_ledger_chart_cache = {"key": None, "timestamp": 0.0, "data": []}
+
+
+def _safe_finite_float(val, default: float = 0.0) -> float:
+    import math
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else default
+    except Exception:
+        return default
+
+
+def _load_kospi_history_map(target_latest_date: str = "") -> dict:
+    """
+    yfinance-mcp 로 사전 검증·저장된 KOSPI 일별 종가 캐시(kospi_history_cache.json)를 기본 로드하고,
+    이후 발생하는 신규 거래일은 네이버 금융 KOSPI 일별 시세로 보강합니다.
+    모든 수치는 math.isfinite 검증을 거쳐 NaN/Inf 유입을 원천 차단합니다.
+    """
+    import json
+    import math
+    import os
+
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "kospi_history_cache.json")
+    kospi_map = {}
+
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+            if isinstance(raw_data, dict):
+                for k, v in raw_data.items():
+                    fv = _safe_finite_float(v, 0.0)
+                    if fv > 0:
+                        kospi_map[str(k)] = fv
+        except Exception as e:
+            print(f"[KOSPI Cache Load Warning] {e}")
+
+    cached_latest = max(kospi_map.keys()) if kospi_map else ""
+    if not kospi_map or (target_latest_date and target_latest_date > cached_latest):
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            updated = False
+            headers = {"User-Agent": "Mozilla/5.0"}
+            for page in (1, 2):
+                url = f"https://finance.naver.com/sise/sise_index_day.naver?code=KOSPI&page={page}"
+                res = requests.get(url, headers=headers, timeout=3)
+                if res.status_code != 200:
+                    continue
+                soup = BeautifulSoup(res.text, "html.parser")
+                for tr in soup.select("table.type_1 tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) >= 2:
+                        d_txt = tds[0].get_text(strip=True).replace(".", "-")
+                        p_txt = tds[1].get_text(strip=True).replace(",", "")
+                        if len(d_txt) == 10 and d_txt[4] == "-" and p_txt:
+                            fv = _safe_finite_float(p_txt, 0.0)
+                            if fv > 0 and kospi_map.get(d_txt) != fv:
+                                kospi_map[d_txt] = fv
+                                updated = True
+            if updated:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(dict(sorted(kospi_map.items())), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[KOSPI Naver Supplement Notice] {e}")
+
+    return kospi_map
+
+
 @app.get("/api/ledger-chart-data")
 def api_ledger_chart_data():
     """
     Returns comparative cumulative return data for 매수주문 strategy vs KOSPI index (^KS11).
+    NaN/Inf 방어 및 메모리 캐시를 통해 JSON 직렬화 오류(500)를 원천 차단합니다.
     """
+    global _ledger_chart_cache
     try:
         from database import get_ledger_history
-        import yfinance as yf
         from datetime import datetime, timedelta
+        import time
 
         ledger_rows = get_ledger_history()
         ledger_rows_asc = sorted(ledger_rows, key=lambda x: x.get('date', ''))
 
-        if not ledger_rows_asc:
-            end_dt = datetime.now()
-            start_dt = end_dt - timedelta(days=60)
-        else:
-            first_date_str = ledger_rows_asc[0].get('date')
-            try:
-                start_dt = datetime.strptime(first_date_str, "%Y-%m-%d") - timedelta(days=7)
-            except Exception:
-                start_dt = datetime.now() - timedelta(days=60)
-            end_dt = datetime.now()
+        today_kst = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+        latest_ledger_date = ledger_rows_asc[-1].get('date', '') if ledger_rows_asc else ''
+        total_pnl_sig = round(sum(_safe_finite_float(r.get('net_pnl', 0.0), 0.0) for r in ledger_rows_asc), 2)
+        cache_key = (len(ledger_rows_asc), latest_ledger_date, total_pnl_sig)
 
-        # Fetch KOSPI daily history via yfinance (^KS11)
-        kospi_df = yf.download("^KS11", start=start_dt.strftime("%Y-%m-%d"), end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"), progress=False)
+        now_ts = time.time()
+        if (
+            _ledger_chart_cache["key"] == cache_key
+            and _ledger_chart_cache["data"]
+            and (now_ts - _ledger_chart_cache["timestamp"] < 300)
+        ):
+            return _ledger_chart_cache["data"]
 
-        kospi_map = {}
-        if not kospi_df.empty:
-            if hasattr(kospi_df.columns, 'levels') and 'Close' in kospi_df.columns.get_level_values(0):
-                close_series = kospi_df['Close']['^KS11'] if '^KS11' in kospi_df['Close'] else kospi_df['Close'].iloc[:, 0]
-            elif 'Close' in kospi_df:
-                close_series = kospi_df['Close']
-            else:
-                close_series = kospi_df.iloc[:, 3]
-
-            for idx, val in close_series.items():
-                date_str = idx.strftime("%Y-%m-%d")
-                kospi_map[date_str] = float(val)
-
-        ledger_map = {row['date']: row for row in ledger_rows_asc}
+        kospi_map = _load_kospi_history_map(max(latest_ledger_date, today_kst))
+        ledger_map = {row['date']: row for row in ledger_rows_asc if row.get('date')}
 
         all_dates = sorted(list(set(list(ledger_map.keys()) + list(kospi_map.keys()))))
-        
         if ledger_rows_asc:
             min_date = ledger_rows_asc[0]['date']
-            all_dates = [d for d in all_dates if d >= min_date]
-        
+            max_date = max(latest_ledger_date, max(kospi_map.keys()) if kospi_map else latest_ledger_date)
+            all_dates = [d for d in all_dates if min_date <= d <= max_date]
+
         if not all_dates:
             return []
 
         base_kospi = None
         for d in sorted(kospi_map.keys()):
-            if base_kospi is None or d <= all_dates[0]:
-                base_kospi = kospi_map[d]
+            val = _safe_finite_float(kospi_map[d], 0.0)
+            if val > 0 and (base_kospi is None or d <= all_dates[0]):
+                base_kospi = val
 
         chart_data = []
         cum_strategy_multiplier = 1.0
@@ -1692,31 +1752,32 @@ def api_ledger_chart_data():
         last_kospi_ret = 0.0
 
         for d in all_dates:
-            if d in kospi_map and base_kospi and base_kospi > 0:
-                k_price = kospi_map[d]
-                kospi_ret = round(((k_price - base_kospi) / base_kospi) * 100, 2)
+            k_price = _safe_finite_float(kospi_map.get(d, 0.0), 0.0)
+            if k_price > 0 and base_kospi and base_kospi > 0:
+                kospi_ret = _safe_finite_float(round(((k_price - base_kospi) / base_kospi) * 100, 2), last_kospi_ret)
                 last_kospi_ret = kospi_ret
             else:
                 kospi_ret = last_kospi_ret
 
             if d in ledger_map:
                 daily_row = ledger_map[d]
-                r_rate = daily_row.get('return_rate', 0.0) or 0.0
+                r_rate = _safe_finite_float(daily_row.get('return_rate', 0.0), 0.0)
                 cum_strategy_multiplier *= (1.0 + r_rate / 100.0)
-                strategy_ret = round((cum_strategy_multiplier - 1.0) * 100, 2)
+                strategy_ret = _safe_finite_float(round((cum_strategy_multiplier - 1.0) * 100, 2), last_strategy_ret)
                 last_strategy_ret = strategy_ret
-                net_pnl = daily_row.get('net_pnl', 0)
+                net_pnl = _safe_finite_float(daily_row.get('net_pnl', 0.0), 0.0)
             else:
                 strategy_ret = last_strategy_ret
-                net_pnl = 0
+                net_pnl = 0.0
 
             chart_data.append({
                 "date": d,
                 "kospi_return": kospi_ret,
                 "strategy_return": strategy_ret,
-                "net_pnl": net_pnl
+                "net_pnl": round(net_pnl, 2),
             })
 
+        _ledger_chart_cache = {"key": cache_key, "timestamp": now_ts, "data": chart_data}
         return chart_data
     except Exception as e:
         print(f"Ledger chart data error: {e}")

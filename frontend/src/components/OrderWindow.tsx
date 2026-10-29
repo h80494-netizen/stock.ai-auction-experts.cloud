@@ -233,6 +233,24 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const [detailedLedger, setDetailedLedger] = useState<any[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
   const [showLedger, setShowLedger] = useState(false);
+
+  // 차트 API 지연/일시 오류 시에도 pnlHistory 로부터 즉시 전략 누적수익률을 렌더링하는 폴백 시계열
+  const displayChartData = useMemo(() => {
+    if (chartData.length > 0) return chartData;
+    if (pnlHistory.length === 0) return [];
+    const asc = [...pnlHistory].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+    let mult = 1.0;
+    return asc.map(item => {
+      const rr = Number(item.return_rate) || 0;
+      mult *= (1 + rr / 100);
+      return {
+        date: item.date,
+        strategy_return: Number(((mult - 1) * 100).toFixed(2)),
+        kospi_return: 0,
+        net_pnl: Number(item.net_pnl) || 0,
+      };
+    });
+  }, [chartData, pnlHistory]);
   const [showHoldingsModal, setShowHoldingsModal] = useState(false);
 
   const fetchHoldings = async () => {
@@ -1133,10 +1151,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                       </span>
                     </div>
                   </div>
-                  {chartData.length > 0 ? (
+                  {displayChartData.length > 0 ? (
                     <div className="h-56 w-full">
                       <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <LineChart data={displayChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#222" />
                           <XAxis dataKey="date" stroke="#666" tick={{ fill: '#888', fontSize: 11 }} />
                           <YAxis stroke="#666" tick={{ fill: '#888', fontSize: 11 }} unit="%" />
