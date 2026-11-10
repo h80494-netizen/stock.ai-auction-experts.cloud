@@ -42,6 +42,7 @@ import asyncio
 async def startup_event():
     from routers.reports import sync_reports_task
     async def periodic_sync():
+        await asyncio.sleep(3600)  # 서버 시작 직후 CPU/DB 병목 방지를 위해 1시간 후 첫 실행
         while True:
             try:
                 print("[Scheduler] Running daily report sync...")
@@ -75,12 +76,12 @@ import threading
 import time
 
 def background_report_sync():
-    time.sleep(10) # wait for server to start
+    time.sleep(1800) # 서버 재시작 직후 부하 방지를 위해 30분 대기 후 실행
     from routers.reports import sync_reports_task
     while True:
         try:
             print("[Background] Running daily report sync...")
-            sync_reports_task(50) # fetch last 50 pages daily
+            sync_reports_task(20)
             print("[Background] Daily report sync completed.")
         except Exception as e:
             print(f"[Background] Report sync error: {e}")
@@ -101,11 +102,6 @@ scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
 def start_scheduler():
-    import threading
-    
-    # 서버 구동 시 백그라운드에서 ETF 데이터 즉시 1회 갱신 (사용자가 바로 변화를 볼 수 있도록)
-    threading.Thread(target=update_etf_data, daemon=True).start()
-    
     scheduler.add_job(auto_trader.job_910_buy, CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Seoul'))
     scheduler.add_job(auto_trader.job_1520_sell_order, CronTrigger(hour=15, minute=20, day_of_week='mon-fri', timezone='Asia/Seoul'))
     scheduler.add_job(auto_trader.job_1531_ledger_record, CronTrigger(hour=15, minute=31, day_of_week='mon-fri', timezone='Asia/Seoul'))
@@ -124,8 +120,6 @@ def start_scheduler():
             print("RS Charts update error:", e)
             
     scheduler.add_job(update_rs_charts, CronTrigger(hour=7, minute=30, timezone='Asia/Seoul'))
-    # 시작 시에도 백그라운드 스레드로 한 번 생성 (사용자가 바로 최신 차트를 볼 수 있도록)
-    threading.Thread(target=update_rs_charts, daemon=True).start()
     
     scheduler.start()
     print("APScheduler started: Trading & ETF jobs scheduled")
@@ -1168,15 +1162,24 @@ def get_stock_summary(ticker: str):
         
     return {"summary": translated_text}
 
-@app.get("/api/report/{ticker}")
-def get_analyst_report(ticker: str, peers: str = "", refresh: bool = False):
-    """
-    시니어 기업분석 애널리스트(Equity Research Analyst) 프롬프트 기반 심층 밸류에이션 & 컨센서스 리포트 생성 API
-    - 6대 필수 항목 (산업전망·해자 / 성장·마진·CAPEX Time-lag / 재무안전성·이자보상 / 핵심 밸류에이션·현금흐름 / 주주환원 / 종합 결론·리스크)
-    - 2대 핵심 표 (2025A~2028E 시계열 추이 표 & 12M Forward 경쟁사 평균 멀티플 비교 표)
-    """
-    from equity_research_generator import generate_senior_analyst_report
-    return generate_senior_analyst_report(ticker=ticker, peers_param=peers, force_refresh=refresh)
+@app.get("/api/report/{ticker}")
+
+def get_analyst_report(ticker: str, peers: str = "", refresh: bool = False):
+
+    """
+
+    시니어 기업분석 애널리스트(Equity Research Analyst) 프롬프트 기반 심층 밸류에이션 & 컨센서스 리포트 생성 API
+
+    - 6대 필수 항목 (산업전망·해자 / 성장·마진·CAPEX Time-lag / 재무안전성·이자보상 / 핵심 밸류에이션·현금흐름 / 주주환원 / 종합 결론·리스크)
+
+    - 2대 핵심 표 (2025A~2028E 시계열 추이 표 & 12M Forward 경쟁사 평균 멀티플 비교 표)
+
+    """
+
+    from equity_research_generator import generate_senior_analyst_report
+
+    return generate_senior_analyst_report(ticker=ticker, peers_param=peers, force_refresh=refresh)
+
 
 @app.get("/api/stock_news/{ticker}")
 def api_stock_news(ticker: str, name: str = "", market: str = "KR"):
@@ -1332,11 +1335,10 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                 pnl = metrics["net_pnl"]
                 rr = metrics["return_rate"]
 
-                # 거래원장 및 실현손익 확정 기록 (멱등 UPSERT)
+                # 거래원장 및 실현손익 확정 기록 (멱등 UPSERT, 당일 보유종목 화면 유지를 위해 clear_holdings 생략)
                 add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr)
                 record_trading_sell_all(today_str, items_to_record)
                 add_realized_pnl(today_str, pnl)
-                clear_holdings()
                 _reserved_close_sell_date = ""
                 print(f"[일괄매도정산완료] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
                 return pnl, rr
@@ -1682,7 +1684,18 @@ def api_get_holdings():
                 pass
 
         from kis_foreign_scanner import get_snapshot_0905_map
+        from database import get_detailed_trading_ledger
         snap_0905_map = get_snapshot_0905_map()
+        ledger_price_map = {}
+        try:
+            today_kst_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+            for lr in get_detailed_trading_ledger(today_kst_str):
+                ltk = str(lr.get("ticker", "")).replace("KRX:", "")
+                sp = float(lr.get("sell_price") or 0)
+                if ltk and sp > 0:
+                    ledger_price_map[ltk] = sp
+        except Exception:
+            pass
 
         for h in holdings:
             raw_ticker = h.get("ticker", "")
@@ -1692,8 +1705,10 @@ def api_get_holdings():
             # 캐시 데이터 매칭
             cache_match = cache_stocks_map.get(clean_ticker) or cache_stocks_map.get(f"KRX:{clean_ticker}") or {}
             
-            # 현재가 결정 (캐시가 있으면 캐시가, 없으면 이전 캐시가 또는 매입가)
+            # 현재가 결정 (캐시가 있으면 캐시가, 없으면 당일 정산 종가/이전 캐시가 또는 매입가)
             current_p = cache_match.get('price', 0)
+            if current_p <= 0:
+                current_p = ledger_price_map.get(clean_ticker, 0)
             if current_p <= 0:
                 current_p = _holdings_price_cache.get(clean_ticker, 0)
             if current_p <= 0:

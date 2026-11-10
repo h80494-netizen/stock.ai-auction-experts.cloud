@@ -402,10 +402,12 @@ export default function FuturesSimulationView({
   const [adoptedChartFilter, setAdoptedChartFilter] = useState<string>("ALL");
   const [allModelChartFilter, setAllModelChartFilter] = useState<string>("ALL_13");
 
-  // 매매원장 및 하단 섹션 전용 기간 설정 (시작일 ~ 마감일 / 현재까지)
-  const [ledgerStartDate, setLedgerStartDate] = useState<string>("2026-05-01");
-  const [ledgerEndDate, setLedgerEndDate] = useState<string>("2026-11-09");
+  // 매매원장 및 Step 5 전용 독립 기간 설정 (시뮬레이션 탭의 구간 설정과 100% 독립 작동)
+  const [ledgerStartDate, setLedgerStartDate] = useState<string>("2026-01-02");
+  const [ledgerEndDate, setLedgerEndDate] = useState<string>("2026-11-10");
   const [ledgerUseCurrent, setLedgerUseCurrent] = useState<boolean>(true);
+  const [step5LedgerRows, setStep5LedgerRows] = useState<any[]>([]);
+  const [ledgerLoading, setLedgerLoading] = useState<boolean>(false);
   const [autoRefreshRealtime, setAutoRefreshRealtime] = useState<boolean>(true);
   const [realtimeSyncing, setRealtimeSyncing] = useState<boolean>(false);
 
@@ -436,12 +438,89 @@ export default function FuturesSimulationView({
         const res = await fetch(`${apiBaseUrl}${path}`, options);
         if (res.ok) return await res.json();
       } catch (_) {
-        // Fallback to local dedicated port 18200 if needed
+        // Fallback to local dedicated port 18200 only on localhost
       }
-      const fallbackRes = await fetch(`http://127.0.0.1:18200/api/futures-sim${path}`, options);
-      return await fallbackRes.json();
+      if (
+        typeof window !== "undefined" &&
+        (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      ) {
+        const fallbackRes = await fetch(`http://127.0.0.1:18200/api/futures-sim${path}`, options);
+        return await fallbackRes.json();
+      }
+      const retryRes = await fetch(`${apiBaseUrl}${path}`, options);
+      return await retryRes.json();
     },
     [apiBaseUrl]
+  );
+
+  const fetchIntradayStatus = useCallback(
+    async (syncNow: boolean = false) => {
+      try {
+        const lockJson = await callApi(`/intraday-status?multiplier=${multiplier}&sync_now=${syncNow}`);
+        if (lockJson?.success) {
+          setLockStatus(lockJson.data);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [callApi, multiplier]
+  );
+
+  // Step 5 매매원장 전용 독립 조회 함수 (Step 1~4, 6의 시뮬레이션 구간과 완전 분리)
+  const fetchLedgerOnly = useCallback(
+    async (opts?: { start?: string; end?: string; current?: boolean; models?: string[] }) => {
+      const targetStart = opts?.start ?? ledgerStartDate;
+      const targetCurrent = opts?.current ?? ledgerUseCurrent;
+      const targetEnd = targetCurrent ? "CURRENT" : opts?.end ?? ledgerEndDate;
+      const targetModels = opts?.models ?? selectedModelIds;
+
+      setLedgerLoading(true);
+      try {
+        const res = await callApi("/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start_date: targetStart,
+            end_date: targetEnd,
+            multiplier,
+            mdd_threshold_pct: mddThreshold,
+            initial_selected_ids: targetModels,
+            enable_auto_mdd_swap: replacementMode !== "MANUAL_FIXED" && enableAutoSwap,
+            combine_supply: combineSupply,
+            supply_weight: supplyWeight / 100.0,
+            sharpe_lookback_days: sharpeLookbackDays > 0 ? sharpeLookbackDays : null,
+            record_swaps_to_db: false,
+            replacement_mode: replacementMode,
+            periodic_rebalance_days: periodicRebalanceDays,
+            mdd_trigger_mode: mddTriggerMode,
+          }),
+        });
+        if (res?.success && Array.isArray(res.data?.recent_trading_ledger)) {
+          setStep5LedgerRows(res.data.recent_trading_ledger);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLedgerLoading(false);
+      }
+    },
+    [
+      callApi,
+      ledgerStartDate,
+      ledgerEndDate,
+      ledgerUseCurrent,
+      multiplier,
+      mddThreshold,
+      selectedModelIds,
+      replacementMode,
+      enableAutoSwap,
+      combineSupply,
+      supplyWeight,
+      sharpeLookbackDays,
+      periodicRebalanceDays,
+      mddTriggerMode,
+    ]
   );
 
   const fetchSimulation = useCallback(
@@ -466,28 +545,25 @@ export default function FuturesSimulationView({
 
       setLoading(true);
       try {
-        const [simJson, lockJson] = await Promise.all([
-          callApi("/run", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              start_date: targetStart,
-              end_date: targetEnd,
-              multiplier,
-              mdd_threshold_pct: mddThreshold,
-              initial_selected_ids: targetModels,
-              enable_auto_mdd_swap: targetRepMode !== "MANUAL_FIXED" && enableAutoSwap,
-              combine_supply: combineSupply,
-              supply_weight: supplyWeight / 100.0,
-              sharpe_lookback_days: targetLookback > 0 ? targetLookback : null,
-              record_swaps_to_db: false,
-              replacement_mode: targetRepMode,
-              periodic_rebalance_days: targetPeriodicDays,
-              mdd_trigger_mode: targetTrigMode,
-            }),
+        const simJson = await callApi("/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start_date: targetStart,
+            end_date: targetEnd,
+            multiplier,
+            mdd_threshold_pct: mddThreshold,
+            initial_selected_ids: targetModels,
+            enable_auto_mdd_swap: targetRepMode !== "MANUAL_FIXED" && enableAutoSwap,
+            combine_supply: combineSupply,
+            supply_weight: supplyWeight / 100.0,
+            sharpe_lookback_days: targetLookback > 0 ? targetLookback : null,
+            record_swaps_to_db: false,
+            replacement_mode: targetRepMode,
+            periodic_rebalance_days: targetPeriodicDays,
+            mdd_trigger_mode: targetTrigMode,
           }),
-          callApi(`/intraday-status?multiplier=${multiplier}`),
-        ]);
+        });
         if (simJson?.success) {
           setSimData(simJson.data);
           // 시뮬레이션(또는 MDD 자동교체) 결과 최종 채택된 5대 주력 모델과 체크박스를 항상 일치시킴
@@ -500,7 +576,6 @@ export default function FuturesSimulationView({
             setSelectedModelIds(activeIds);
           }
         }
-        if (lockJson?.success) setLockStatus(lockJson.data);
       } catch (e) {
         console.error(e);
       } finally {
@@ -603,15 +678,27 @@ export default function FuturesSimulationView({
 
   useEffect(() => {
     fetchSimulation();
-    handleRunConsistencyTest();
-    handleRunPoolConsistencyEval();
+    fetchLedgerOnly();
+    fetchIntradayStatus(false);
     fetchKisAccount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 장중 실시간 가격(rawdata.xlsx) 및 Step 5 포지션 변화 30초 자동 갱신
+  // Step 3 / Step 5 진입 시 필요한 데이터 지연 로딩(Lazy Load)
   useEffect(() => {
-    if (!autoRefreshRealtime) return;
+    if (step === 3) {
+      if (!consistencyData) handleRunConsistencyTest();
+      if (!poolEvalData) handleRunPoolConsistencyEval();
+    } else if (step === 5) {
+      if (!lockStatus) fetchIntradayStatus(false);
+      if (step5LedgerRows.length === 0) fetchLedgerOnly();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  // 장중 실시간 가격(rawdata.xlsx) 및 Step 5 포지션 변화 30초 자동 갱신 (Step 5에서만 작동)
+  useEffect(() => {
+    if (!autoRefreshRealtime || step !== 5) return;
     const timer = setInterval(async () => {
       try {
         const lockJson = await callApi(`/intraday-status?multiplier=${multiplier}&sync_now=true`);
@@ -623,7 +710,7 @@ export default function FuturesSimulationView({
       }
     }, 30000);
     return () => clearInterval(timer);
-  }, [autoRefreshRealtime, callApi, multiplier]);
+  }, [autoRefreshRealtime, step, callApi, multiplier]);
 
   const applyQuickForwardSplit = (mode: "3M_3M" | "6M_6M" | "2025_2026" | "2425_2026") => {
     const latestStr = simData?.last_trading_summary?.last_trading_date || "2026-11-09";
@@ -684,9 +771,6 @@ export default function FuturesSimulationView({
     setStartDate(nextStart);
     setEndDate(latestStr);
     setUseCurrent(true);
-    setLedgerStartDate(nextStart);
-    setLedgerEndDate(latestStr);
-    setLedgerUseCurrent(true);
     fetchSimulation({ start: nextStart, end: latestStr, current: true });
   };
 
@@ -807,10 +891,9 @@ export default function FuturesSimulationView({
         const raw = st?.today_rawdata || {};
         const pos = st?.position_change_check || {};
         setBannerMsg(
-          `[실시간 rawdata.xlsx & 포지션 동기화 완료] ${raw.date || st?.trading_date} | 선물현재가 ${raw.fut_close ?? "-"}pt (${raw.fut_change_pt >= 0 ? "+" : ""}${raw.fut_change_pt ?? 0}pt) | 전일 ${pos.prev_contracts ?? 0}계약 → 당일 목표 ${pos.today_target_contracts ?? 0}계약 (동시호가 예상 Delta: ${pos.order_delta_contracts >= 0 ? "+" : ""}${pos.order_delta_contracts ?? 0}계약)`
+          `[Step 5 실시간 rawdata.xlsx & 포지션 동기화 완료] ${raw.date || st?.trading_date} | 선물현재가 ${raw.fut_close ?? "-"}pt (${raw.fut_change_pt >= 0 ? "+" : ""}${raw.fut_change_pt ?? 0}pt) | 전일 ${pos.prev_contracts ?? 0}계약 → 당일 목표 ${pos.today_target_contracts ?? 0}계약 (동시호가 예상 Delta: ${pos.order_delta_contracts >= 0 ? "+" : ""}${pos.order_delta_contracts ?? 0}계약)`
         );
       }
-      await fetchSimulation();
     } finally {
       setRealtimeSyncing(false);
     }
@@ -881,13 +964,13 @@ export default function FuturesSimulationView({
   const ledgerRows: any[] = simData?.recent_trading_ledger || [];
   const swapHistory: any[] = simData?.mdd_swap_history || [];
 
-  // 매매원장 기간 설정(ledgerStartDate ~ ledgerEndDate / 현재까지) 필터링
+  // 매매원장 기간 설정(ledgerStartDate ~ ledgerEndDate / 현재까지) 독립 필터링 (2018~ 시뮬레이션 구간과 완전 분리)
   const effectiveLedgerEnd = ledgerUseCurrent ? "9999-12-31" : ledgerEndDate;
-  const filteredLedgerDesc = ledgerRows.filter((r: any) => {
+  const rawLedgerPool: any[] = step5LedgerRows.length > 0 ? step5LedgerRows : ledgerRows;
+  const activeLedgerRows = rawLedgerPool.filter((r: any) => {
     const d = String(r.date || "");
     return d >= ledgerStartDate && d <= effectiveLedgerEnd;
   });
-  const activeLedgerRows = filteredLedgerDesc.length > 0 ? filteredLedgerDesc : ledgerRows;
   const ledgerChronological = [...activeLedgerRows].reverse();
 
   const ledgerDates: string[] = ledgerChronological.map((r: any) => r.date);
@@ -929,11 +1012,17 @@ export default function FuturesSimulationView({
     ledgerCumRetPct.length > 0 ? ledgerCumRetPct[ledgerCumRetPct.length - 1] : 0;
 
   const setQuickLedgerRange = (months: number | "ALL") => {
-    const latestStr = lt?.last_trading_date || "2026-11-09";
+    const latestStr =
+      lockStatus?.today_rawdata?.date ||
+      lockStatus?.trading_date ||
+      lt?.last_trading_date ||
+      "2026-11-10";
     if (months === "ALL") {
-      setLedgerStartDate(startDate);
+      const allStart = "2010-08-23";
+      setLedgerStartDate(allStart);
       setLedgerEndDate(latestStr);
       setLedgerUseCurrent(true);
+      fetchLedgerOnly({ start: allStart, end: latestStr, current: true });
       return;
     }
     const dt = new Date(latestStr);
@@ -945,10 +1034,7 @@ export default function FuturesSimulationView({
     setLedgerStartDate(nextStart);
     setLedgerEndDate(latestStr);
     setLedgerUseCurrent(true);
-    if (nextStart < startDate) {
-      setStartDate(nextStart);
-      fetchSimulation({ start: nextStart });
-    }
+    fetchLedgerOnly({ start: nextStart, end: latestStr, current: true });
   };
 
   const renderQuickSimPeriodButtons = () => (
@@ -979,11 +1065,13 @@ export default function FuturesSimulationView({
     <div className="bg-slate-950/90 border border-amber-500/40 rounded-xl p-3.5 flex flex-wrap items-end justify-between gap-3 text-xs">
       <div className="space-y-1">
         <div className="font-extrabold text-amber-300 flex items-center gap-2">
-          <span>📅 {titleLabel} 기간 설정 (시작일 ~ 마감일)</span>
+          <span>📅 {titleLabel} 기간 설정 (시작일 ~ 마감일 · 독립 구간)</span>
           <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 font-mono text-[11px]">
             조회구간: {ledgerDates[0] || ledgerStartDate} ~{" "}
-            {ledgerUseCurrent ? `현재(${ledgerDates[ledgerDates.length - 1] || endDate})` : ledgerEndDate} (
-            {ledgerDates.length}거래일)
+            {ledgerUseCurrent
+              ? `현재(${ledgerDates[ledgerDates.length - 1] || lockStatus?.trading_date || ledgerEndDate})`
+              : ledgerEndDate}{" "}
+            ({ledgerDates.length}거래일)
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-300">
@@ -1032,11 +1120,7 @@ export default function FuturesSimulationView({
           <input
             type="date"
             value={ledgerStartDate}
-            onChange={(e) => {
-              const v = e.target.value;
-              setLedgerStartDate(v);
-              if (v && v < startDate) setStartDate(v);
-            }}
+            onChange={(e) => setLedgerStartDate(e.target.value)}
             className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-white font-mono"
           />
         </div>
@@ -1049,8 +1133,7 @@ export default function FuturesSimulationView({
               disabled={ledgerUseCurrent}
               onChange={(e) => {
                 setLedgerEndDate(e.target.value);
-                setUseCurrent(false);
-                setEndDate(e.target.value);
+                setLedgerUseCurrent(false);
               }}
               className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-white font-mono disabled:opacity-50"
             />
@@ -1058,10 +1141,7 @@ export default function FuturesSimulationView({
               <input
                 type="checkbox"
                 checked={ledgerUseCurrent}
-                onChange={(e) => {
-                  setLedgerUseCurrent(e.target.checked);
-                  if (e.target.checked) setUseCurrent(true);
-                }}
+                onChange={(e) => setLedgerUseCurrent(e.target.checked)}
               />
               현재까지
             </label>
@@ -1069,10 +1149,17 @@ export default function FuturesSimulationView({
         </div>
         <button
           type="button"
-          onClick={() => fetchSimulation()}
-          className="px-3.5 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-extrabold cursor-pointer"
+          disabled={ledgerLoading}
+          onClick={() =>
+            fetchLedgerOnly({
+              start: ledgerStartDate,
+              end: ledgerEndDate,
+              current: ledgerUseCurrent,
+            })
+          }
+          className="px-3.5 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-extrabold cursor-pointer"
         >
-          🔍 기간 적용 조회
+          {ledgerLoading ? "조회중..." : "🔍 기간 적용 조회"}
         </button>
       </div>
     </div>
@@ -1465,11 +1552,14 @@ export default function FuturesSimulationView({
               {showManual ? "📕 매뉴얼 닫기" : "📖 4대 프로세스 운용 매뉴얼"}
             </button>
             <button
-              onClick={() => handleSyncRealtimeNow(true)}
-              disabled={loading || realtimeSyncing}
+              onClick={() => {
+                setStep(5);
+                handleSyncRealtimeNow(true);
+              }}
+              disabled={realtimeSyncing}
               className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold cursor-pointer"
             >
-              {loading || realtimeSyncing ? "실시간 동기화중..." : "🔄 실시간 가격 & rawdata.xlsx 갱신"}
+              {realtimeSyncing ? "Step 5 실시간 동기화중..." : "🔄 실시간 가격 & rawdata.xlsx 갱신 (Step 5)"}
             </button>
           </div>
         </div>
@@ -1554,6 +1644,25 @@ export default function FuturesSimulationView({
         </div>
       </div>
 
+      {((step === 6 && !pm) || (step === 1 && !sc) || (step === 4 && !pm)) && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-8 text-center space-y-3">
+          <div className="text-sm font-extrabold text-indigo-300">
+            {loading
+              ? "⚡ 선물 10대 매매모델 운용성과 데이터를 고속 로딩 중입니다..."
+              : "📊 시뮬레이션 데이터를 불러오고 있습니다."}
+          </div>
+          <p className="text-xs text-slate-400">
+            잠시만 기다려 주시거나 아래 버튼을 클릭하면 즉시 화면이 표시됩니다.
+          </p>
+          <button
+            onClick={() => fetchSimulation()}
+            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold cursor-pointer"
+          >
+            🔄 데이터 즉시 불러오기
+          </button>
+        </div>
+      )}
+
       {/* =================================================================== */}
       {/* STEP 6: 실전 종합 & KOSPI200 비교 + 최종모델 운용성과/모델별 성과/매매원장 통합 */}
       {/* =================================================================== */}
@@ -1584,7 +1693,13 @@ export default function FuturesSimulationView({
                   <input
                     type="date"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => {
+                      const nextStart = e.target.value;
+                      setStartDate(nextStart);
+                      if (nextStart && nextStart.length === 10) {
+                        fetchSimulation({ start: nextStart, end: endDate, current: useCurrent });
+                      }
+                    }}
                     className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
                   />
                 </div>
@@ -1595,14 +1710,24 @@ export default function FuturesSimulationView({
                       type="date"
                       value={endDate}
                       disabled={useCurrent}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        const nextEnd = e.target.value;
+                        setEndDate(nextEnd);
+                        if (nextEnd && nextEnd.length === 10 && !useCurrent) {
+                          fetchSimulation({ start: startDate, end: nextEnd, current: false });
+                        }
+                      }}
                       className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono disabled:opacity-50"
                     />
                     <label className="flex items-center gap-1.5 text-emerald-300 font-bold cursor-pointer">
                       <input
                         type="checkbox"
                         checked={useCurrent}
-                        onChange={(e) => setUseCurrent(e.target.checked)}
+                        onChange={(e) => {
+                          const nextCur = e.target.checked;
+                          setUseCurrent(nextCur);
+                          fetchSimulation({ start: startDate, end: endDate, current: nextCur });
+                        }}
                       />
                       현재까지
                     </label>
@@ -2435,10 +2560,9 @@ export default function FuturesSimulationView({
                             ).toFixed(3)
                           )
                         : 0;
-                    const cRet =
-                      typeof r.cum_return_pct === "number"
-                        ? r.cum_return_pct
-                        : Number(((r.equity_index || 100) - 100).toFixed(2));
+                    const cRet = Number(
+                      (((Number(r.equity_index || 100) / Math.max(1, baseLedgerEq)) - 1.0) * 100).toFixed(2)
+                    );
                     return (
                       <tr key={r.date} className="hover:bg-slate-800/50">
                         <td className="p-2 font-bold text-white">{r.date}</td>
@@ -2512,7 +2636,13 @@ export default function FuturesSimulationView({
               <input
                 type="date"
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => {
+                  const nextStart = e.target.value;
+                  setStartDate(nextStart);
+                  if (nextStart && nextStart.length === 10) {
+                    fetchSimulation({ start: nextStart, end: endDate, current: useCurrent });
+                  }
+                }}
                 className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white font-mono"
               />
             </div>
@@ -2523,14 +2653,24 @@ export default function FuturesSimulationView({
                   type="date"
                   value={endDate}
                   disabled={useCurrent}
-                  onChange={(e) => setEndDate(e.target.value)}
+                  onChange={(e) => {
+                    const nextEnd = e.target.value;
+                    setEndDate(nextEnd);
+                    if (nextEnd && nextEnd.length === 10 && !useCurrent) {
+                      fetchSimulation({ start: startDate, end: nextEnd, current: false });
+                    }
+                  }}
                   className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white font-mono disabled:opacity-50"
                 />
                 <label className="flex items-center gap-1.5 text-emerald-300 font-bold cursor-pointer">
                   <input
                     type="checkbox"
                     checked={useCurrent}
-                    onChange={(e) => setUseCurrent(e.target.checked)}
+                    onChange={(e) => {
+                      const nextCur = e.target.checked;
+                      setUseCurrent(nextCur);
+                      fetchSimulation({ start: startDate, end: endDate, current: nextCur });
+                    }}
                   />
                   현재까지(최신일)
                 </label>
@@ -2698,7 +2838,13 @@ export default function FuturesSimulationView({
                   <input
                     type="date"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => {
+                      const nextStart = e.target.value;
+                      setStartDate(nextStart);
+                      if (nextStart && nextStart.length === 10) {
+                        fetchSimulation({ start: nextStart, end: endDate, current: useCurrent });
+                      }
+                    }}
                     className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white font-mono"
                   />
                 </div>
@@ -2709,24 +2855,35 @@ export default function FuturesSimulationView({
                       type="date"
                       value={endDate}
                       disabled={useCurrent}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        const nextEnd = e.target.value;
+                        setEndDate(nextEnd);
+                        if (nextEnd && nextEnd.length === 10 && !useCurrent) {
+                          fetchSimulation({ start: startDate, end: nextEnd, current: false });
+                        }
+                      }}
                       className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white font-mono disabled:opacity-50"
                     />
                     <label className="flex items-center gap-1.5 text-emerald-300 font-bold cursor-pointer">
                       <input
                         type="checkbox"
                         checked={useCurrent}
-                        onChange={(e) => setUseCurrent(e.target.checked)}
+                        onChange={(e) => {
+                          const nextCur = e.target.checked;
+                          setUseCurrent(nextCur);
+                          fetchSimulation({ start: startDate, end: endDate, current: nextCur });
+                        }}
                       />
                       현재까지
                     </label>
                   </div>
                 </div>
                 <button
-                  onClick={() => fetchSimulation()}
-                  className="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 text-white font-bold cursor-pointer"
+                  onClick={() => fetchSimulation({ start: startDate, end: endDate, current: useCurrent })}
+                  disabled={loading}
+                  className="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold cursor-pointer"
                 >
-                  📊 구간 평가 실행
+                  {loading ? "⚡ 구간 재산출 중..." : "📊 구간 평가 실행"}
                 </button>
               </div>
               <button
@@ -3358,7 +3515,13 @@ export default function FuturesSimulationView({
                   <input
                     type="date"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => {
+                      const nextStart = e.target.value;
+                      setStartDate(nextStart);
+                      if (nextStart && nextStart.length === 10) {
+                        fetchSimulation({ start: nextStart, end: endDate, current: useCurrent });
+                      }
+                    }}
                     className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
                   />
                 </div>
@@ -3369,14 +3532,24 @@ export default function FuturesSimulationView({
                       type="date"
                       value={endDate}
                       disabled={useCurrent}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        const nextEnd = e.target.value;
+                        setEndDate(nextEnd);
+                        if (nextEnd && nextEnd.length === 10 && !useCurrent) {
+                          fetchSimulation({ start: startDate, end: nextEnd, current: false });
+                        }
+                      }}
                       className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono disabled:opacity-50"
                     />
                     <label className="flex items-center gap-1 text-emerald-300 font-bold cursor-pointer">
                       <input
                         type="checkbox"
                         checked={useCurrent}
-                        onChange={(e) => setUseCurrent(e.target.checked)}
+                        onChange={(e) => {
+                          const nextCur = e.target.checked;
+                          setUseCurrent(nextCur);
+                          fetchSimulation({ start: startDate, end: endDate, current: nextCur });
+                        }}
                       />
                       현재까지
                     </label>
@@ -4474,10 +4647,9 @@ export default function FuturesSimulationView({
                           ).toFixed(3)
                         )
                       : 0;
-                  const cRet =
-                    typeof r.cum_return_pct === "number"
-                      ? r.cum_return_pct
-                      : Number(((r.equity_index || 100) - 100).toFixed(2));
+                  const cRet = Number(
+                    (((Number(r.equity_index || 100) / Math.max(1, baseLedgerEq)) - 1.0) * 100).toFixed(2)
+                  );
                   return (
                     <tr key={r.date} className="hover:bg-slate-800/50">
                       <td className="p-2 font-bold text-white">{r.date}</td>

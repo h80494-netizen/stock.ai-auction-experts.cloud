@@ -355,7 +355,7 @@ def api_get_intraday_status(multiplier: int = 1, sync_now: bool = False) -> Dict
 
 @router.post("/sync-realtime")
 def api_sync_realtime(req: RealtimeSyncRequest) -> Dict[str, Any]:
-    """당일 실시간 시장 데이터를 즉시 연동하여 futures_simulation.db 및 rawdata.xlsx 당일 행을 갱신하고 최신 포지션 변화 상태를 반환합니다."""
+    """당일 실시간 시장 데이터를 즉시 연동하여 futures_simulation.db 및 rawdata.xlsx 당일 행을 갱신하고 최신 Step 5 포지션 변화 상태를 반환합니다."""
     try:
         scripts_dir = os.path.join(os.path.dirname(_BACKEND_DIR), "scripts")
         if scripts_dir not in sys.path:
@@ -363,7 +363,6 @@ def api_sync_realtime(req: RealtimeSyncRequest) -> Dict[str, Any]:
         from update_rawdata import sync_intraday_realtime_tick
 
         sync_res = sync_intraday_realtime_tick(write_excel=req.write_excel, force_excel=True)
-        invalidate_sim_cache()
         status_res = get_intraday_and_1530_lock_status(multiplier=req.multiplier, sync_now=False)
         return {
             "success": True,
@@ -518,15 +517,21 @@ def _realtime_and_daily_background_worker() -> None:
             is_weekday = now_kst.weekday() < 5
 
             if not startup_synced:
-                # 서버 기동 시 최신 영업일(예: 11월 9일 및 이후 신규 거래일) 데이터를 즉시 동기화하여 누적
-                sync_intraday_realtime_tick(write_excel=True)
+                # 서버 기동 시 최신 영업일 데이터를 즉시 동기화하고 기본 시뮬레이션 캐시를 워밍업
+                sync_intraday_realtime_tick(write_excel=False)
                 invalidate_sim_cache()
+                run_futures_simulation(
+                    start_date="2023-01-02",
+                    end_date="CURRENT",
+                    multiplier=1,
+                    sharpe_lookback_days=63,
+                    enable_auto_mdd_swap=True,
+                )
                 startup_synced = True
 
             if is_weekday and 900 <= hhmm <= 1530:
-                # 장중(09:00 ~ 15:30) 실시간 가격 및 수급을 rawdata.xlsx와 DB에 계속 업데이트
-                sync_intraday_realtime_tick(write_excel=True)
-                invalidate_sim_cache()
+                # 장중(09:00 ~ 15:30) Step 5용 실시간 가격 및 수급을 DB에 고속 업데이트 (전체 시뮬레이션 캐시 유지, 엑셀 재저장으로 인한 GIL 블로킹 방지)
+                sync_intraday_realtime_tick(write_excel=False)
 
             if is_weekday and 1530 <= hhmm <= 1535 and last_locked_date != today_str:
                 # 15:30 KOSPI 마감 직후 시그널 자동 확정(Lock)

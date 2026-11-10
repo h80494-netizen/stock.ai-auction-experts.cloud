@@ -227,8 +227,7 @@ def job_1531_ledger_record():
         
         print(f"15:30 최종 종가 기준 100% 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
         
-    # 보유 잔고 100% 비우기 (다음날 잔여 수량 이월 방지)
-    db.clear_holdings()
+    # 당일 매수 종목 및 손익이 화면에서 유지되도록 당일에는 holdings를 비우지 않음 (익일 신규 매수 시 자동 교체)
 
 if __name__ == "__main__":
     pass

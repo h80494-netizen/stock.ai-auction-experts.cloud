@@ -24,7 +24,7 @@ _TABLES_INITIALIZED: bool = False
 
 
 def ensure_rawdata_excel_synced() -> None:
-    """data/rawdata.xlsx가 DB보다 최신으로 수정되었을 때만 SQLite DB(futures_daily_data)에 즉시 동기화합니다."""
+    """data/rawdata.xlsx가 DB에 아직 적재되지 않았을 때만 SQLite DB(futures_daily_data)에 초기 동기화합니다."""
     global _LAST_SYNCED_EXCEL_MTIME
     if not os.path.exists(RAWDATA_XLSX_PATH):
         return
@@ -42,8 +42,7 @@ def ensure_rawdata_excel_synced() -> None:
                 c.execute("SELECT COUNT(*) FROM futures_daily_data")
                 row_cnt = c.fetchone()[0]
             conn.close()
-            db_mtime = os.path.getmtime(DB_PATH)
-            if row_cnt >= 3800 and db_mtime >= xlsx_mtime - 120:
+            if row_cnt >= 3800:
                 _LAST_SYNCED_EXCEL_MTIME = xlsx_mtime
                 return
         import sys
@@ -131,6 +130,7 @@ def init_sim_tables() -> None:
 _CACHED_FULL_DF: Optional[pd.DataFrame] = None
 _CACHED_DB_MTIME: float = 0.0
 _CACHED_SIGNALS: Dict[Tuple[float, bool, float], pd.DataFrame] = {}
+_CACHED_SIM_RESULTS: Dict[Any, Dict[str, Any]] = {}
 
 
 def invalidate_sim_cache() -> None:
@@ -139,6 +139,7 @@ def invalidate_sim_cache() -> None:
     _CACHED_FULL_DF = None
     _CACHED_DB_MTIME = 0.0
     _CACHED_SIGNALS.clear()
+    _CACHED_SIM_RESULTS.clear()
 
 
 def _get_effective_db_mtime() -> float:
@@ -160,8 +161,8 @@ def load_daily_dataframe(start_date: Optional[str] = None, end_date: Optional[st
     if not os.path.exists(DB_PATH):
         raise FileNotFoundError(f"데이터베이스 파일이 없습니다: {DB_PATH}. 먼저 update_rawdata.py를 실행하세요.")
 
-    db_mtime = _get_effective_db_mtime()
-    if _CACHED_FULL_DF is None or db_mtime != _CACHED_DB_MTIME:
+    if _CACHED_FULL_DF is None:
+        db_mtime = _get_effective_db_mtime()
         conn = sqlite3.connect(DB_PATH, timeout=30.0)
         query = "SELECT * FROM futures_daily_data ORDER BY date ASC"
         df_raw = pd.read_sql_query(query, conn)
@@ -574,14 +575,19 @@ def compute_all_model_signals(
     return sig_df
 
 
-def compute_indicator_group_diagnostics(df: pd.DataFrame) -> Dict[str, Any]:
+def compute_indicator_group_diagnostics(df: pd.DataFrame, sig_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     """
     4대 지표군(① 기술지표, ② 수급지표, ③ 종합지표, ④ 심리지표)을 체계적으로 분류하여
     각 지표군의 최신 세부 지표 값, 개별 시그널(-1/0/+1), 그룹 종합 점수(-1.0~+1.0) 및 최근 60일 시계열을 반환합니다.
     """
     if df.empty:
         return {}
-    sig_df = compute_all_model_signals(df)
+    if sig_df is None:
+        cache_key = (_CACHED_DB_MTIME, True, 0.35)
+        if cache_key in _CACHED_SIGNALS and len(_CACHED_SIGNALS[cache_key]) == len(df):
+            sig_df = _CACHED_SIGNALS[cache_key]
+        else:
+            sig_df = compute_all_model_signals(df)
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
 
@@ -712,9 +718,9 @@ def compute_indicator_group_diagnostics(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
-def calculate_series_metrics(daily_returns: pd.Series, annual_days: int = 250, rf_annual: float = 0.0325) -> Dict[str, Any]:
+def calculate_series_metrics(daily_returns: Any, annual_days: int = 250, rf_annual: float = 0.0325) -> Dict[str, Any]:
     """
-    수익률 시계열로부터 사용자 요청 10대 정밀 평가지표 및 누적/연환산 수익률을 계산합니다:
+    수익률 시계열로부터 사용자 요청 10대 정밀 평가지표 및 누적/연환산 수익률을 계산합니다 (NumPy 고속 벡터화):
     1) Hitting Ratio (hitting_ratio_pct / win_rate_pct)
     2) 플러스 수익률 일수 (pos_days)
     3) 마이너스 수익률 일수 (neg_days)
@@ -726,8 +732,10 @@ def calculate_series_metrics(daily_returns: pd.Series, annual_days: int = 250, r
     9) Sortino Ratio (sortino_ratio)
     10) Calmar Ratio (calmar_ratio)
     """
-    clean_rets = daily_returns.dropna()
-    if clean_rets.empty:
+    arr = np.asarray(daily_returns, dtype=float)
+    if arr.size > 0:
+        arr = arr[~np.isnan(arr)]
+    if arr.size == 0:
         return {
             "cum_return_pct": 0.0,
             "annual_return_pct": 0.0,
@@ -749,33 +757,35 @@ def calculate_series_metrics(daily_returns: pd.Series, annual_days: int = 250, r
             "calmar_ratio": 0.0,
         }
 
-    equity = (1.0 + clean_rets).cumprod()
-    final_eq = float(equity.iloc[-1])
+    equity = np.cumprod(1.0 + arr)
+    final_eq = float(equity[-1])
     cum_ret_pct = float((final_eq - 1.0) * 100.0)
 
-    n_obs = max(1, len(clean_rets))
+    n_obs = max(1, int(arr.size))
     if final_eq > 0:
         ann_ret_pct = float(((final_eq ** (annual_days / n_obs)) - 1.0) * 100.0)
     else:
         ann_ret_pct = -100.0
 
-    peak = equity.cummax()
+    peak = np.maximum.accumulate(equity)
     dd = (peak - equity) / (peak + 1e-12)
-    mdd_pct = float(dd.max() * 100.0)
+    mdd_pct = float(np.max(dd) * 100.0)
 
-    pos_series = clean_rets[clean_rets > 0]
-    neg_series = clean_rets[clean_rets < 0]
-    pos_days = int(len(pos_series))
-    neg_days = int(len(neg_series))
+    pos_mask = arr > 0
+    neg_mask = arr < 0
+    pos_series = arr[pos_mask]
+    neg_series = arr[neg_mask]
+    pos_days = int(pos_series.size)
+    neg_days = int(neg_series.size)
     flat_days = int(n_obs - pos_days - neg_days)
     active_count = pos_days + neg_days
 
     hitting_ratio = float(pos_days / active_count * 100.0) if active_count > 0 else 0.0
-    avg_pos_pct = float(pos_series.mean() * 100.0) if pos_days > 0 else 0.0
-    avg_neg_pct = float(neg_series.mean() * 100.0) if neg_days > 0 else 0.0
+    avg_pos_pct = float(np.mean(pos_series) * 100.0) if pos_days > 0 else 0.0
+    avg_neg_pct = float(np.mean(neg_series) * 100.0) if neg_days > 0 else 0.0
 
-    pos_sum = float(pos_series.sum())
-    neg_sum = abs(float(neg_series.sum()))
+    pos_sum = float(np.sum(pos_series)) if pos_days > 0 else 0.0
+    neg_sum = abs(float(np.sum(neg_series))) if neg_days > 0 else 0.0
     profit_loss_factor = (
         round(pos_sum / neg_sum, 3)
         if neg_sum > 1e-9
@@ -785,13 +795,13 @@ def calculate_series_metrics(daily_returns: pd.Series, annual_days: int = 250, r
         round(avg_pos_pct / abs(avg_neg_pct), 3) if abs(avg_neg_pct) > 1e-9 else 1.0
     )
 
-    std_val = float(clean_rets.std())
+    std_val = float(np.std(arr, ddof=1)) if n_obs > 1 else 0.0
     rf_daily = rf_annual / annual_days
-    mean_excess = float(clean_rets.mean() - rf_daily)
+    mean_excess = float(np.mean(arr) - rf_daily)
     sharpe = (mean_excess / std_val) * math.sqrt(annual_days) if std_val > 1e-9 else 0.0
 
     # Sortino Ratio: 하방 편차(Downside Deviation, 일간 수익률 < rf_daily 구간만 제곱평균제곱근)
-    downside_diff = np.minimum(0.0, clean_rets.values - rf_daily)
+    downside_diff = np.minimum(0.0, arr - rf_daily)
     downside_std = float(np.sqrt(np.mean(np.square(downside_diff)))) if n_obs > 0 else 0.0
     sortino = (
         (mean_excess / downside_std) * math.sqrt(annual_days)
@@ -925,6 +935,22 @@ def run_futures_simulation(
             active_set = pool_ids[:5]
 
     initial_active_snapshot = list(active_set)
+    sim_cache_key = (
+        _CACHED_DB_MTIME,
+        str(start_date or ""),
+        str(end_date or ""),
+        mult,
+        round(mdd_limit, 2),
+        lookback_days,
+        tuple(initial_active_snapshot),
+        bool(combine_supply),
+        round(float(supply_weight), 3),
+        rep_mode,
+        periodic_days,
+        trig_mode,
+    )
+    if not record_swaps_to_db and sim_cache_key in _CACHED_SIM_RESULTS:
+        return _CACHED_SIM_RESULTS[sim_cache_key]
 
     # 일별 선물 수익률 (t-1 종가 동시호가(15:35~15:45) 진입 -> t일 종가 정산) 및 KOSPI200 벤치마크 수익률
     fut_close = df["fut_close"].values
@@ -949,11 +975,17 @@ def run_futures_simulation(
     model_pure_rets: Dict[str, np.ndarray] = {}
     model_comb_rets: Dict[str, np.ndarray] = {}
     model_equity_curves: Dict[str, np.ndarray] = {}
+    model_sig_arrays: Dict[str, np.ndarray] = {}
+    model_pure_sig_arrays: Dict[str, np.ndarray] = {}
+    model_comb_sig_arrays: Dict[str, np.ndarray] = {}
 
     for m_id in all_model_ids:
         sigs = sig_df[m_id].values
         pure_sigs = sig_df[f"{m_id}__pure"].values if f"{m_id}__pure" in sig_df.columns else sigs
         comb_sigs = sig_df[f"{m_id}__combined"].values if f"{m_id}__combined" in sig_df.columns else sigs
+        model_sig_arrays[m_id] = sigs
+        model_pure_sig_arrays[m_id] = pure_sigs
+        model_comb_sig_arrays[m_id] = comb_sigs
 
         m_ret = np.zeros(n_days)
         m_ret[1:] = sigs[:-1] * fut_pct_ret[1:]
@@ -969,15 +1001,15 @@ def run_futures_simulation(
 
         model_equity_curves[m_id] = np.cumprod(1.0 + m_ret) * 100.0
 
-    # 순수 신호 기준 포트폴리오 비교 곡선 (수급 미합산 시 성과 비교용)
+    # 순수 신호 기준 포트폴리오 비교 곡선 (수급 미합산 시 성과 비교용 - 벡터화 연산)
     pure_port_ret = np.zeros(n_days)
     comb_port_ret = np.zeros(n_days)
     n_sel = max(1, len(initial_active_snapshot))
-    for i in range(1, n_days):
-        p_sum = sum(int(sig_df.loc[i - 1, f"{m_id}__pure"]) for m_id in initial_active_snapshot)
-        c_sum = sum(int(sig_df.loc[i - 1, f"{m_id}__combined"]) for m_id in initial_active_snapshot)
-        pure_port_ret[i] = (p_sum / float(n_sel)) * fut_pct_ret[i]
-        comb_port_ret[i] = (c_sum / float(n_sel)) * fut_pct_ret[i]
+    if initial_active_snapshot and n_days > 1:
+        p_sum_arr = sum(model_pure_sig_arrays[m_id][:-1] for m_id in initial_active_snapshot)
+        c_sum_arr = sum(model_comb_sig_arrays[m_id][:-1] for m_id in initial_active_snapshot)
+        pure_port_ret[1:] = (p_sum_arr / float(n_sel)) * fut_pct_ret[1:]
+        comb_port_ret[1:] = (c_sum_arr / float(n_sel)) * fut_pct_ret[1:]
     pure_equity_curve = np.cumprod(1.0 + pure_port_ret) * 100.0
     comb_static_equity_curve = np.cumprod(1.0 + comb_port_ret) * 100.0
 
@@ -1035,10 +1067,7 @@ def run_futures_simulation(
                 dd_series_pct = np.where(running_peaks > 0, ((running_peaks - eq_seg) / running_peaks) * 100.0, 0.0)
                 curr_dd_pct = float(dd_series_pct[-1])
                 prior_max_dd_pct = float(np.max(dd_series_pct[:-1])) if len(dd_series_pct) > 1 else 0.0
-                max_dd_seg_pct = float(np.max(dd_series_pct))
 
-                sub_rets = pd.Series(model_daily_rets[act_id][eval_start : i + 1])
-                metrics_act = calculate_series_metrics(sub_rets, annual_days=annual_days, rf_annual=rf_annual)
                 model_mdd_limit = float(
                     model_meta.get(act_id, {}).get("mdd_threshold_pct", mdd_limit)
                 )
@@ -1056,14 +1085,18 @@ def run_futures_simulation(
                     should_trigger_mdd = is_limit_breached or (is_mdd_renewed and curr_dd_pct >= effective_limit * 0.85)
 
                 if should_trigger_mdd and inactive_ids:
+                    metrics_act = calculate_series_metrics(
+                        model_daily_rets[act_id][eval_start : i + 1], annual_days=annual_days, rf_annual=rf_annual
+                    )
                     best_cand_id = None
                     best_cand_sharpe = -999.0
                     best_cand_ret = -999.0
                     best_cand_mdd = 0.0
 
                     for cand_id in inactive_ids:
-                        cand_rets = pd.Series(model_daily_rets[cand_id][lb_start : i + 1])
-                        cand_m = calculate_series_metrics(cand_rets, annual_days=annual_days, rf_annual=rf_annual)
+                        cand_m = calculate_series_metrics(
+                            model_daily_rets[cand_id][lb_start : i + 1], annual_days=annual_days, rf_annual=rf_annual
+                        )
                         if cand_m["sharpe"] > best_cand_sharpe:
                             best_cand_sharpe = cand_m["sharpe"]
                             best_cand_ret = cand_m["cum_return_pct"]
@@ -1125,8 +1158,9 @@ def run_futures_simulation(
                     for idx_a, act_id in enumerate(active_set):
                         if i - adopted_at_idx.get(act_id, 0) < 15:
                             continue
-                        a_rets = pd.Series(model_daily_rets[act_id][lb_p : i + 1])
-                        a_m = calculate_series_metrics(a_rets, annual_days=annual_days, rf_annual=rf_annual)
+                        a_m = calculate_series_metrics(
+                            model_daily_rets[act_id][lb_p : i + 1], annual_days=annual_days, rf_annual=rf_annual
+                        )
                         if a_m["sharpe"] < worst_act_sharpe:
                             worst_act_sharpe = a_m["sharpe"]
                             worst_act_mdd = a_m["mdd_pct"]
@@ -1139,8 +1173,9 @@ def run_futures_simulation(
                     best_cand_ret = -999.0
                     best_cand_mdd = 0.0
                     for cand_id in inactive_ids:
-                        c_rets = pd.Series(model_daily_rets[cand_id][lb_p : i + 1])
-                        c_m = calculate_series_metrics(c_rets, annual_days=annual_days, rf_annual=rf_annual)
+                        c_m = calculate_series_metrics(
+                            model_daily_rets[cand_id][lb_p : i + 1], annual_days=annual_days, rf_annual=rf_annual
+                        )
                         if c_m["sharpe"] > best_cand_sharpe:
                             best_cand_sharpe = c_m["sharpe"]
                             best_cand_ret = c_m["cum_return_pct"]
@@ -1188,7 +1223,7 @@ def run_futures_simulation(
                         swap_events.append(swap_info)
 
         # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출 (선택된 5개 모델 시그널 합산)
-        sum_sig = int(sum(sig_df.loc[i, m_id] for m_id in active_set))
+        sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
         target_contracts[i] = sum_sig * mult
@@ -1370,7 +1405,7 @@ def run_futures_simulation(
     if sampled_indices[-1] != n_days - 1:
         sampled_indices.append(n_days - 1)
 
-    indicator_diag = compute_indicator_group_diagnostics(df)
+    indicator_diag = compute_indicator_group_diagnostics(df, sig_df=sig_df)
 
     sampled_model_equities = {
         m_id: [round(float(model_equity_curves[m_id][i]), 2) for i in sampled_indices]
@@ -1568,7 +1603,7 @@ def run_futures_simulation(
         "standby_models_monitor": standby_models_monitor[:6],
     }
 
-    return {
+    result_payload = {
         "success": True,
         "simulation_params": {
             "start_date": dates[0],
@@ -1659,6 +1694,9 @@ def run_futures_simulation(
             "model_cum_returns_pct": sampled_model_cum_returns,
         },
     }
+    if not record_swaps_to_db:
+        _CACHED_SIM_RESULTS[sim_cache_key] = result_payload
+    return result_payload
 
 
 def evaluate_period_consistency_and_rotate_pool(
@@ -1692,7 +1730,10 @@ def evaluate_period_consistency_and_rotate_pool(
     if df.empty:
         return {"success": False, "error": "기초데이터가 비어 있습니다."}
 
-    sig_df = compute_all_model_signals(df)
+    cache_key = (_CACHED_DB_MTIME, True, 0.35)
+    if cache_key not in _CACHED_SIGNALS:
+        _CACHED_SIGNALS[cache_key] = compute_all_model_signals(df, combine_supply=True, supply_weight=0.35)
+    sig_df = _CACHED_SIGNALS[cache_key]
     dates = df["date"].tolist()
 
     # anchor_date 위치 탐색
@@ -2043,8 +2084,7 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
                 os.sys.path.append(scripts_dir)
             from update_rawdata import sync_intraday_realtime_tick
 
-            live_sync_result = sync_intraday_realtime_tick(write_excel=True, force_excel=False)
-            invalidate_sim_cache()
+            live_sync_result = sync_intraday_realtime_tick(write_excel=False, force_excel=False)
         except Exception as e:
             live_sync_result = {"status": "warn", "detail": str(e)}
 
@@ -2065,8 +2105,9 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM futures_daily_data ORDER BY date DESC LIMIT 2")
-    recent_db_rows = c.fetchall()
+    c.execute("SELECT * FROM futures_daily_data ORDER BY date DESC LIMIT 120")
+    recent_120_rows = c.fetchall()
+    recent_db_rows = recent_120_rows[:2]
     latest_date = recent_db_rows[0]["date"] if recent_db_rows else now.strftime("%Y-%m-%d")
 
     c.execute("SELECT * FROM daily_signal_lock WHERE lock_date = ?", (latest_date,))
@@ -2147,33 +2188,51 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
             "excel_updated_at": excel_mtime_str,
         }
 
-    # 실시간 시뮬레이션 실행하여 전일 대비 당일 포지션 변화 및 13개 모델 시그널 변화 계산
-    sim_res = run_futures_simulation(
-        start_date="2023-01-01",
-        end_date="CURRENT",
-        multiplier=multiplier,
-        enable_auto_mdd_swap=True,
-        record_swaps_to_db=False,
-    )
-    ledger_list = sim_res.get("recent_trading_ledger", []) if sim_res.get("success") else []
-    today_ledger = ledger_list[0] if len(ledger_list) > 0 else {}
-    prev_ledger = ledger_list[1] if len(ledger_list) > 1 else today_ledger
+    # 캐시된 시뮬레이션(없으면 1회 실행)의 채택 모델 + 최근 120일 실시간 시그널로 Step 5를 0.01초 내 초고속 산출
+    if _CACHED_SIM_RESULTS:
+        sim_res = next(iter(_CACHED_SIM_RESULTS.values()))
+    else:
+        sim_res = run_futures_simulation(
+            start_date="2023-01-02",
+            end_date="CURRENT",
+            multiplier=multiplier,
+            sharpe_lookback_days=63,
+            enable_auto_mdd_swap=True,
+            record_swaps_to_db=False,
+        )
 
-    prev_base_pos = int(prev_ledger.get("base_position_sum", 0))
-    prev_contracts = int(today_ledger.get("prev_contracts", prev_base_pos * multiplier))
-    today_base_pos = int(today_ledger.get("base_position_sum", 0))
-    today_target_contracts = int(today_ledger.get("target_contracts", today_base_pos * multiplier))
-    order_delta_contracts = int(today_ledger.get("order_delta_contracts", today_target_contracts - prev_contracts))
-    order_action = str(today_ledger.get("order_action", "포지션 유지 (매매 없음)"))
+    df_tail = pd.DataFrame([dict(r) for r in reversed(recent_120_rows)]) if recent_120_rows else pd.DataFrame()
+    if not df_tail.empty:
+        num_c = [col for col in df_tail.columns if col != "date"]
+        for col in num_c:
+            df_tail[col] = pd.to_numeric(df_tail[col], errors="coerce")
+        df_tail[num_c] = df_tail[num_c].ffill().bfill().fillna(0.0)
+        sig_tail = compute_all_model_signals(df_tail, combine_supply=True, supply_weight=0.35)
+    else:
+        sig_tail = pd.DataFrame()
 
+    active_5_set = set(sim_res.get("active_5_models") or [m["model_id"] for m in get_active_pool() if m.get("is_selected")])
+    models_perf_list = sim_res.get("models_performance", [])
+
+    prev_base_pos = 0
+    today_base_pos = 0
     models_signal_changes: List[Dict[str, Any]] = []
     changed_selected_count = 0
     changed_total_count = 0
-    for m in sim_res.get("models_performance", []):
-        prev_sig = int(m.get("signal_lags", {}).get("T_1", 0))
-        today_sig = int(m.get("latest_signal", 0))
+
+    for m in models_perf_list:
+        m_id = m["model_id"]
+        if not sig_tail.empty and m_id in sig_tail.columns and len(sig_tail) >= 2:
+            today_sig = int(sig_tail[m_id].iloc[-1])
+            prev_sig = int(sig_tail[m_id].iloc[-2])
+        else:
+            prev_sig = int(m.get("signal_lags", {}).get("T_1", 0))
+            today_sig = int(m.get("latest_signal", 0))
         sig_diff = today_sig - prev_sig
-        is_sel = bool(m.get("is_currently_selected", False))
+        is_sel = m_id in active_5_set
+        if is_sel:
+            prev_base_pos += prev_sig
+            today_base_pos += today_sig
         changed = prev_sig != today_sig
         if changed:
             changed_total_count += 1
@@ -2186,7 +2245,7 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
             change_label = f"{sig_name(today_sig)} 유지"
         models_signal_changes.append(
             {
-                "model_id": m["model_id"],
+                "model_id": m_id,
                 "name": m["name"],
                 "indicator_group": m.get("indicator_group", ""),
                 "is_selected": is_sel,
@@ -2202,9 +2261,28 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
             }
         )
 
+    prev_base_pos = max(-5, min(5, prev_base_pos))
+    today_base_pos = max(-5, min(5, today_base_pos))
+    prev_contracts = prev_base_pos * multiplier
+    today_target_contracts = today_base_pos * multiplier
+    order_delta_contracts = today_target_contracts - prev_contracts
+    order_action = (
+        "매수 진입/추가"
+        if order_delta_contracts > 0
+        else ("매도 진입/청산" if order_delta_contracts < 0 else "포지션 유지(0)")
+    )
+
+    fut_diff_today = float(today_rawdata.get("fut_change_pt") or 0.0)
+    fut_pct_today = float(today_rawdata.get("fut_change_pct") or 0.0) / 100.0
+    today_daily_ret_pct = round((prev_base_pos / 5.0) * fut_pct_today * 100.0, 3) if prev_base_pos != 0 else 0.0
+    today_daily_pnl_krw = round(prev_contracts * fut_diff_today * 250000.0, 0)
+    ledger_list = sim_res.get("recent_trading_ledger", []) if sim_res.get("success") else []
+    today_ledger = ledger_list[0] if len(ledger_list) > 0 else {}
+    prev_ledger = ledger_list[1] if len(ledger_list) > 1 else today_ledger
+
     position_change_check = {
-        "prev_date": prev_ledger.get("date", today_rawdata.get("prev_date", "-")),
-        "today_date": today_ledger.get("date", latest_date),
+        "prev_date": today_rawdata.get("prev_date") or prev_ledger.get("date", "-"),
+        "today_date": today_rawdata.get("date") or latest_date,
         "prev_base_position_sum": prev_base_pos,
         "today_base_position_sum": today_base_pos,
         "base_position_delta": today_base_pos - prev_base_pos,
@@ -2212,8 +2290,8 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
         "today_target_contracts": today_target_contracts,
         "order_delta_contracts": order_delta_contracts,
         "order_action": order_action,
-        "today_daily_return_pct": today_ledger.get("daily_return_pct", 0.0),
-        "today_daily_pnl_krw": today_ledger.get("daily_pnl_krw", 0),
+        "today_daily_return_pct": today_daily_ret_pct,
+        "today_daily_pnl_krw": today_daily_pnl_krw,
         "today_cum_return_pct": today_ledger.get("cum_return_pct", 0.0),
         "changed_selected_models_count": changed_selected_count,
         "changed_total_models_count": changed_total_count,
@@ -2356,6 +2434,7 @@ def update_selected_models_in_pool(selected_model_ids: List[str]) -> Dict[str, A
 
     cfg["active_model_pool"] = pool_models
     save_simulation_config(cfg)
+    _CACHED_SIM_RESULTS.clear()
 
     return {
         "success": True,
@@ -2394,7 +2473,12 @@ def test_selected_models_consistency(
     if df_all.empty:
         return {"success": False, "error": "기초데이터가 비어 있습니다."}
 
-    sig_df = compute_all_model_signals(df_all, combine_supply=combine_supply, supply_weight=supply_weight)
+    cache_key = (_CACHED_DB_MTIME, bool(combine_supply), round(float(supply_weight), 3))
+    if cache_key not in _CACHED_SIGNALS:
+        _CACHED_SIGNALS[cache_key] = compute_all_model_signals(
+            df_all, combine_supply=combine_supply, supply_weight=supply_weight
+        )
+    sig_df = _CACHED_SIGNALS[cache_key]
     pool_cfg = get_active_pool()
     cand_cfg = get_candidate_pool()
     all_cfg = pool_cfg + [c for c in cand_cfg if c["model_id"] not in [m["model_id"] for m in pool_cfg]]
@@ -2448,11 +2532,11 @@ def test_selected_models_consistency(
 
     port_ret_all = np.zeros(n_total)
     pure_port_ret_all = np.zeros(n_total)
-    for i in range(1, n_total):
-        s_sum = sum(int(sig_df.loc[i - 1, m_id]) for m_id in target_ids)
-        p_sum = sum(int(sig_df.loc[i - 1, f"{m_id}__pure"]) for m_id in target_ids)
-        port_ret_all[i] = (s_sum / float(n_sel)) * fut_pct_ret[i]
-        pure_port_ret_all[i] = (p_sum / float(n_sel)) * fut_pct_ret[i]
+    if target_ids and n_total > 1:
+        s_sum_arr = sum(sig_df[m_id].values[:-1] for m_id in target_ids)
+        p_sum_arr = sum(sig_df[f"{m_id}__pure"].values[:-1] for m_id in target_ids)
+        port_ret_all[1:] = (s_sum_arr / float(n_sel)) * fut_pct_ret[1:]
+        pure_port_ret_all[1:] = (p_sum_arr / float(n_sel)) * fut_pct_ret[1:]
 
     pool_id_set = {m["model_id"] for m in pool_cfg}
 

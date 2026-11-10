@@ -188,15 +188,45 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     }
   }, [totalAmount]);
 
-  // Local state for tracking bought stocks (Holdings)
+  // KST(한국 표준시) 기준 오늘 날짜
+  const todayStr = new Date(Date.now() + 9 * 3600 * 1000).toISOString().split('T')[0];
+
+  // Local state for tracking bought stocks (Holdings) — 껐다 켜도 즉시 유지되도록 localStorage 초기화
   const [holdings, setHoldings] = useState<{
     ticker: string;
     name: string;
     buyPrice: number;
     qty: number;
-  }[]>([]);
+  }[]>(() => {
+    if (typeof window !== 'undefined') {
+      const savedDate = localStorage.getItem('saved_holdings_date');
+      if (savedDate === todayStr) {
+        const savedData = localStorage.getItem('saved_holdings_data');
+        if (savedData) {
+          try {
+            const parsed = JSON.parse(savedData);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          } catch (e) {}
+        }
+      }
+    }
+    return [];
+  });
 
-  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [livePrices, setLivePrices] = useState<Record<string, number>>(() => {
+    if (typeof window !== 'undefined') {
+      const savedDate = localStorage.getItem('saved_livePrices_date');
+      if (savedDate === todayStr) {
+        const savedData = localStorage.getItem('saved_livePrices_data');
+        if (savedData) {
+          try {
+            return JSON.parse(savedData) || {};
+          } catch (e) {}
+        }
+      }
+    }
+    return {};
+  });
   const [liveQuotes, setLiveQuotes] = useState<Record<string, { price: number; change: number; changePct: number; volume: number }>>({});
   
   // Fetch real-time prices & quotes (전일대비 등락률 포함)
@@ -218,7 +248,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           Object.keys(data).forEach(k => {
             if (data[k]?.price) priceMap[k] = data[k].price;
           });
-          setLivePrices(prev => ({ ...prev, ...priceMap }));
+          setLivePrices(prev => {
+            const next = { ...prev, ...priceMap };
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('saved_livePrices_date', todayStr);
+              localStorage.setItem('saved_livePrices_data', JSON.stringify(next));
+            }
+            return next;
+          });
         }
       } catch (e) { console.error(e); }
     };
@@ -226,7 +263,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     fetchLivePrices();
     const interval = setInterval(fetchLivePrices, 4000);
     return () => clearInterval(interval);
-  }, [orderStocks, holdings]);
+  }, [orderStocks, holdings, todayStr]);
 
   // PnL History & Detailed Ledger & Chart State
   const [pnlHistory, setPnlHistory] = useState<any[]>([]);
@@ -261,7 +298,13 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         return;
       }
       const data = await res.json();
-      setHoldings(Array.isArray(data) ? data : []);
+      if (Array.isArray(data) && data.length > 0) {
+        setHoldings(data);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('saved_holdings_date', todayStr);
+          localStorage.setItem('saved_holdings_data', JSON.stringify(data));
+        }
+      }
     } catch (e) { console.error(e); }
   };
 
@@ -270,7 +313,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const res = await fetch('/api/ledger-history');
       if (res.ok) {
         const data = await res.json();
-        setPnlHistory(Array.isArray(data) ? data : []);
+        const hist = Array.isArray(data) ? data : [];
+        setPnlHistory(hist);
       }
     } catch (e) { console.error(e); }
 
@@ -278,7 +322,33 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const resDetailed = await fetch('/api/detailed-trading-ledger');
       if (resDetailed.ok) {
         const dataDetailed = await resDetailed.json();
-        setDetailedLedger(Array.isArray(dataDetailed) ? dataDetailed : []);
+        const rows = Array.isArray(dataDetailed) ? dataDetailed : [];
+        setDetailedLedger(rows);
+        // 만약 보유잔고 상태가 비어있는데 당일(또는 최근 매매일) 매수 내역이 상세원장에 존재하면 즉시 복원
+        let targetRows = rows.filter((r: any) => r.trade_date === todayStr);
+        if (targetRows.length === 0 && rows.length > 0) {
+          const latestDate = rows[0]?.trade_date;
+          if (latestDate) {
+            targetRows = rows.filter((r: any) => r.trade_date === latestDate);
+          }
+        }
+        if (targetRows.length > 0) {
+          setHoldings(prev => {
+            if (prev.length > 0) return prev;
+            const restored = targetRows.map((r: any) => ({
+              ticker: r.ticker,
+              name: r.name || r.ticker,
+              buyPrice: Number(r.buy_price) || 0,
+              qty: Number(r.qty) || 0,
+              currentPrice: Number(r.sell_price) || Number(r.buy_price) || 0,
+            }));
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('saved_holdings_date', todayStr);
+              localStorage.setItem('saved_holdings_data', JSON.stringify(restored));
+            }
+            return restored;
+          });
+        }
       }
     } catch (e) { console.error(e); }
 
@@ -310,8 +380,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     return () => clearInterval(interval);
   }, []);
 
-  // KST(한국 표준시) 기준 오늘 날짜 및 최초 매수 완료 여부 판별 (최초 매수 후 추가 매수 엄격 제한)
-  const todayStr = new Date(Date.now() + 9 * 3600 * 1000).toISOString().split('T')[0];
+  // 최초 매수 완료 여부 판별 (최초 매수 후 추가 매수 엄격 제한)
   const alreadyBoughtToday =
     serverBoughtToday ||
     pnlHistory.some(h => h.date === todayStr) ||

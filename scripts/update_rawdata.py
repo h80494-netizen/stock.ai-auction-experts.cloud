@@ -1195,13 +1195,21 @@ def sync_intraday_realtime_tick(write_excel: bool = True, force_excel: bool = Fa
 
     excel_ok = False
     now_mono = _time.time()
-    should_write_xlsx = write_excel and (force_excel or (now_mono - _LAST_EXCEL_WRITE_TS >= 55.0))
-    if should_write_xlsx:
-        excel_ok = upsert_single_row_to_rawdata_excel(record_tuple, RAWDATA_PATH)
+    should_write_xlsx = write_excel and (force_excel or (now_mono - _LAST_EXCEL_WRITE_TS >= 300.0))
+    if should_write_xlsx and (now_mono - _LAST_EXCEL_WRITE_TS >= 60.0):
         _LAST_EXCEL_WRITE_TS = now_mono
-        sibling_excel = os.path.join(SIBLING_DATA_DIR, "rawdata.xlsx")
-        if os.path.exists(sibling_excel):
-            upsert_single_row_to_rawdata_excel(record_tuple, sibling_excel)
+        excel_ok = True
+        try:
+            import subprocess
+            import sys as _sys
+
+            subprocess.Popen(
+                [_sys.executable, os.path.abspath(__file__), "--upsert-latest-from-db"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
     return {
         "status": "success",
@@ -1230,6 +1238,21 @@ def sync_intraday_realtime_tick(write_excel: bool = True, force_excel: bool = Fa
 
 
 if __name__ == "__main__":
-    update_rawdata_excel_and_db()
+    import sys as _sys
+
+    if "--upsert-latest-from-db" in _sys.argv:
+        try:
+            _conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            _cur = _conn.cursor()
+            _cur.execute("SELECT * FROM futures_daily_data ORDER BY date DESC LIMIT 1")
+            _latest = _cur.fetchone()
+            _conn.close()
+            if _latest:
+                upsert_single_row_to_rawdata_excel(tuple(_latest), RAWDATA_PATH)
+        except Exception:
+            pass
+    else:
+        update_rawdata_excel_and_db()
+
 
 

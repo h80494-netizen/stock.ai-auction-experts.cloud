@@ -5,8 +5,13 @@ import json
 DB_FILE = os.path.join(os.path.dirname(__file__), "stock_data.sqlite3")
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     return conn
 
 def init_db():
@@ -648,6 +653,14 @@ def can_execute_initial_buy(trade_date: str, ticker: str = "", batch_id: str = "
         conn.close()
         return False, "금일 매도 정산이 이미 진행되어 추가 매수가 불가합니다."
 
+    # 당일 최초 매수 전이라면 전일 보유잔고(holdings)가 남아있더라도 금일 매수를 차단하지 않도록 정리
+    if not ledger_rows:
+        if ticker or batch_id:
+            c.execute("DELETE FROM holdings")
+            conn.commit()
+        conn.close()
+        return True, "OK"
+
     # 2) 동일 종목 중복/추가 매수 차단
     if ticker:
         pure_t = ticker.split(":")[-1]
@@ -665,7 +678,7 @@ def can_execute_initial_buy(trade_date: str, ticker: str = "", batch_id: str = "
         return False, f"최대 매수 종목 수({max_stocks}종목) 한도에 도달하여 추가 매수가 불가합니다."
 
     # 4) 당일 최초 매수 세션 여부 검증
-    if ledger_rows or h_cnt > 0:
+    if ledger_rows:
         if not batch_id:
             conn.close()
             return False, "금일 최초 매수주문 이후 추가 매수는 허용되지 않습니다."
@@ -728,10 +741,65 @@ def update_holding(ticker: str, name: str, qty: int, price: float):
     conn.close()
 
 def get_holdings():
+    from datetime import datetime, timedelta
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
     rows = c.fetchall()
+    if not rows:
+        # 당일(또는 최근 매매일) 아침 매수 내역이 trading_ledger에 존재하면 언제든(장중/장마감 후/재시작 후) 보유종목 자동 복원
+        today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+        c.execute(
+            "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = ? ORDER BY id ASC",
+            (today_str,),
+        )
+        buy_rows = c.fetchall()
+        if not buy_rows:
+            c.execute(
+                "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = (SELECT MAX(trade_date) FROM trading_ledger) ORDER BY id ASC"
+            )
+            buy_rows = c.fetchall()
+        if buy_rows:
+            for br in buy_rows:
+                tk = br["ticker"]
+                nm = br["name"] or tk
+                bp = float(br["buy_price"] or 0)
+                qt = int(br["qty"] or 0)
+                if tk and bp > 0 and qt > 0:
+                    c.execute(
+                        "INSERT OR IGNORE INTO holdings (ticker, name, buy_price, qty) VALUES (?, ?, ?, ?)",
+                        (tk, nm, bp, qt),
+                    )
+            conn.commit()
+            c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
+            rows = c.fetchall()
+    if not rows:
+        # 당일(또는 최근 매매일) 아침 매수 내역이 trading_ledger에 존재하면 언제든(장중/장마감 후/재시작 후) 보유종목 자동 복원
+        today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+        c.execute(
+            "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = ? ORDER BY id ASC",
+            (today_str,),
+        )
+        buy_rows = c.fetchall()
+        if not buy_rows:
+            c.execute(
+                "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = (SELECT MAX(trade_date) FROM trading_ledger) ORDER BY id ASC"
+            )
+            buy_rows = c.fetchall()
+        if buy_rows:
+            for br in buy_rows:
+                tk = br["ticker"]
+                nm = br["name"] or tk
+                bp = float(br["buy_price"] or 0)
+                qt = int(br["qty"] or 0)
+                if tk and bp > 0 and qt > 0:
+                    c.execute(
+                        "INSERT OR IGNORE INTO holdings (ticker, name, buy_price, qty) VALUES (?, ?, ?, ?)",
+                        (tk, nm, bp, qt),
+                    )
+            conn.commit()
+            c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
+            rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
