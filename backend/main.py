@@ -64,6 +64,12 @@ app.add_middleware(
 from routers import reports
 app.include_router(reports.router)
 
+try:
+    from routers import futures_sim
+    app.include_router(futures_sim.router)
+except Exception as e:
+    print(f"[Warn] futures_sim router load warning: {e}")
+
 # Background Sync Task for Reports
 import threading
 import time
@@ -1162,157 +1168,15 @@ def get_stock_summary(ticker: str):
         
     return {"summary": translated_text}
 
-@app.get("/api/report/{ticker}")
-def get_analyst_report(ticker: str):
-    """
-    Generates a mock Analyst Report for the given ticker, including DCF and RIM valuations
-    and AI-generated outlooks (Business, Investment, Price).
-    """
-    from database import get_stock, get_financials
-    from valuation import ValuationRequest, calculate_dcf_model, calculate_rim_model
-    import yfinance as yf
-    
-    pure_ticker = to_pure_ticker(ticker)
-    is_krx = is_korean_stock(ticker)
-    
-    # 1. Get stock info
-    stock = get_stock(pure_ticker) or get_stock(f"KRX:{pure_ticker}") or get_stock(ticker)
-    
-    if not stock:
-        # Fallback to yfinance only for US/Global stocks
-        yf_ticker = to_yf_ticker(ticker)
-        if is_krx:
-            stock = {"name": ticker, "ticker": pure_ticker, "price": 0, "eps": 0, "bps": 0}
-        else:
-            try:
-                from utils.yf_util import get_yf_ticker
-                info = get_yf_ticker(yf_ticker).info
-                stock = {
-                    "name": info.get("shortName", ticker),
-                    "ticker": ticker,
-                    "price": info.get("currentPrice", 0),
-                    "eps": info.get("trailingEps", 0),
-                    "bps": info.get("bookValue", 0)
-                }
-            except:
-                stock = {"name": ticker, "ticker": ticker, "price": 0, "eps": 0, "bps": 0}
-            
-    # 국내 주식 네이버 스크래핑 폴백 (DB에 eps, bps가 0일 경우 대비)
-    if is_krx and (not stock.get("bps") or not stock.get("eps") or not stock.get("price")):
-        import requests
-        from bs4 import BeautifulSoup
-        url = f"https://finance.naver.com/item/main.naver?code={pure_ticker}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 주가 및 등락률 파싱
-            if not stock.get('price'):
-                today_em = soup.select_one(".no_today .blind")
-                if today_em:
-                    stock['price'] = float(today_em.get_text(strip=True).replace(",", ""))
-                ex_em = soup.select_one(".no_exday .blind")
-                if ex_em:
-                    stock['change'] = float(ex_em.get_text(strip=True).replace(",", ""))
-                    
-            eps_em = soup.select_one("#_eps")
-            if eps_em: 
-                stock['eps'] = float(eps_em.get_text(strip=True).replace(",", ""))
-            bps_em = soup.select_one("#_bps")
-            if bps_em: 
-                stock['bps'] = float(bps_em.get_text(strip=True).replace(",", ""))
-                
-            per_table = soup.select_one(".per_table")
-            if per_table:
-                ems = per_table.find_all("em")
-                if len(ems) >= 6:
-                    # 추정 EPS 우선 적용
-                    est_eps = ems[3].get_text(strip=True).replace(",", "")
-                    if est_eps and est_eps != "N/A" and est_eps.replace("-", "").isdigit():
-                        stock['eps'] = float(est_eps)
-                    else:
-                        base_eps = ems[1].get_text(strip=True).replace(",", "")
-                        if base_eps and base_eps.replace("-", "").isdigit():
-                            stock['eps'] = float(base_eps)
-                            
-                    # BPS 적용
-                    bps_val = ems[5].get_text(strip=True).replace(",", "")
-                    if bps_val and bps_val.replace("-", "").isdigit():
-                        stock['bps'] = float(bps_val)
-            
-            # 최근 뉴스/보고서 요약 추출
-            recent_news = []
-            news_items = soup.select(".sub_section.news_section ul li a")
-            for item in news_items:
-                title = item.get_text(strip=True)
-                if title and title not in recent_news:
-                    recent_news.append(title)
-                    if len(recent_news) >= 5:
-                        break
-            if recent_news:
-                stock['recent_news'] = recent_news
-        except:
-            pass
-
-    # 2. Get valuation
-    req = ValuationRequest(coe=0.10, discount_3y=0.10, term_growth=0.05) # 장기성장률 5%, WACC(COE)=10%
-    
-    dcf_val = calculate_dcf_model(stock, req)
-    rim_val = calculate_rim_model(stock, req)
-    
-    target_price_dcf = dcf_val.get("theoretical_price", 0)
-    target_price_rim = rim_val.get("theoretical_price", 0)
-    
-    # 두 모델의 산술 평균을 최종 목표가로 산정
-    target_price = (target_price_dcf + target_price_rim) / 2
-    curr_price = stock.get("price", 0)
-    
-    if target_price > curr_price * 1.2:
-        opinion = "Buy"
-        opinion_text = "강력 매수"
-    elif target_price > curr_price * 1.05:
-        opinion = "Buy"
-        opinion_text = "매수"
-    elif target_price < curr_price * 0.9:
-        opinion = "Sell"
-        opinion_text = "매도"
-    else:
-        opinion = "Hold"
-        opinion_text = "보유"
-        
-    dart_summary = ""
-    if is_krx:
-        try:
-            import dart_analyzer
-            dart_summary = dart_analyzer.analyze_dart_with_ai(stock.get("name", ticker), pure_ticker)
-        except Exception as e:
-            print(f"DART analysis error: {e}")
-            
-    business_outlook = f"동사는 최근 매크로 환경 변화에도 불구하고 안정적인 이익 창출력을 유지할 것으로 전망됩니다. 특히 핵심 사업 부문에서의 시장 지배력이 유지되고 있으며, 신규 사업 부문에서의 성장 모멘텀이 기대됩니다."
-    
-    if dart_summary:
-        business_outlook = f"[DART 최근 주요 공시 AI 분석]\n{dart_summary}\n\n[기본 영업 전망]\n{business_outlook}"
-
-    investment_outlook = f"수익성 개선 추세가 이어지며, 잉여현금흐름(FCF) 증가에 따른 주주환원 확대 가능성이 존재합니다. 글로벌 경쟁사 대비 밸류에이션 매력도 존재하며, 장기적인 관점에서의 비중 확대를 권고합니다."
-    price_outlook = f"본 리포트에서는 잉여현금흐름을 할인한 DCF 모델(가치: {int(target_price_dcf):,}원)과 BPS 및 미래 초과이익을 고려한 RIM 모델(가치: {int(target_price_rim):,}원)을 복합적으로 고려하여 목표가 {int(target_price):,}원을 제시합니다. 현재 주가({int(curr_price):,}원) 대비 매력적인 구간으로 판단됩니다."
-
-    return {
-        "ticker": ticker,
-        "name": stock.get("name", ticker),
-        "current_price": curr_price,
-        "target_price": target_price,
-        "opinion": opinion,
-        "opinion_text": opinion_text,
-        "valuation_dcf": dcf_val,
-        "valuation_rim": rim_val,
-        "outlooks": {
-            "business": business_outlook,
-            "investment": investment_outlook,
-            "price": price_outlook
-        }
-    }
+@app.get("/api/report/{ticker}")
+def get_analyst_report(ticker: str, peers: str = "", refresh: bool = False):
+    """
+    시니어 기업분석 애널리스트(Equity Research Analyst) 프롬프트 기반 심층 밸류에이션 & 컨센서스 리포트 생성 API
+    - 6대 필수 항목 (산업전망·해자 / 성장·마진·CAPEX Time-lag / 재무안전성·이자보상 / 핵심 밸류에이션·현금흐름 / 주주환원 / 종합 결론·리스크)
+    - 2대 핵심 표 (2025A~2028E 시계열 추이 표 & 12M Forward 경쟁사 평균 멀티플 비교 표)
+    """
+    from equity_research_generator import generate_senior_analyst_report
+    return generate_senior_analyst_report(ticker=ticker, peers_param=peers, force_refresh=refresh)
 
 @app.get("/api/stock_news/{ticker}")
 def api_stock_news(ticker: str, name: str = "", market: str = "KR"):

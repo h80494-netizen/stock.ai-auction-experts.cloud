@@ -1,0 +1,394 @@
+{
+  "server_config": {
+    "service_name": "kospi200-futures-simulation",
+    "host": "127.0.0.1",
+    "dedicated_port": 18200,
+    "fallback_port_start": 18201,
+    "fallback_port_end": 18299,
+    "note": "다른 로컬 프로그램(3000, 5000, 8000, 8080, 8090 등)과 절대 겹치지 않는 KOSPI200 선물 시뮬레이션 전용 포트(18200)"
+  },
+  "trading_rules": {
+    "total_pool_models": 10,
+    "active_selected_models": 5,
+    "signal_values": {
+      "buy": 1,
+      "neutral": 0,
+      "sell": -1
+    },
+    "base_position_min": -5,
+    "base_position_max": 5,
+    "default_multiplier": 1,
+    "example_high_capital_multiplier": 10,
+    "signal_lock_deadline": "15:30:00",
+    "execution_window": {
+      "order_type": "동시호가 (Closing Call Auction)",
+      "start_time": "15:35:00",
+      "end_time": "15:45:00",
+      "timezone": "Asia/Seoul"
+    }
+  },
+  "market_parameters": {
+    "contract_multiplier_krw": 250000.0,
+    "mini_contract_multiplier_krw": 50000.0,
+    "brokerage_fee_rate": 3e-05,
+    "slippage_points": 0.02,
+    "risk_free_rate_annual": 0.0325,
+    "annual_trading_days": 250,
+    "initial_capital_per_base_unit_krw": 30000000.0
+  },
+  "model_replacement_rules": {
+    "default_mdd_threshold_pct": 12.0,
+    "mdd_rolling_window_days": 126,
+    "sharpe_lookback_days": 126,
+    "replacement_metric": "sharpe_ratio",
+    "cooldown_days_after_swap": 5
+  },
+  "consistency_evaluation_rules": {
+    "supported_periods_months": [
+      3,
+      6
+    ],
+    "month_to_trading_days": {
+      "3": 63,
+      "6": 126
+    },
+    "min_in_sample_sharpe": 0.5,
+    "min_out_of_sample_sharpe": 0.3,
+    "require_positive_out_of_sample_return": true,
+    "max_return_degradation_ratio": 0.6
+  },
+  "indicator_taxonomy": [
+    {
+      "group_id": "TECH",
+      "group_name": "기술지표 (Technical)",
+      "role_in_portfolio": "추세형(M01~M03)·반추세형(M04~M05)·횡보형(M06~M07)의 주 동력(Primary Signal 80%)",
+      "problem_solved": "기존 엑셀에서 모든 기술적 모델에 수급(외인/개인/차익)이 중복 합산되어 발생하던 다중공선성 제거",
+      "rawdata_columns": [
+        "선물_O/H/L/C (L~O열)",
+        "KOSPI200 현물 시고저종 (B~E열)",
+        "KODEX 레버리지 (AM열)"
+      ],
+      "key_metrics": [
+        "다중 MA 정배열(3/5/10/20/60)",
+        "전일 변동폭(H-L) 돌파",
+        "11일 고저 채널",
+        "더블 스토캐스틱(14-10-14-10-3)",
+        "시가 갭(Gap)",
+        "캔들 Energy-Popular",
+        "ETF 스프레드 밴드"
+      ]
+    },
+    {
+      "group_id": "SUPPLY",
+      "group_name": "수급지표 (Supply & Demand)",
+      "role_in_portfolio": "수급형 모델(M08)의 전담 동력(Primary Signal) 및 추세 돌파 모델(M02)의 20% 확증 필터",
+      "problem_solved": "차익거래·외국인·개인 순매수를 독립 수급 모델(M08)로 집중시켜 수급 급변 시 신호 왜곡 방지",
+      "rawdata_columns": [
+        "선물외인 (U열)",
+        "현물외인 (P열)",
+        "프로그램 차익순매수 (W열)",
+        "개인순매수 (X열)"
+      ],
+      "key_metrics": [
+        "외국인 선물 5일 누적 90일 백분위",
+        "프로그램 차익 누적 90일 백분위",
+        "외국인 현물 5일 순매수",
+        "개인 현물 순매수 역발상(Contrarian)"
+      ]
+    },
+    {
+      "group_id": "BREADTH",
+      "group_name": "종합지표 (Market Breadth & OI)",
+      "role_in_portfolio": "종합·심리형 모델(M10)의 주 동력 및 추세형(M01)의 거래 에너지 확증 필터",
+      "problem_solved": "대형주 위주 지수 착시를 ADR(등락비율)과 52주 신고/신저가 비율 및 미결제약정 HPI로 교차 검증",
+      "rawdata_columns": [
+        "Up/Down 상승-하락 종목수 (Z열)",
+        "신고-신저 종목수 (Y열)",
+        "선물 미결제약정 (V열)"
+      ],
+      "key_metrics": [
+        "20일 ADR (상승/하락 비율)",
+        "52주 신고가-신저가 5일 평균",
+        "미결제약정(OI) 증감",
+        "HPI (Herrick Payoff Index 90일 Rank)"
+      ]
+    },
+    {
+      "group_id": "SENTIMENT",
+      "group_name": "심리지표 (Option IV, Theoretical & PCR)",
+      "role_in_portfolio": "옵션 심리·수급 모델(M09)의 전담 동력 및 반추세형(M04) 극단 심리 필터",
+      "problem_solved": "Black-76 콜/풋 이론가 괴리율과 등가격 콜/풋 시고저종(PCR·하락강도) 및 옵션 투자자 수급을 결합해 변곡점 포착",
+      "rawdata_columns": [
+        "이론가Call/Put (Q~R열)",
+        "등가격 Call 시고저종 (AA~AD열)",
+        "등가격 Put 시고저종 (AE~AH열)",
+        "Call/Put 외인·개인 수급 (AI~AL열)"
+      ],
+      "key_metrics": [
+        "콜/풋 이론가 대비 괴리율 스프레드",
+        "등가격 Put/Call 가격비율 (PCR)",
+        "옵션 장중 하락강도 (AF열)",
+        "옵션 외국인-개인 순매수 다이버전스"
+      ]
+    }
+  ],
+  "active_model_pool": [
+    {
+      "model_id": "M01_MA_Trend",
+      "logic_id": "Logic9 & Logic5",
+      "name": "추세형 1 - 다중 이동평균 정배열·꼬리 추세 (Tech1 & Double)",
+      "category": "추세형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델35910.xlsx",
+      "excel_sheet": "TnT!BR & TnT!AX",
+      "primary_indicators": [
+        "선물 3/5/10/20/60MA 정배열",
+        "캔들 꼬리길이(Tail) 추세"
+      ],
+      "confirmation_filter": "종합지표(미결제약정 5일 증감) 추세 동조 15% 반영",
+      "mdd_threshold_pct": 12.0,
+      "is_selected": true,
+      "params": {
+        "short_w": 5,
+        "mid_w": 20,
+        "long_w": 60
+      }
+    },
+    {
+      "model_id": "M02_Breakthrough",
+      "logic_id": "Logic6",
+      "name": "추세형 2 - 전일 변동폭 변동성 돌파 (Breakthrough)",
+      "category": "추세형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델6.xlsx",
+      "excel_sheet": "Breakthrough!AA",
+      "primary_indicators": [
+        "전일 변동폭(H-L)",
+        "Buy Point(C+0.5*R) / Sell Point(C-0.5*R)"
+      ],
+      "confirmation_filter": "수급지표(외국인 선물 당일 방향) 돌파 진위 15% 필터",
+      "mdd_threshold_pct": 12.0,
+      "is_selected": false,
+      "params": {
+        "k": 0.5,
+        "lookback": 1
+      }
+    },
+    {
+      "model_id": "M03_TnT_Channel",
+      "logic_id": "Logic3",
+      "name": "추세형 3 - TnT 11일 이동평균 채널 돌파 (TnT Channel)",
+      "category": "추세형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델35910.xlsx",
+      "excel_sheet": "TnT!BJ",
+      "primary_indicators": [
+        "5MA의 11일 최고/최저 채널",
+        "3MA 상향/하향 돌파"
+      ],
+      "confirmation_filter": "종합지표(ADR 5일 방향) 추세 확증 15% 필터",
+      "mdd_threshold_pct": 12.0,
+      "is_selected": true,
+      "params": {
+        "channel_w": 11,
+        "ma_w": 5
+      }
+    },
+    {
+      "model_id": "M04_Double_Stochastic",
+      "logic_id": "Logic4",
+      "name": "반추세형 1 - 더블 스토캐스틱 & OTF 반전 (Double Stochastic)",
+      "category": "반추세형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델4.xlsx",
+      "excel_sheet": "Double_stochastic_Ocillator!S",
+      "primary_indicators": [
+        "14-10-14-10-3 DSlow%K/%D",
+        "Optimal Tracking Filter(OTF)"
+      ],
+      "confirmation_filter": "심리지표(풋/콜 레이쇼 과열) 역발상 확증 20% 반영",
+      "mdd_threshold_pct": 10.0,
+      "is_selected": false,
+      "params": {
+        "k_period": 14,
+        "smooth": 10,
+        "upper": 75,
+        "lower": 25
+      }
+    },
+    {
+      "model_id": "M05_Gap_Reversion",
+      "logic_id": "Logic8",
+      "name": "반추세형 2 - 시가 갭 과열 역추세 (Gap Reversion)",
+      "category": "반추세형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델8.xlsx",
+      "excel_sheet": "Gap!AB",
+      "primary_indicators": [
+        "시가 갭(O/prev_C - 1)",
+        "장중 양봉/음봉 되돌림(C - O)"
+      ],
+      "confirmation_filter": "수급지표(개인 과매수/과매도 역발상) 20% 반영",
+      "mdd_threshold_pct": 10.0,
+      "is_selected": true,
+      "params": {
+        "gap_threshold": 0.005
+      }
+    },
+    {
+      "model_id": "M06_ETF_Spread",
+      "logic_id": "Logic7",
+      "name": "횡보형 1 - KODEX 레버리지 ETF 스프레드 밴드 (ETF Spread)",
+      "category": "횡보형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델7.xlsx",
+      "excel_sheet": "ETF_spread!S",
+      "primary_indicators": [
+        "선물*500,000/KODEX레버리지 비율",
+        "50일 볼린저 밴드(k1=+2.0, k2=-1.5)"
+      ],
+      "confirmation_filter": "순수 가격 구조 괴리 평균회귀 (수급 혼재 제거)",
+      "mdd_threshold_pct": 10.0,
+      "is_selected": false,
+      "params": {
+        "window": 50,
+        "k_up": 1.8,
+        "k_down": -1.5
+      }
+    },
+    {
+      "model_id": "M07_Popular_Energy",
+      "logic_id": "Logic1 & Logic2",
+      "name": "횡보형 2 - 캔들 매수에너지·인기도 균형 (Popular & Energy)",
+      "category": "횡보형",
+      "indicator_group": "기술지표 (Technical)",
+      "excel_file": "모델1_2.xlsx",
+      "excel_sheet": "popular!CN & popular!DS",
+      "primary_indicators": [
+        "매수 Energy(H-O)",
+        "하단 지지 Popular(O-L)",
+        "E-P 20일 이동평균"
+      ],
+      "confirmation_filter": "순수 장중 캔들 에너지 균형 지표 (독립 운용)",
+      "mdd_threshold_pct": 11.0,
+      "is_selected": false,
+      "params": {
+        "ma_w": 20
+      }
+    },
+    {
+      "model_id": "M08_Foreign_Program_Flow",
+      "logic_id": "Foreign & Arbitrage & Individual",
+      "name": "수급형 1 - 외국인 선물·현물 & 차익거래·개인 수급 (Supply Flow)",
+      "category": "수급형",
+      "indicator_group": "수급지표 (Supply & Demand)",
+      "excel_file": "모델1_2.xlsx & 종합화면.xlsx",
+      "excel_sheet": "popular!BG~BI & Sheet2!AQ~AS",
+      "primary_indicators": [
+        "외국인 선물 순매수 90일 Rank",
+        "프로그램 차익순매수 90일 Rank",
+        "외국인 현물 5일 합",
+        "개인 순매수 역발상"
+      ],
+      "confirmation_filter": "전담 수급 모델 (타 기술적 모델에 중복 합산되던 수급을 집중)",
+      "mdd_threshold_pct": 11.0,
+      "is_selected": true,
+      "params": {
+        "rank_window": 90,
+        "upper_rank": 68,
+        "lower_rank": 23
+      }
+    },
+    {
+      "model_id": "M09_Option_Investor_Flow",
+      "logic_id": "Logic11",
+      "name": "심리·수급형 2 - 옵션 이론가 괴리율·풋콜레이쇼·옵션수급 (Option Sentiment)",
+      "category": "심리형",
+      "indicator_group": "심리지표 (Option IV & PCR)",
+      "excel_file": "모델11.xlsx",
+      "excel_sheet": "Option!AF, AG, BB",
+      "primary_indicators": [
+        "콜/풋 이론가 대비 괴리율(AG열)",
+        "옵션 하락강도(AF열)",
+        "풋/콜 가격비율(PCR)",
+        "옵션 외인·개인 순매수"
+      ],
+      "confirmation_filter": "Black-76 이론가 괴리율 + PCR + 옵션 수급 3중 결합",
+      "mdd_threshold_pct": 11.0,
+      "is_selected": false,
+      "params": {
+        "ma_w": 5
+      }
+    },
+    {
+      "model_id": "M10_Breadth_HPI_Sentiment",
+      "logic_id": "Logic12 & 신고저/ADR",
+      "name": "종합·심리형 - ADR 등락비·신고신저가·미결제 HPI (Market Breadth & HPI)",
+      "category": "심리형",
+      "indicator_group": "종합지표 (Breadth & OI)",
+      "excel_file": "rawdata.xlsx & 종합화면.xlsx",
+      "excel_sheet": "Sheet3!CT, CU & Sheet2!AJ",
+      "primary_indicators": [
+        "ADR 상승-하락 종목수 비율(Z열)",
+        "52주 신고가-신저가 비율(Y열)",
+        "미결제약정 HPI 90일 Rank(V열)"
+      ],
+      "confirmation_filter": "시장 내부 폭(Breadth)과 선물 미결제 에너지(OI) 전담 결합",
+      "mdd_threshold_pct": 11.0,
+      "is_selected": true,
+      "params": {
+        "adr_w": 20,
+        "rank_window": 90
+      }
+    }
+  ],
+  "candidate_models": [
+    {
+      "model_id": "C01_KTB_FX_Macro_Trend",
+      "logic_id": "Macro_W/$_KTB",
+      "name": "후보모델 1 - 원달러환율·국채선물 매크로 추세 결합형 (FX & KTB Macro)",
+      "category": "추세형",
+      "indicator_group": "기술지표 (Macro Technical)",
+      "excel_file": "모델1_2.xlsx & rawdata.xlsx",
+      "excel_sheet": "popular!Z(W/$) & Sheet3!G~K, S~T",
+      "mdd_threshold_pct": 11.0,
+      "params": {
+        "fx_w": 20,
+        "ktb_w": 20
+      }
+    },
+    {
+      "model_id": "C02_Basis_Arbitrage_Flow",
+      "logic_id": "Basis_Flow",
+      "name": "후보모델 2 - 선물·현물 베이시스 및 외인/개인 수급 다이버전스 (Basis Flow)",
+      "category": "수급형",
+      "indicator_group": "수급지표 (Supply & Demand)",
+      "excel_file": "rawdata.xlsx",
+      "excel_sheet": "Sheet3!E, O, P, W, X",
+      "mdd_threshold_pct": 10.5,
+      "params": {
+        "basis_w": 10,
+        "flow_w": 15
+      }
+    },
+    {
+      "model_id": "C03_Multi_Stoch_Momentum",
+      "logic_id": "Logic10 (Tech2)",
+      "name": "후보모델 3 - 다중 스토캐스틱(%K5/%K10/%K20) & ADR 가중합 (Tech2 SUM_P)",
+      "category": "심리형",
+      "indicator_group": "종합지표 (Tech + Breadth)",
+      "excel_file": "모델35910.xlsx & rawdata.xlsx",
+      "excel_sheet": "TnT!BS & Sheet3!BG~CB",
+      "mdd_threshold_pct": 11.5,
+      "params": {
+        "threshold": 0.35
+      }
+    }
+  ],
+  "archived_models": [],
+  "cloud_integration": {
+    "target_domain": "stock.ai-auction-experts.cloud",
+    "api_prefix": "/api/futures-sim",
+    "sqlite_db_name": "futures_simulation.db"
+  }
+}

@@ -497,8 +497,8 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
               </div>
             </div>
             <div className="flex-1 bg-[#111] border border-gray-800 rounded p-4 flex flex-col overflow-hidden">
-              <h3 className="text-lg font-bold text-gray-200 mb-2">주가 vs 최고목표가 추이 및 일자별 목표가</h3>
-              <div className="h-1/2 relative min-h-[200px]">
+              <h3 className="text-lg font-bold text-gray-200 mb-2">주가(우측 축) vs 목표가(좌측 전용 축) 추이 — Two-Scale 다이나믹 확대 뷰</h3>
+              <div className="h-[56%] relative min-h-[280px]">
                 {chartData.length > 0 ? (
                   <div className="w-full h-full absolute inset-0">
                     <KISChart 
@@ -521,13 +521,16 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
                     <thead>
                       <tr className="border-b border-gray-700 text-gray-400 bg-[#1a1a1a]">
                         <th className="p-2 font-normal">일자</th>
-                        <th className="p-2 text-right font-normal">목표가 및 내용</th>
+                        <th className="p-2 text-right font-normal">목표가 및 증권사 리포트 내용</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {[...selectedStock.fundamentals.target_history].sort((a: any, b: any) => new Date(b.time).getTime() - new Date(a.time).getTime()).map((hist: any, idx: number) => (
+                      {[...selectedStock.fundamentals.target_history]
+                        .filter((h: any) => !(h.time === '2026-07-13' && String(h.text || '').includes('저장된 목표가')) && Number(h.value || 0) > 0)
+                        .sort((a: any, b: any) => new Date(b.time).getTime() - new Date(a.time).getTime())
+                        .map((hist: any, idx: number) => (
                         <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-800">
-                          <td className="p-2 text-gray-300">{hist.time}</td>
+                          <td className="p-2 text-gray-300 whitespace-nowrap">{hist.time}</td>
                           <td className="p-2 text-right text-gray-200 font-bold">{hist.text || (hist.value ? hist.value.toLocaleString() : '')}</td>
                         </tr>
                       ))}
