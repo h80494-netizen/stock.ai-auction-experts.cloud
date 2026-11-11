@@ -1026,6 +1026,7 @@ def run_futures_simulation(
     adopted_at_idx: Dict[str, int] = {m_id: 0 for m_id in all_model_ids}
     adopted_at_date: Dict[str, str] = {m_id: dates[0] for m_id in all_model_ids}
     last_periodic_check_idx = 0
+    sim_active_set: List[str] = list(initial_active_snapshot)
 
     for i in range(n_days):
         # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션에 대한 수익 반영
@@ -1047,13 +1048,13 @@ def run_futures_simulation(
             fee_krw = abs(delta_contracts[i - 1]) * fut_close[i - 1] * contract_mult_krw * fee_rate
             portfolio_daily_pnl_krw[i] = gross_krw - fee_krw
 
-        # 2-A. 특정 채택 모델이 MDD를 갱신(New High Drawdown)하거나 MDD 한도를 초과할 때 즉시 교체
+        # 2-A. 특정 채택 모델이 MDD를 갱신(New High Drawdown)하거나 MDD 한도를 초과할 때 교체 이력 산출
         if rep_mode in ("HYBRID", "MDD_RENEWAL_ONLY") and i >= 25:
             win_start = max(1, i - mdd_window + 1)
             lb_start = max(1, i - lookback_days + 1)
-            inactive_ids = [m_id for m_id in pool_ids if m_id not in active_set]
+            inactive_ids = [m_id for m_id in pool_ids if m_id not in sim_active_set]
 
-            for idx_in_active, act_id in enumerate(list(active_set)):
+            for idx_in_active, act_id in enumerate(list(sim_active_set)):
                 adopt_i = adopted_at_idx.get(act_id, 0)
                 if i - max(adopt_i, last_swap_idx.get(act_id, -999)) < min_hold_days:
                     continue
@@ -1104,9 +1105,9 @@ def run_futures_simulation(
                             best_cand_id = cand_id
 
                     if best_cand_id and best_cand_sharpe > metrics_act["sharpe"] + 0.10:
-                        before_5 = list(active_set)
-                        active_set[idx_in_active] = best_cand_id
-                        after_5 = list(active_set)
+                        before_5 = list(sim_active_set)
+                        sim_active_set[idx_in_active] = best_cand_id
+                        after_5 = list(sim_active_set)
                         inactive_ids.remove(best_cand_id)
                         inactive_ids.append(act_id)
                         last_swap_idx[best_cand_id] = i
@@ -1143,19 +1144,19 @@ def run_futures_simulation(
                         }
                         swap_events.append(swap_info)
 
-        # 2-B. 정기 리밸런싱 교체 (3개월=63거래일 / 6개월=126거래일 주기로 위험조정수익률 하위 모델을 상위 대기모델로 교체)
+        # 2-B. 정기 리밸런싱 교체 이력 산출 (3개월=63거래일 / 6개월=126거래일 주기)
         if rep_mode in ("HYBRID", "PERIODIC_ONLY") and periodic_days > 0 and i >= periodic_days:
             if (i - last_periodic_check_idx) >= periodic_days:
                 last_periodic_check_idx = i
                 lb_p = max(1, i - periodic_days + 1)
-                inactive_ids = [m_id for m_id in pool_ids if m_id not in active_set]
+                inactive_ids = [m_id for m_id in pool_ids if m_id not in sim_active_set]
                 if inactive_ids:
                     # 활성 5개 모델 중 정기 평가기간(3M/6M) Sharpe 최하위 모델 탐색
                     worst_act_idx = -1
                     worst_act_id = None
                     worst_act_sharpe = 999.0
                     worst_act_mdd = 0.0
-                    for idx_a, act_id in enumerate(active_set):
+                    for idx_a, act_id in enumerate(sim_active_set):
                         if i - adopted_at_idx.get(act_id, 0) < 15:
                             continue
                         a_m = calculate_series_metrics(
@@ -1189,9 +1190,9 @@ def run_futures_simulation(
                         and best_cand_sharpe > max(0.25, worst_act_sharpe + 0.20)
                     ):
                         adopt_i = adopted_at_idx.get(worst_act_id, 0)
-                        before_5 = list(active_set)
-                        active_set[worst_act_idx] = best_cand_id
-                        after_5 = list(active_set)
+                        before_5 = list(sim_active_set)
+                        sim_active_set[worst_act_idx] = best_cand_id
+                        after_5 = list(sim_active_set)
                         last_swap_idx[best_cand_id] = i
                         last_swap_idx[worst_act_id] = i
                         adopted_at_idx[best_cand_id] = i
@@ -1222,7 +1223,7 @@ def run_futures_simulation(
                         }
                         swap_events.append(swap_info)
 
-        # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출 (선택된 5개 모델 시그널 합산)
+        # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출 (사용자가 선택한 현재 채택 5개 모델 시그널 합산 일관 유지)
         sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
@@ -2211,7 +2212,7 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
     else:
         sig_tail = pd.DataFrame()
 
-    active_5_set = set(sim_res.get("active_5_models") or [m["model_id"] for m in get_active_pool() if m.get("is_selected")])
+    active_5_set = set(m["model_id"] for m in get_active_pool() if m.get("is_selected")) or set(sim_res.get("active_5_models") or [])
     models_perf_list = sim_res.get("models_performance", [])
 
     prev_base_pos = 0

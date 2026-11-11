@@ -4328,7 +4328,9 @@ export default function FuturesSimulationView({
                           <div className="text-slate-400">
                             현재 계좌 보유:{" "}
                             <strong className="text-white">
-                              {kisAccountData?.effective_net_contracts ?? 0}계약
+                              {kisAccountData?.broker_connected
+                                ? kisAccountData?.effective_net_contracts ?? 0
+                                : prevC}계약
                             </strong>{" "}
                             → 당일 목표: <strong className="text-sky-300">{targetC}계약</strong>
                           </div>
