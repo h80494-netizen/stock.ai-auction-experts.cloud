@@ -379,6 +379,8 @@ export default function FuturesSimulationView({
   const [combineSupply, setCombineSupply] = useState(true);
   const [supplyWeight, setSupplyWeight] = useState(35);
   const [multiplier, setMultiplier] = useState(1);
+  const [pointValueKrw, setPointValueKrw] = useState<number>(50000); // 디폴트: 50,000원(미니선물), 선택: 250,000원(정규선물)
+  const initialCapitalKrw = 100000000; // 투자원금 기준: 1억원 (100,000,000원)
   const [mddThreshold, setMddThreshold] = useState(12.0);
   const [enableAutoSwap, setEnableAutoSwap] = useState(true);
   const [sharpeLookbackDays, setSharpeLookbackDays] = useState<number>(63); // 63=최근3개월, 126=최근6개월, 0=구간전체
@@ -454,9 +456,12 @@ export default function FuturesSimulationView({
   );
 
   const fetchIntradayStatus = useCallback(
-    async (syncNow: boolean = false) => {
+    async (syncNow: boolean = false, overridePointVal?: number) => {
+      const pv = overridePointVal ?? pointValueKrw;
       try {
-        const lockJson = await callApi(`/intraday-status?multiplier=${multiplier}&sync_now=${syncNow}`);
+        const lockJson = await callApi(
+          `/intraday-status?multiplier=${multiplier}&sync_now=${syncNow}&point_value_krw=${pv}&initial_capital_krw=${initialCapitalKrw}`
+        );
         if (lockJson?.success) {
           setLockStatus(lockJson.data);
         }
@@ -464,16 +469,17 @@ export default function FuturesSimulationView({
         console.error(e);
       }
     },
-    [callApi, multiplier]
+    [callApi, multiplier, pointValueKrw, initialCapitalKrw]
   );
 
   // Step 5 매매원장 전용 독립 조회 함수 (Step 1~4, 6의 시뮬레이션 구간과 완전 분리)
   const fetchLedgerOnly = useCallback(
-    async (opts?: { start?: string; end?: string; current?: boolean; models?: string[] }) => {
+    async (opts?: { start?: string; end?: string; current?: boolean; models?: string[]; pointVal?: number }) => {
       const targetStart = opts?.start ?? ledgerStartDate;
       const targetCurrent = opts?.current ?? ledgerUseCurrent;
       const targetEnd = targetCurrent ? "CURRENT" : opts?.end ?? ledgerEndDate;
       const targetModels = opts?.models ?? selectedModelIds;
+      const targetPointVal = opts?.pointVal ?? pointValueKrw;
 
       setLedgerLoading(true);
       try {
@@ -484,6 +490,8 @@ export default function FuturesSimulationView({
             start_date: targetStart,
             end_date: targetEnd,
             multiplier,
+            point_value_krw: targetPointVal,
+            initial_capital_krw: initialCapitalKrw,
             mdd_threshold_pct: mddThreshold,
             initial_selected_ids: targetModels,
             enable_auto_mdd_swap: replacementMode !== "MANUAL_FIXED" && enableAutoSwap,
@@ -511,6 +519,8 @@ export default function FuturesSimulationView({
       ledgerEndDate,
       ledgerUseCurrent,
       multiplier,
+      pointValueKrw,
+      initialCapitalKrw,
       mddThreshold,
       selectedModelIds,
       replacementMode,
@@ -533,6 +543,7 @@ export default function FuturesSimulationView({
       repMode?: string;
       periodicDays?: number;
       trigMode?: string;
+      pointVal?: number;
     }) => {
       const targetStart = opts?.start ?? startDate;
       const targetCurrent = opts?.current ?? useCurrent;
@@ -542,6 +553,7 @@ export default function FuturesSimulationView({
       const targetRepMode = opts?.repMode ?? replacementMode;
       const targetPeriodicDays = opts?.periodicDays ?? periodicRebalanceDays;
       const targetTrigMode = opts?.trigMode ?? mddTriggerMode;
+      const targetPointVal = opts?.pointVal ?? pointValueKrw;
 
       setLoading(true);
       try {
@@ -552,6 +564,8 @@ export default function FuturesSimulationView({
             start_date: targetStart,
             end_date: targetEnd,
             multiplier,
+            point_value_krw: targetPointVal,
+            initial_capital_krw: initialCapitalKrw,
             mdd_threshold_pct: mddThreshold,
             initial_selected_ids: targetModels,
             enable_auto_mdd_swap: targetRepMode !== "MANUAL_FIXED" && enableAutoSwap,
@@ -588,6 +602,8 @@ export default function FuturesSimulationView({
       endDate,
       useCurrent,
       multiplier,
+      pointValueKrw,
+      initialCapitalKrw,
       mddThreshold,
       selectedModelIds,
       enableAutoSwap,
@@ -632,6 +648,7 @@ export default function FuturesSimulationView({
           max_contracts_cap: kisCapInput,
           auto_execute_at_1535: kisAutoExecInput,
           default_ord_dvsn: kisOrdDvsnInput,
+          point_value_krw: pointValueKrw,
         }),
       });
       if (res?.success && res.data) {
@@ -701,7 +718,9 @@ export default function FuturesSimulationView({
     if (!autoRefreshRealtime || step !== 5) return;
     const timer = setInterval(async () => {
       try {
-        const lockJson = await callApi(`/intraday-status?multiplier=${multiplier}&sync_now=true`);
+        const lockJson = await callApi(
+          `/intraday-status?multiplier=${multiplier}&sync_now=true&point_value_krw=${pointValueKrw}&initial_capital_krw=${initialCapitalKrw}`
+        );
         if (lockJson?.success) {
           setLockStatus(lockJson.data);
         }
@@ -710,7 +729,31 @@ export default function FuturesSimulationView({
       }
     }, 30000);
     return () => clearInterval(timer);
-  }, [autoRefreshRealtime, step, callApi, multiplier]);
+  }, [autoRefreshRealtime, step, callApi, multiplier, pointValueKrw, initialCapitalKrw]);
+
+  const handlePointValueChange = async (nextPv: number) => {
+    setPointValueKrw(nextPv);
+    fetchSimulation({ pointVal: nextPv });
+    fetchLedgerOnly({ pointVal: nextPv });
+    fetchIntradayStatus(false, nextPv);
+    try {
+      const res = await callApi("/kis-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ point_value_krw: nextPv }),
+      });
+      if (res?.success && res.data) {
+        setKisAccountData(res.data);
+      }
+    } catch (_) {
+      // ignore
+    }
+    setBannerMsg(
+      nextPv === 50000
+        ? "✅ [미니선물 (승수 5만원 · 디폴트) 전환 완료] 투자원금 1억원 기준 모든 수익률·손익 및 KIS 종목코드(A05...)가 5만원 승수로 즉시 재계산되었습니다."
+        : "✅ [정규선물 (승수 25만원 · 선택) 전환 완료] 투자원금 1억원 기준 모든 수익률·손익 및 KIS 종목코드(A01...)가 25만원 승수로 즉시 재계산되었습니다."
+    );
+  };
 
   const applyQuickForwardSplit = (mode: "3M_3M" | "6M_6M" | "2025_2026" | "2425_2026") => {
     const latestStr = simData?.last_trading_summary?.last_trading_date || "2026-11-09";
@@ -835,6 +878,8 @@ export default function FuturesSimulationView({
           test_end_date: useCur ? "CURRENT" : opts?.tEnd ?? testEnd,
           selected_model_ids: opts?.models ?? selectedModelIds,
           multiplier,
+          point_value_krw: pointValueKrw,
+          initial_capital_krw: initialCapitalKrw,
           combine_supply: combineSupply,
           supply_weight: supplyWeight / 100.0,
         }),
@@ -881,6 +926,8 @@ export default function FuturesSimulationView({
         body: JSON.stringify({
           write_excel: writeExcel,
           multiplier,
+          point_value_krw: pointValueKrw,
+          initial_capital_krw: initialCapitalKrw,
         }),
       });
       if (json?.success) {
@@ -907,6 +954,8 @@ export default function FuturesSimulationView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           multiplier,
+          point_value_krw: pointValueKrw,
+          initial_capital_krw: initialCapitalKrw,
           mdd_threshold_pct: mddThreshold,
           sync_live_first: true,
           update_excel: true,
@@ -982,12 +1031,14 @@ export default function FuturesSimulationView({
     return Number((((curEq - prevEq) / prevEq) * 100).toFixed(3));
   });
 
-  // 선택된 매매원장 기간의 시작점을 0%로 정규화한 기간 누적 매매수익률(%) 산출
-  const baseLedgerEq =
-    ledgerChronological.length > 0 ? Number(ledgerChronological[0]?.equity_index || 100) : 100;
+  // 선택된 매매원장 기간의 시작점을 0%로 정규화한 기간 누적 매매수익률(%) 산출 (투자원금 1억원 기준)
+  let runningLedgerPnlKrw = 0;
+  const ledgerCumRetByDate: Record<string, number> = {};
   const ledgerCumRetPct: number[] = ledgerChronological.map((r: any) => {
-    const eq = Number(r.equity_index || 100);
-    return Number((((eq / Math.max(1, baseLedgerEq)) - 1.0) * 100).toFixed(2));
+    runningLedgerPnlKrw += Number(r.daily_pnl_krw) || 0;
+    const cPct = Number(((runningLedgerPnlKrw / initialCapitalKrw) * 100).toFixed(2));
+    ledgerCumRetByDate[String(r.date)] = cPct;
+    return cPct;
   });
   const ledgerTargetContracts: number[] = ledgerChronological.map(
     (r: any) => Number(r.target_contracts) || 0
@@ -1561,6 +1612,51 @@ export default function FuturesSimulationView({
             >
               {realtimeSyncing ? "Step 5 실시간 동기화중..." : "🔄 실시간 가격 & rawdata.xlsx 갱신 (Step 5)"}
             </button>
+          </div>
+        </div>
+
+        {/* 선물 계약 승수 선택 (디폴트: 미니선물 5만원 / 선택: 정규선물 25만원) & 투자원금 1억원 기준 컨트롤 바 */}
+        <div className="bg-slate-950/90 border border-emerald-500/40 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-extrabold text-emerald-300">
+              ⚙️ 선물 계약 승수 &amp; 투자원금 기준 설정:
+            </span>
+            <button
+              type="button"
+              onClick={() => handlePointValueChange(50000)}
+              className={`px-3 py-1.5 rounded-lg font-extrabold cursor-pointer transition border ${
+                pointValueKrw === 50000
+                  ? "bg-emerald-600 text-white border-emerald-400 shadow"
+                  : "bg-slate-900 text-slate-400 border-slate-700 hover:text-white"
+              }`}
+            >
+              🟢 미니선물 (승수 5만원 · 디폴트)
+            </button>
+            <button
+              type="button"
+              onClick={() => handlePointValueChange(250000)}
+              className={`px-3 py-1.5 rounded-lg font-extrabold cursor-pointer transition border ${
+                pointValueKrw === 250000
+                  ? "bg-indigo-600 text-white border-indigo-400 shadow"
+                  : "bg-slate-900 text-slate-400 border-slate-700 hover:text-white"
+              }`}
+            >
+              🔵 정규선물 (승수 25만원 · 선택사항)
+            </button>
+            <span className="px-2.5 py-1 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-mono font-bold">
+              💰 투자원금 기준: 1억원 (100,000,000원)
+            </span>
+          </div>
+          <div className="text-[11px] font-mono text-slate-300">
+            현재 적용:{" "}
+            <strong className="text-emerald-300">
+              {pointValueKrw === 50000 ? "KOSPI200 미니선물 (1pt = 50,000원)" : "KOSPI200 정규선물 (1pt = 250,000원)"}
+            </strong>{" "}
+            | 1계약 약정금액(815pt 기준):{" "}
+            <strong className="text-sky-300">
+              {pointValueKrw === 50000 ? "약 4,075만원" : "약 2억 375만원"}
+            </strong>{" "}
+            | 수익률 = 손익(원) ÷ 1억원
           </div>
         </div>
 
@@ -2560,9 +2656,9 @@ export default function FuturesSimulationView({
                             ).toFixed(3)
                           )
                         : 0;
-                    const cRet = Number(
-                      (((Number(r.equity_index || 100) / Math.max(1, baseLedgerEq)) - 1.0) * 100).toFixed(2)
-                    );
+                    const cRet =
+                      ledgerCumRetByDate[String(r.date)] ??
+                      Number((Number(r.equity_index || 100) - 100).toFixed(2));
                     return (
                       <tr key={r.date} className="hover:bg-slate-800/50">
                         <td className="p-2 font-bold text-white">{r.date}</td>
@@ -4188,7 +4284,7 @@ export default function FuturesSimulationView({
 
                     <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5">
                       <div className="text-[11px] text-slate-400">
-                        ④ 당일 실시간 매매손익 &amp; 확정 상태
+                        ④ 당일 실시간 매매손익 ({pointValueKrw === 50000 ? "미니 5만원" : "정규 25만원"} · 원금 1억)
                       </div>
                       <div
                         className={`text-xl font-extrabold font-mono mt-1 ${
@@ -4228,7 +4324,10 @@ export default function FuturesSimulationView({
                         <span className="text-xs text-slate-400 font-mono">
                           근월물 코드:{" "}
                           <strong className="text-amber-300">
-                            {kisAccountData?.config?.active_fut_code || "A01612"}
+                            {pointValueKrw === 50000
+                              ? (kisAccountData?.config?.active_fut_code || "A05612").replace(/^A01/, "A05")
+                              : (kisAccountData?.config?.active_fut_code || "A01612").replace(/^A05/, "A01")}{" "}
+                            ({pointValueKrw === 50000 ? "미니선물·승수 5만원" : "정규선물·승수 25만원"})
                           </strong>
                         </span>
                       </div>
@@ -4649,9 +4748,9 @@ export default function FuturesSimulationView({
                           ).toFixed(3)
                         )
                       : 0;
-                  const cRet = Number(
-                    (((Number(r.equity_index || 100) / Math.max(1, baseLedgerEq)) - 1.0) * 100).toFixed(2)
-                  );
+                  const cRet =
+                    ledgerCumRetByDate[String(r.date)] ??
+                    Number((Number(r.equity_index || 100) - 100).toFixed(2));
                   return (
                     <tr key={r.date} className="hover:bg-slate-800/50">
                       <td className="p-2 font-bold text-white">{r.date}</td>

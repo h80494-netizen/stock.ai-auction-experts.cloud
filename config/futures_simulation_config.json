@@ -28,13 +28,16 @@
     }
   },
   "market_parameters": {
-    "contract_multiplier_krw": 250000.0,
+    "contract_multiplier_krw": 50000.0,
+    "default_contract_multiplier_krw": 50000.0,
     "mini_contract_multiplier_krw": 50000.0,
+    "standard_contract_multiplier_krw": 250000.0,
+    "initial_capital_krw": 100000000.0,
     "brokerage_fee_rate": 3e-05,
     "slippage_points": 0.02,
     "risk_free_rate_annual": 0.0325,
     "annual_trading_days": 250,
-    "initial_capital_per_base_unit_krw": 30000000.0
+    "initial_capital_per_base_unit_krw": 20000000.0
   },
   "model_replacement_rules": {
     "default_mdd_threshold_pct": 12.0,

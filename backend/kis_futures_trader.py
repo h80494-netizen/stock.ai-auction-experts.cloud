@@ -25,11 +25,12 @@ def get_second_thursday_date(year: int, month: int) -> datetime.date:
     return first_day + datetime.timedelta(days=offset + 7)
 
 
-def get_active_kospi200_futures_code(ref_date: Optional[datetime.date] = None) -> str:
+def get_active_kospi200_futures_code(ref_date: Optional[datetime.date] = None, is_mini: bool = False) -> str:
     """
-    기준일(ref_date) 기준 최근월물 KOSPI200 선물 KRX 표준 단축코드(예: 2026년 12월물 -> A01612)를 자동 산출합니다.
+    기준일(ref_date) 기준 최근월물 KOSPI200 선물/미니선물 KRX 표준 단축코드를 자동 산출합니다.
     - 만기월: 3, 6, 9, 12월 (각 월 두 번째 목요일이 최종거래일)
-    - KRX 신 표준단축코드 체계: 'A01' + 연도끝자리(예: 2026 -> '6') + 월2자리('03','06','09','12')
+    - 정규선물(승수 25만원, is_mini=False): 'A01' + 연도끝자리 + 월2자리 (예: A01612)
+    - 미니선물(승수 5만원, is_mini=True): 'A05' + 연도끝자리 + 월2자리 (예: A05612)
     """
     if ref_date is None:
         ref_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date()
@@ -56,7 +57,8 @@ def get_active_kospi200_futures_code(ref_date: Optional[datetime.date] = None) -
         target_month = 3
 
     yr_digit = str(target_year)[-1]
-    return f"A01{yr_digit}{target_month:02d}"
+    prefix = "A05" if is_mini else "A01"
+    return f"{prefix}{yr_digit}{target_month:02d}"
 
 
 def _get_shared_kis_client(is_mock: bool = True) -> Optional[KISApiClient]:
@@ -250,6 +252,10 @@ def get_kis_futures_trading_config() -> Dict[str, Any]:
     max_contracts_cap = int(k_cfg.get("max_contracts_cap", 10))
     auto_execute_1535 = bool(k_cfg.get("auto_execute_at_1535", False))
     default_ord_dvsn = str(k_cfg.get("default_ord_dvsn", "02"))  # 02: 시장가(동시호가), 01: 지정가, 03: 조건부지정가
+    point_value_krw = int(k_cfg.get("point_value_krw", 50000))
+    if point_value_krw not in (50000, 250000):
+        point_value_krw = 50000
+    is_mini = point_value_krw == 50000
 
     return {
         "mode": mode.upper(),  # "PAPER" (모의계좌) or "LIVE" (실전계좌)
@@ -260,7 +266,11 @@ def get_kis_futures_trading_config() -> Dict[str, Any]:
         "max_contracts_cap": max_contracts_cap,
         "auto_execute_at_1535": auto_execute_1535,
         "default_ord_dvsn": default_ord_dvsn,
-        "active_fut_code": get_active_kospi200_futures_code(),
+        "point_value_krw": point_value_krw,
+        "contract_type": "MINI" if is_mini else "STANDARD",
+        "contract_type_label": "미니선물 (승수 5만원)" if is_mini else "정규선물 (승수 25만원)",
+        "initial_capital_krw": 100000000,
+        "active_fut_code": get_active_kospi200_futures_code(is_mini=is_mini),
     }
 
 
@@ -279,6 +289,9 @@ def update_kis_futures_trading_config(updates: Dict[str, Any]) -> Dict[str, Any]
         cur["auto_execute_at_1535"] = bool(updates["auto_execute_at_1535"])
     if "default_ord_dvsn" in updates:
         cur["default_ord_dvsn"] = str(updates["default_ord_dvsn"])
+    if "point_value_krw" in updates and updates["point_value_krw"] is not None:
+        pv = int(updates["point_value_krw"])
+        cur["point_value_krw"] = 250000 if pv >= 150000 else 50000
 
     cfg["kis_futures_trading"] = cur
     save_simulation_config(cfg)
@@ -336,7 +349,7 @@ def inquire_kis_futures_balance() -> Dict[str, Any]:
                         side_name = str(item.get("sll_buy_dvsn_name", ""))
                         is_short = side_cd == "01" or "매도" in side_name
                         signed_qty = -qty if is_short else qty
-                        if pdno.startswith("A01") or pdno.startswith("101"):
+                        if pdno.startswith("A01") or pdno.startswith("A05") or pdno.startswith("101") or pdno.startswith("105"):
                             net_contracts += signed_qty
                         positions.append(
                             {
@@ -529,3 +542,4 @@ def execute_kis_futures_order(
         "broker_order_no": broker_order_no,
         "broker_msg": broker_msg,
     }
+

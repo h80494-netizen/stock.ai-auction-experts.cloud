@@ -718,19 +718,17 @@ def compute_indicator_group_diagnostics(df: pd.DataFrame, sig_df: Optional[pd.Da
     }
 
 
-def calculate_series_metrics(daily_returns: Any, annual_days: int = 250, rf_annual: float = 0.0325) -> Dict[str, Any]:
+def calculate_series_metrics(
+    daily_returns: Any,
+    annual_days: int = 250,
+    rf_annual: float = 0.0325,
+    compound: bool = False,
+) -> Dict[str, Any]:
     """
     수익률 시계열로부터 사용자 요청 10대 정밀 평가지표 및 누적/연환산 수익률을 계산합니다 (NumPy 고속 벡터화):
-    1) Hitting Ratio (hitting_ratio_pct / win_rate_pct)
-    2) 플러스 수익률 일수 (pos_days)
-    3) 마이너스 수익률 일수 (neg_days)
-    4) 일간 플러스 수익률 평균 (avg_pos_return_pct)
-    5) 일간 마이너스 수익률 평균 (avg_neg_return_pct)
-    6) MDD (mdd_pct)
-    7) Profit/Loss Factor (profit_loss_factor / pl_ratio)
-    8) Sharpe Ratio (sharpe_ratio / sharpe)
-    9) Sortino Ratio (sortino_ratio)
-    10) Calmar Ratio (calmar_ratio)
+    - compound=False (기본값, 투자원금 1억원 고정 기준): 일별 원화 손익 / 투자원금(1억원) 비율을 단리(합산)하여
+      누적 매매수익률(%)과 누적 손익(원)/1억원이 100% 일치하도록 산출합니다.
+    - compound=True (KOSPI200/선물 지수 벤치마크): 지수 복리 수익률을 산출합니다.
     """
     arr = np.asarray(daily_returns, dtype=float)
     if arr.size > 0:
@@ -757,19 +755,26 @@ def calculate_series_metrics(daily_returns: Any, annual_days: int = 250, rf_annu
             "calmar_ratio": 0.0,
         }
 
-    equity = np.cumprod(1.0 + arr)
-    final_eq = float(equity[-1])
-    cum_ret_pct = float((final_eq - 1.0) * 100.0)
-
     n_obs = max(1, int(arr.size))
-    if final_eq > 0:
-        ann_ret_pct = float(((final_eq ** (annual_days / n_obs)) - 1.0) * 100.0)
+    if compound:
+        equity = np.cumprod(1.0 + arr)
+        final_eq = float(equity[-1])
+        cum_ret_pct = float((final_eq - 1.0) * 100.0)
+        if final_eq > 0:
+            ann_ret_pct = float(((final_eq ** (annual_days / n_obs)) - 1.0) * 100.0)
+        else:
+            ann_ret_pct = -100.0
+        peak = np.maximum.accumulate(equity)
+        dd = (peak - equity) / np.maximum(1e-12, peak)
+        mdd_pct = float(np.max(dd) * 100.0)
     else:
-        ann_ret_pct = -100.0
-
-    peak = np.maximum.accumulate(equity)
-    dd = (peak - equity) / (peak + 1e-12)
-    mdd_pct = float(np.max(dd) * 100.0)
+        cum_ret_arr = np.cumsum(arr)
+        equity = 1.0 + cum_ret_arr
+        cum_ret_pct = float(cum_ret_arr[-1] * 100.0)
+        ann_ret_pct = float(np.mean(arr) * annual_days * 100.0)
+        peak = np.maximum.accumulate(np.maximum(1.0, equity))
+        dd = (peak - equity) / np.maximum(1.0, peak)
+        mdd_pct = float(np.max(dd) * 100.0)
 
     pos_mask = arr > 0
     neg_mask = arr < 0
@@ -852,18 +857,13 @@ def run_futures_simulation(
     replacement_mode: str = "HYBRID",
     periodic_rebalance_days: int = 63,
     mdd_trigger_mode: str = "RENEWAL_OR_LIMIT",
+    point_value_krw: Optional[float] = None,
+    initial_capital_krw: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     선물 트레이딩 10대 모델 시뮬레이션 실행기:
-    - 10개 운영 모델 중 선택된 모델들의 시그널 합산 (-5 ~ +5)
-    - 추세·역추세 모델에 4대 수급(외국인순매수, 프로그램차익 추세, 미결제약정, Put/Call Ratio) 합산 옵션(combine_supply, supply_weight) 지원
-    - 투자금액 멀티플(multiplier)을 곱해 목표 계약 수 산출 (예: 멀티플 10 -> -50 ~ +50 계약)
-    - 전일 보유 포지션 대비 변화 수량(delta_contracts)만큼만 15:35~15:45 종가 동시호가로 매매
-    - 모델 교체 시스템(replacement_mode):
-      1) HYBRID (기본): 정기 리밸런싱(3개월=63일 / 6개월=126일) + 특정 모델 MDD 갱신/한도초과 시 교체 병행
-      2) PERIODIC_ONLY: 3개월(63일) 또는 6개월(126일) 정기 주기에만 위험조정수익률(Sharpe) 기준으로 교체
-      3) MDD_RENEWAL_ONLY: 특정 채택 모델이 직전 최대 MDD를 갱신하거나 MDD 한도를 초과할 때만 즉시 교체
-      4) MANUAL_FIXED: 자동 교체 없이 선택된 5개 모델 고정 운용
+    - 기본 승수: 50,000원(미니선물 디폴트) / 선택사항: 250,000원(정규선물)
+    - 기본 투자원금: 100,000,000원 (1억원 기준)
     """
     init_sim_tables()
     cfg = load_simulation_config()
@@ -891,7 +891,18 @@ def run_futures_simulation(
     annual_days = int(m_params.get("annual_trading_days", 250))
     rf_annual = float(m_params.get("risk_free_rate_annual", 0.0325))
     fee_rate = float(m_params.get("brokerage_fee_rate", 0.00003))
-    contract_mult_krw = float(m_params.get("contract_multiplier_krw", 250000.0))
+    contract_mult_krw = float(
+        point_value_krw
+        if point_value_krw is not None and point_value_krw > 0
+        else m_params.get("contract_multiplier_krw", 50000.0)
+    )
+    if contract_mult_krw not in (50000.0, 250000.0):
+        contract_mult_krw = 250000.0 if contract_mult_krw >= 150000.0 else 50000.0
+    base_capital_krw = float(
+        initial_capital_krw
+        if initial_capital_krw is not None and initial_capital_krw > 0
+        else m_params.get("initial_capital_krw", 100000000.0)
+    )
 
     if end_date and str(end_date).strip().upper() in ("CURRENT", "NOW", "LATEST", "현재", ""):
         end_date = None
@@ -948,6 +959,8 @@ def run_futures_simulation(
         rep_mode,
         periodic_days,
         trig_mode,
+        int(contract_mult_krw),
+        int(base_capital_krw),
     )
     if not record_swaps_to_db and sim_cache_key in _CACHED_SIM_RESULTS:
         return _CACHED_SIM_RESULTS[sim_cache_key]
@@ -970,7 +983,12 @@ def run_futures_simulation(
         curr_k = k200_close[i]
         k200_pct_ret[i] = (curr_k - prev_k) / prev_k if prev_k > 0 else 0.0
 
-    # 각 모델별 일간 수익률 행렬 (현재 선택 모드, 순수 모드, 수급합산 모드 각각 산출)
+    # 각 모델별 일간 수익률 행렬 (투자원금 1억원 & 선택 승수(5만원/25만원) 기준)
+    # 5개 선택 모델이 투자원금(1억원)을 분담(모델당 2,000만원 할당 = 1계약×mult 운용 시 합산 5모델 평균이 포트폴리오 1억원 수익률과 정확히 일치)
+    n_sel = max(1, len(initial_active_snapshot))
+    per_model_capital_krw = max(1.0, base_capital_krw / float(n_sel))
+    unit_pt_ret = (fut_pt_diff * contract_mult_krw * mult) / per_model_capital_krw
+
     model_daily_rets: Dict[str, np.ndarray] = {}
     model_pure_rets: Dict[str, np.ndarray] = {}
     model_comb_rets: Dict[str, np.ndarray] = {}
@@ -988,32 +1006,31 @@ def run_futures_simulation(
         model_comb_sig_arrays[m_id] = comb_sigs
 
         m_ret = np.zeros(n_days)
-        m_ret[1:] = sigs[:-1] * fut_pct_ret[1:]
+        m_ret[1:] = sigs[:-1] * unit_pt_ret[1:]
         model_daily_rets[m_id] = m_ret
 
         p_ret = np.zeros(n_days)
-        p_ret[1:] = pure_sigs[:-1] * fut_pct_ret[1:]
+        p_ret[1:] = pure_sigs[:-1] * unit_pt_ret[1:]
         model_pure_rets[m_id] = p_ret
 
         c_ret = np.zeros(n_days)
-        c_ret[1:] = comb_sigs[:-1] * fut_pct_ret[1:]
+        c_ret[1:] = comb_sigs[:-1] * unit_pt_ret[1:]
         model_comb_rets[m_id] = c_ret
 
-        model_equity_curves[m_id] = np.cumprod(1.0 + m_ret) * 100.0
+        model_equity_curves[m_id] = 100.0 + np.cumsum(m_ret) * 100.0
 
-    # 순수 신호 기준 포트폴리오 비교 곡선 (수급 미합산 시 성과 비교용 - 벡터화 연산)
+    # 순수 신호 기준 포트폴리오 비교 곡선 (투자원금 1억원 & 선택 승수 기준)
     pure_port_ret = np.zeros(n_days)
     comb_port_ret = np.zeros(n_days)
-    n_sel = max(1, len(initial_active_snapshot))
     if initial_active_snapshot and n_days > 1:
         p_sum_arr = sum(model_pure_sig_arrays[m_id][:-1] for m_id in initial_active_snapshot)
         c_sum_arr = sum(model_comb_sig_arrays[m_id][:-1] for m_id in initial_active_snapshot)
-        pure_port_ret[1:] = (p_sum_arr / float(n_sel)) * fut_pct_ret[1:]
-        comb_port_ret[1:] = (c_sum_arr / float(n_sel)) * fut_pct_ret[1:]
-    pure_equity_curve = np.cumprod(1.0 + pure_port_ret) * 100.0
-    comb_static_equity_curve = np.cumprod(1.0 + comb_port_ret) * 100.0
+        pure_port_ret[1:] = (p_sum_arr * mult * fut_pt_diff[1:] * contract_mult_krw) / base_capital_krw
+        comb_port_ret[1:] = (c_sum_arr * mult * fut_pt_diff[1:] * contract_mult_krw) / base_capital_krw
+    pure_equity_curve = 100.0 + np.cumsum(pure_port_ret) * 100.0
+    comb_static_equity_curve = 100.0 + np.cumsum(comb_port_ret) * 100.0
 
-    # 시뮬레이션 상태 추적 배열
+    # 시뮬레이션 상태 추적 배열 (투자원금 1억원 = 지수 100.0 기준)
     base_positions = np.zeros(n_days, dtype=int)      # -5 ~ +5
     target_contracts = np.zeros(n_days, dtype=int)    # -5*M ~ +5*M
     delta_contracts = np.zeros(n_days, dtype=int)     # 매매 수량 (현재 포지션 대비 변화량)
@@ -1029,24 +1046,20 @@ def run_futures_simulation(
     sim_active_set: List[str] = list(initial_active_snapshot)
 
     for i in range(n_days):
-        # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션에 대한 수익 반영
+        # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션에 대한 수익 반영 (투자원금 1억원 및 선택 승수 기준)
         if i > 0:
             prev_base_pos = base_positions[i - 1]
             prev_contracts = target_contracts[i - 1]
-            if prev_base_pos == 0:
-                net_ret = 0.0
-            else:
-                # 기본단위(-5~+5) 기준 정규화 수익률 (선택된 모델 수 기준 평균 노출)
-                raw_ret = (prev_base_pos / float(max(1, len(active_set)))) * fut_pct_ret[i]
-                traded_units = abs(delta_contracts[i - 1]) / max(1, len(active_set) * mult)
-                net_ret = raw_ret - (traded_units * fee_rate)
-            portfolio_daily_ret[i] = net_ret
-            equity_curve[i] = equity_curve[i - 1] * (1.0 + net_ret)
-
-            # 원화 환산 일별 손익 (계약수 * 포인트변화 * 승수 - 수수료)
+            # 원화 환산 일별 손익 (계약수 * 포인트변화 * 승수(5만원/25만원) - 수수료)
             gross_krw = prev_contracts * fut_pt_diff[i] * contract_mult_krw
             fee_krw = abs(delta_contracts[i - 1]) * fut_close[i - 1] * contract_mult_krw * fee_rate
-            portfolio_daily_pnl_krw[i] = gross_krw - fee_krw
+            net_pnl_krw = gross_krw - fee_krw
+            portfolio_daily_pnl_krw[i] = net_pnl_krw
+
+            # 투자원금(1억원 = 100,000,000원) 대비 일별 수익률 및 누적수익지수(100.0 + 누적손익/1억원*100)
+            net_ret = net_pnl_krw / base_capital_krw
+            portfolio_daily_ret[i] = net_ret
+            equity_curve[i] = equity_curve[i - 1] + (net_ret * 100.0)
 
         # 2-A. 특정 채택 모델이 MDD를 갱신(New High Drawdown)하거나 MDD 한도를 초과할 때 교체 이력 산출
         if rep_mode in ("HYBRID", "MDD_RENEWAL_ONLY") and i >= 25:
@@ -1356,12 +1369,12 @@ def run_futures_simulation(
             }
         )
 
-    # KOSPI200 현물 및 선물 단순보유 벤치마크 10대 평가지표 산출
+    # KOSPI200 현물 및 선물 단순보유 벤치마크 10대 평가지표 산출 (지수는 복리 기준)
     k200_benchmark_metrics = calculate_series_metrics(
-        pd.Series(k200_pct_ret[1:]), annual_days=annual_days, rf_annual=rf_annual
+        pd.Series(k200_pct_ret[1:]), annual_days=annual_days, rf_annual=rf_annual, compound=True
     )
     futures_benchmark_metrics = calculate_series_metrics(
-        pd.Series(fut_pct_ret[1:]), annual_days=annual_days, rf_annual=rf_annual
+        pd.Series(fut_pct_ret[1:]), annual_days=annual_days, rf_annual=rf_annual, compound=True
     )
 
     # 마지막 실제 체결(포지션 진입/변화) 트레이딩 탐색
@@ -1611,6 +1624,9 @@ def run_futures_simulation(
             "end_date": dates[-1],
             "total_trading_days": n_days,
             "multiplier": mult,
+            "point_value_krw": int(contract_mult_krw),
+            "contract_type_label": "미니선물 (승수 5만원)" if int(contract_mult_krw) == 50000 else "정규선물 (승수 25만원)",
+            "initial_capital_krw": int(base_capital_krw),
             "combine_supply": combine_supply,
             "supply_weight": round(float(supply_weight), 2),
             "position_range_contracts": [int(-5 * mult), int(5 * mult)],
@@ -1624,6 +1640,8 @@ def run_futures_simulation(
         },
         "portfolio_metrics": {
             **port_metrics,
+            "point_value_krw": int(contract_mult_krw),
+            "initial_capital_krw": int(base_capital_krw),
             "total_pnl_krw": round(float(np.sum(portfolio_daily_pnl_krw)), 0),
             "total_swap_count": len(swap_events),
             "mdd_swap_count": mdd_swap_cnt,
@@ -1964,6 +1982,8 @@ def lock_1530_daily_signals(
     mdd_threshold_pct: float = 12.0,
     sync_live_first: bool = True,
     update_excel: bool = True,
+    point_value_krw: float = 50000.0,
+    initial_capital_krw: float = 100000000.0,
 ) -> Dict[str, Any]:
     """
     [15:30 시그널 최종 확정(Lock) 엔진]
@@ -1993,6 +2013,8 @@ def lock_1530_daily_signals(
         mdd_threshold_pct=mdd_threshold_pct,
         enable_auto_mdd_swap=True,
         record_swaps_to_db=True,
+        point_value_krw=point_value_krw,
+        initial_capital_krw=initial_capital_krw,
     )
     if not sim_res.get("success"):
         return {"success": False, "error": sim_res.get("error", "시뮬레이션 실패")}
@@ -2068,14 +2090,22 @@ def lock_1530_daily_signals(
     }
 
 
-def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = False) -> Dict[str, Any]:
+def get_intraday_and_1530_lock_status(
+    multiplier: int = 1,
+    sync_now: bool = False,
+    point_value_krw: float = 50000.0,
+    initial_capital_krw: float = 100000000.0,
+) -> Dict[str, Any]:
     """
     현재 KST 시각 기준 장중 실시간 연동 상태, rawdata.xlsx 당일 실시간 가격/수급 현황,
     전일 대비 당일 장중 포지션 변화(모델별 시그널 변화 포함) 및 당일 15:30 시그널 확정(Lock) 여부를 반환합니다.
-    - 09:00 ~ 15:29:59: INTRADAY_LIVE (실시간 연동 중, 15:30 최종 확정 대기)
-    - 15:30:00 ~ 15:45:00: SIGNAL_LOCKED_FOR_AUCTION (15:30 시그널 확정 완료, 15:35~15:45 동시호가 주문 시간)
-    - 15:45:01 이후 / 주말: MARKET_CLOSED_LOCKED (당일 시그널 확정 및 장 마감 완료)
+    - 승수(point_value_krw): 기본 50,000원(미니선물), 선택 250,000원(정규선물)
+    - 투자원금(initial_capital_krw): 기본 100,000,000원(1억원)
     """
+    if point_value_krw not in (50000.0, 250000.0):
+        point_value_krw = 250000.0 if float(point_value_krw or 50000.0) >= 150000.0 else 50000.0
+    if not initial_capital_krw or float(initial_capital_krw) <= 0:
+        initial_capital_krw = 100000000.0
     init_sim_tables()
     live_sync_result = None
     if sync_now:
@@ -2190,8 +2220,13 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
         }
 
     # 캐시된 시뮬레이션(없으면 1회 실행)의 채택 모델 + 최근 120일 실시간 시그널로 Step 5를 0.01초 내 초고속 산출
-    if _CACHED_SIM_RESULTS:
-        sim_res = next(iter(_CACHED_SIM_RESULTS.values()))
+    matched_cached_sim = None
+    for k, v in _CACHED_SIM_RESULTS.items():
+        if len(k) >= 14 and k[3] == multiplier and k[-2] == int(point_value_krw) and k[-1] == int(initial_capital_krw):
+            matched_cached_sim = v
+            break
+    if matched_cached_sim is not None:
+        sim_res = matched_cached_sim
     else:
         sim_res = run_futures_simulation(
             start_date="2023-01-02",
@@ -2200,6 +2235,8 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
             sharpe_lookback_days=63,
             enable_auto_mdd_swap=True,
             record_swaps_to_db=False,
+            point_value_krw=point_value_krw,
+            initial_capital_krw=initial_capital_krw,
         )
 
     df_tail = pd.DataFrame([dict(r) for r in reversed(recent_120_rows)]) if recent_120_rows else pd.DataFrame()
@@ -2274,9 +2311,8 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
     )
 
     fut_diff_today = float(today_rawdata.get("fut_change_pt") or 0.0)
-    fut_pct_today = float(today_rawdata.get("fut_change_pct") or 0.0) / 100.0
-    today_daily_ret_pct = round((prev_base_pos / 5.0) * fut_pct_today * 100.0, 3) if prev_base_pos != 0 else 0.0
-    today_daily_pnl_krw = round(prev_contracts * fut_diff_today * 250000.0, 0)
+    today_daily_pnl_krw = round(prev_contracts * fut_diff_today * float(point_value_krw), 0)
+    today_daily_ret_pct = round((today_daily_pnl_krw / float(initial_capital_krw)) * 100.0, 3) if prev_contracts != 0 else 0.0
     ledger_list = sim_res.get("recent_trading_ledger", []) if sim_res.get("success") else []
     today_ledger = ledger_list[0] if len(ledger_list) > 0 else {}
     prev_ledger = ledger_list[1] if len(ledger_list) > 1 else today_ledger
@@ -2284,6 +2320,9 @@ def get_intraday_and_1530_lock_status(multiplier: int = 1, sync_now: bool = Fals
     position_change_check = {
         "prev_date": today_rawdata.get("prev_date") or prev_ledger.get("date", "-"),
         "today_date": today_rawdata.get("date") or latest_date,
+        "point_value_krw": int(point_value_krw),
+        "contract_type_label": "미니선물 (승수 5만원)" if int(point_value_krw) == 50000 else "정규선물 (승수 25만원)",
+        "initial_capital_krw": int(initial_capital_krw),
         "prev_base_position_sum": prev_base_pos,
         "today_base_position_sum": today_base_pos,
         "base_position_delta": today_base_pos - prev_base_pos,
@@ -2455,17 +2494,26 @@ def test_selected_models_consistency(
     supply_weight: float = 0.35,
     multiplier: int = 1,
     apply_to_active: bool = False,
+    point_value_krw: float = 50000.0,
+    initial_capital_krw: float = 100000000.0,
 ) -> Dict[str, Any]:
     """
     [Step 3: 선택된 최종모델의 후속 구간 테스트 및 일관성 측정]
     - 1차 구간 (선정 구간: eval_start_date ~ eval_end_date)에서 선택된 최종 모델들로
     - 2차 구간 (후속 테스트 구간: test_start_date ~ test_end_date 또는 현재까지)을 테스트하여
       개별 모델 및 선택 합산 포트폴리오의 10대 정밀 평가지표와 일관성 유지 여부를 측정합니다.
+    - 승수(point_value_krw): 기본 50,000원(미니선물), 선택 250,000원(정규선물)
+    - 투자원금(initial_capital_krw): 기본 100,000,000원(1억원)
     """
     cfg = load_simulation_config()
     m_params = cfg.get("market_parameters", {})
     annual_days = int(m_params.get("annual_trading_days", 250))
     rf_annual = float(m_params.get("risk_free_rate_annual", 0.0325))
+    if point_value_krw not in (50000.0, 250000.0):
+        point_value_krw = 250000.0 if float(point_value_krw or 50000.0) >= 150000.0 else 50000.0
+    if not initial_capital_krw or float(initial_capital_krw) <= 0:
+        initial_capital_krw = 100000000.0
+    mult = max(1, int(multiplier or 1))
 
     if test_end_date and str(test_end_date).strip().upper() in ("CURRENT", "NOW", "LATEST", "현재", ""):
         test_end_date = None
@@ -2502,9 +2550,11 @@ def test_selected_models_consistency(
     )
     n_total = len(dates)
     fut_pct_ret = np.zeros(n_total)
+    fut_pt_diff = np.zeros(n_total)
     k200_pct_ret = np.zeros(n_total)
     for i in range(1, n_total):
         prev_c = fut_close[i - 1]
+        fut_pt_diff[i] = fut_close[i] - prev_c
         fut_pct_ret[i] = (fut_close[i] - prev_c) / prev_c if prev_c > 0 else 0.0
         prev_k = k200_close[i - 1]
         k200_pct_ret[i] = (k200_close[i] - prev_k) / prev_k if prev_k > 0 else fut_pct_ret[i]
@@ -2524,27 +2574,29 @@ def test_selected_models_consistency(
     if len(p2_indices) < 3:
         return {"success": False, "error": f"2차 후속 테스트 구간({test_start_date} ~ {test_end_date or '현재'})의 거래일이 부족합니다."}
 
-    # 각 모델별 1차 구간(전) vs 2차 후속 구간(후) 10대 평가지표 및 시계열, 연속성 측정
+    # 각 모델별 1차 구간(전) vs 2차 후속 구간(후) 10대 평가지표 및 시계열, 연속성 측정 (투자원금 1억원 및 선택 승수 기준)
     selected_models_comparison: List[Dict[str, Any]] = []
     all_models_comparison: List[Dict[str, Any]] = []
     p1_model_cum_returns_pct: Dict[str, List[float]] = {}
     p2_model_cum_returns_pct: Dict[str, List[float]] = {}
     n_sel = max(1, len(target_ids))
+    per_model_cap = max(1.0, float(initial_capital_krw) / float(n_sel))
+    unit_pt_ret = (fut_pt_diff * float(point_value_krw) * mult) / per_model_cap
 
     port_ret_all = np.zeros(n_total)
     pure_port_ret_all = np.zeros(n_total)
     if target_ids and n_total > 1:
         s_sum_arr = sum(sig_df[m_id].values[:-1] for m_id in target_ids)
         p_sum_arr = sum(sig_df[f"{m_id}__pure"].values[:-1] for m_id in target_ids)
-        port_ret_all[1:] = (s_sum_arr / float(n_sel)) * fut_pct_ret[1:]
-        pure_port_ret_all[1:] = (p_sum_arr / float(n_sel)) * fut_pct_ret[1:]
+        port_ret_all[1:] = (s_sum_arr * mult * fut_pt_diff[1:] * float(point_value_krw)) / float(initial_capital_krw)
+        pure_port_ret_all[1:] = (p_sum_arr * mult * fut_pt_diff[1:] * float(point_value_krw)) / float(initial_capital_krw)
 
     pool_id_set = {m["model_id"] for m in pool_cfg}
 
     for m_id in all_model_ids:
         sigs = sig_df[m_id].values
         m_ret = np.zeros(n_total)
-        m_ret[1:] = sigs[:-1] * fut_pct_ret[1:]
+        m_ret[1:] = sigs[:-1] * unit_pt_ret[1:]
 
         r_p1 = pd.Series(m_ret[p1_indices])
         r_p2 = pd.Series(m_ret[p2_indices])
@@ -2552,8 +2604,8 @@ def test_selected_models_consistency(
         m_p1 = calculate_series_metrics(r_p1, annual_days=annual_days, rf_annual=rf_annual)
         m_p2 = calculate_series_metrics(r_p2, annual_days=annual_days, rf_annual=rf_annual)
 
-        m_eq_p1 = ((np.cumprod(1.0 + m_ret[p1_indices]) - 1.0) * 100.0).round(2).tolist()
-        m_eq_p2 = ((np.cumprod(1.0 + m_ret[p2_indices]) - 1.0) * 100.0).round(2).tolist()
+        m_eq_p1 = (np.cumsum(m_ret[p1_indices]) * 100.0).round(2).tolist()
+        m_eq_p2 = (np.cumsum(m_ret[p2_indices]) * 100.0).round(2).tolist()
         p1_model_cum_returns_pct[m_id] = m_eq_p1
         p2_model_cum_returns_pct[m_id] = m_eq_p2
 
@@ -2587,17 +2639,17 @@ def test_selected_models_consistency(
     port_p1_metrics = calculate_series_metrics(pd.Series(port_ret_all[p1_indices]), annual_days=annual_days, rf_annual=rf_annual)
     port_p2_metrics = calculate_series_metrics(pd.Series(port_ret_all[p2_indices]), annual_days=annual_days, rf_annual=rf_annual)
     pure_p2_metrics = calculate_series_metrics(pd.Series(pure_port_ret_all[p2_indices]), annual_days=annual_days, rf_annual=rf_annual)
-    k200_p1_metrics = calculate_series_metrics(pd.Series(k200_pct_ret[p1_indices]), annual_days=annual_days, rf_annual=rf_annual)
-    k200_p2_metrics = calculate_series_metrics(pd.Series(k200_pct_ret[p2_indices]), annual_days=annual_days, rf_annual=rf_annual)
+    k200_p1_metrics = calculate_series_metrics(pd.Series(k200_pct_ret[p1_indices]), annual_days=annual_days, rf_annual=rf_annual, compound=True)
+    k200_p2_metrics = calculate_series_metrics(pd.Series(k200_pct_ret[p2_indices]), annual_days=annual_days, rf_annual=rf_annual, compound=True)
 
     # 차트용 1차 구간(전) 및 2차 후속 구간(후) 누적 수익지수(100 기준) 및 누적수익률(0% 기준)
-    eq_p1 = (np.cumprod(1.0 + port_ret_all[p1_indices]) * 100.0).round(2).tolist()
-    eq_p2 = (np.cumprod(1.0 + port_ret_all[p2_indices]) * 100.0).round(2).tolist()
-    eq_p2_pure = (np.cumprod(1.0 + pure_port_ret_all[p2_indices]) * 100.0).round(2).tolist()
+    eq_p1 = (100.0 + np.cumsum(port_ret_all[p1_indices]) * 100.0).round(2).tolist()
+    eq_p2 = (100.0 + np.cumsum(port_ret_all[p2_indices]) * 100.0).round(2).tolist()
+    eq_p2_pure = (100.0 + np.cumsum(pure_port_ret_all[p2_indices]) * 100.0).round(2).tolist()
 
-    cum_p1 = ((np.cumprod(1.0 + port_ret_all[p1_indices]) - 1.0) * 100.0).round(2).tolist()
-    cum_p2 = ((np.cumprod(1.0 + port_ret_all[p2_indices]) - 1.0) * 100.0).round(2).tolist()
-    cum_p2_pure = ((np.cumprod(1.0 + pure_port_ret_all[p2_indices]) - 1.0) * 100.0).round(2).tolist()
+    cum_p1 = (np.cumsum(port_ret_all[p1_indices]) * 100.0).round(2).tolist()
+    cum_p2 = (np.cumsum(port_ret_all[p2_indices]) * 100.0).round(2).tolist()
+    cum_p2_pure = (np.cumsum(pure_port_ret_all[p2_indices]) * 100.0).round(2).tolist()
 
     k200_cum_p1 = ((np.cumprod(1.0 + k200_pct_ret[p1_indices]) - 1.0) * 100.0).round(2).tolist()
     k200_cum_p2 = ((np.cumprod(1.0 + k200_pct_ret[p2_indices]) - 1.0) * 100.0).round(2).tolist()

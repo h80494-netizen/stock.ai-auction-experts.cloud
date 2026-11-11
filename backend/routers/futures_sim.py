@@ -39,6 +39,8 @@ class SimulationRunRequest(BaseModel):
     start_date: Optional[str] = "2023-01-01"
     end_date: Optional[str] = "CURRENT"
     multiplier: int = 1
+    point_value_krw: float = 50000.0
+    initial_capital_krw: float = 100000000.0
     mdd_threshold_pct: float = 12.0
     sharpe_lookback_days: Optional[int] = 126
     initial_selected_ids: Optional[List[str]] = None
@@ -64,6 +66,8 @@ class CustomConsistencyTestRequest(BaseModel):
     combine_supply: bool = True
     supply_weight: float = 0.35
     multiplier: int = 1
+    point_value_krw: float = 50000.0
+    initial_capital_krw: float = 100000000.0
     apply_to_active: bool = False
 
 
@@ -76,6 +80,8 @@ class ConsistencyEvaluationRequest(BaseModel):
 
 class Lock1530Request(BaseModel):
     multiplier: int = 1
+    point_value_krw: float = 50000.0
+    initial_capital_krw: float = 100000000.0
     mdd_threshold_pct: float = 12.0
     sync_live_first: bool = True
     update_excel: bool = True
@@ -84,6 +90,8 @@ class Lock1530Request(BaseModel):
 class RealtimeSyncRequest(BaseModel):
     write_excel: bool = True
     multiplier: int = 1
+    point_value_krw: float = 50000.0
+    initial_capital_krw: float = 100000000.0
 
 
 class KISConfigUpdateRequest(BaseModel):
@@ -93,6 +101,7 @@ class KISConfigUpdateRequest(BaseModel):
     max_contracts_cap: Optional[int] = None
     auto_execute_at_1535: Optional[bool] = None
     default_ord_dvsn: Optional[str] = None
+    point_value_krw: Optional[int] = None
 
 
 class KISOrderExecuteRequest(BaseModel):
@@ -197,6 +206,8 @@ def api_run_simulation_get(
     start_date: Optional[str] = "2023-01-01",
     end_date: Optional[str] = "CURRENT",
     multiplier: int = 1,
+    point_value_krw: float = 50000.0,
+    initial_capital_krw: float = 100000000.0,
     mdd_threshold_pct: float = 12.0,
     sharpe_lookback_days: int = 126,
     enable_auto_mdd_swap: bool = True,
@@ -208,6 +219,8 @@ def api_run_simulation_get(
             start_date=start_date,
             end_date=end_date,
             multiplier=multiplier,
+            point_value_krw=point_value_krw,
+            initial_capital_krw=initial_capital_krw,
             mdd_threshold_pct=mdd_threshold_pct,
             sharpe_lookback_days=sharpe_lookback_days,
             enable_auto_mdd_swap=enable_auto_mdd_swap,
@@ -239,6 +252,8 @@ def api_run_simulation(req: SimulationRunRequest) -> Dict[str, Any]:
             replacement_mode=req.replacement_mode,
             periodic_rebalance_days=req.periodic_rebalance_days,
             mdd_trigger_mode=req.mdd_trigger_mode,
+            point_value_krw=req.point_value_krw,
+            initial_capital_krw=req.initial_capital_krw,
         )
         if not res.get("success"):
             return {
@@ -294,6 +309,8 @@ def api_test_custom_consistency(req: CustomConsistencyTestRequest) -> Dict[str, 
             supply_weight=req.supply_weight,
             multiplier=req.multiplier,
             apply_to_active=req.apply_to_active,
+            point_value_krw=req.point_value_krw,
+            initial_capital_krw=req.initial_capital_krw,
         )
         if not res.get("success"):
             return {
@@ -340,10 +357,20 @@ def api_evaluate_consistency(req: ConsistencyEvaluationRequest) -> Dict[str, Any
 
 
 @router.get("/intraday-status")
-def api_get_intraday_status(multiplier: int = 1, sync_now: bool = False) -> Dict[str, Any]:
+def api_get_intraday_status(
+    multiplier: int = 1,
+    sync_now: bool = False,
+    point_value_krw: float = 50000.0,
+    initial_capital_krw: float = 100000000.0,
+) -> Dict[str, Any]:
     """당일 실시간 연동 상태, rawdata.xlsx 당일 실시간 가격/수급, 장중 포지션 변화 및 15:30 최종 확정(Lock) 시그널을 조회합니다."""
     try:
-        res = get_intraday_and_1530_lock_status(multiplier=multiplier, sync_now=sync_now)
+        res = get_intraday_and_1530_lock_status(
+            multiplier=multiplier,
+            sync_now=sync_now,
+            point_value_krw=point_value_krw,
+            initial_capital_krw=initial_capital_krw,
+        )
         return {"success": True, "data": res}
     except Exception as e:
         return {
@@ -363,7 +390,12 @@ def api_sync_realtime(req: RealtimeSyncRequest) -> Dict[str, Any]:
         from update_rawdata import sync_intraday_realtime_tick
 
         sync_res = sync_intraday_realtime_tick(write_excel=req.write_excel, force_excel=True)
-        status_res = get_intraday_and_1530_lock_status(multiplier=req.multiplier, sync_now=False)
+        status_res = get_intraday_and_1530_lock_status(
+            multiplier=req.multiplier,
+            sync_now=False,
+            point_value_krw=req.point_value_krw,
+            initial_capital_krw=req.initial_capital_krw,
+        )
         return {
             "success": True,
             "data": {
@@ -458,6 +490,8 @@ def api_lock_1530_signals(req: Lock1530Request) -> Dict[str, Any]:
             mdd_threshold_pct=req.mdd_threshold_pct,
             sync_live_first=req.sync_live_first,
             update_excel=req.update_excel,
+            point_value_krw=req.point_value_krw,
+            initial_capital_krw=req.initial_capital_krw,
         )
         if not res.get("success"):
             return {
