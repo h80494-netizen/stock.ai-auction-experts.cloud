@@ -298,11 +298,16 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         return;
       }
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         setHoldings(data);
         if (typeof window !== 'undefined') {
-          localStorage.setItem('saved_holdings_date', todayStr);
-          localStorage.setItem('saved_holdings_data', JSON.stringify(data));
+          if (data.length > 0) {
+            localStorage.setItem('saved_holdings_date', todayStr);
+            localStorage.setItem('saved_holdings_data', JSON.stringify(data));
+          } else {
+            localStorage.removeItem('saved_holdings_date');
+            localStorage.removeItem('saved_holdings_data');
+          }
         }
       }
     } catch (e) { console.error(e); }
@@ -324,18 +329,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         const dataDetailed = await resDetailed.json();
         const rows = Array.isArray(dataDetailed) ? dataDetailed : [];
         setDetailedLedger(rows);
-        // 만약 보유잔고 상태가 비어있는데 당일(또는 최근 매매일) 매수 내역이 상세원장에 존재하면 즉시 복원
-        let targetRows = rows.filter((r: any) => r.trade_date === todayStr);
-        if (targetRows.length === 0 && rows.length > 0) {
-          const latestDate = rows[0]?.trade_date;
-          if (latestDate) {
-            targetRows = rows.filter((r: any) => r.trade_date === latestDate);
+        // 당일 장중 미청산 매수 내역(status === 'BUY')만 보유잔고로 자동 복원 (15:30 청산 완료된 status === 'SELL' 종목은 복원 금지)
+        const todayRows = rows.filter((r: any) => r.trade_date === todayStr);
+        const activeBuyRows = todayRows.filter((r: any) => r.status === 'BUY');
+        const settledSellRows = todayRows.filter((r: any) => r.status === 'SELL');
+
+        if (settledSellRows.length > 0 && activeBuyRows.length === 0) {
+          setHoldings([]);
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('saved_holdings_date');
+            localStorage.removeItem('saved_holdings_data');
           }
-        }
-        if (targetRows.length > 0) {
+        } else if (activeBuyRows.length > 0) {
           setHoldings(prev => {
             if (prev.length > 0) return prev;
-            const restored = targetRows.map((r: any) => ({
+            const restored = activeBuyRows.map((r: any) => ({
               ticker: r.ticker,
               name: r.name || r.ticker,
               buyPrice: Number(r.buy_price) || 0,
@@ -425,28 +433,46 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     }
   }, [holdings, todayStr]);
 
+  // 금일 15:30 장마감 종가 청산 완료 원장 레코드
+  const todaySettledLedger = useMemo(() => {
+    return pnlHistory.find((h: any) => h.date === todayStr) || null;
+  }, [pnlHistory, todayStr]);
+
+  const isLiquidatedToday = useMemo(() => {
+    const todayRows = detailedLedger.filter((r: any) => r.trade_date === todayStr);
+    const hasSold = todayRows.some((r: any) => r.status === 'SELL');
+    const hasActiveBuy = todayRows.some((r: any) => r.status === 'BUY');
+    return holdings.length === 0 && (Boolean(todaySettledLedger) || (hasSold && !hasActiveBuy));
+  }, [holdings.length, todaySettledLedger, detailedLedger, todayStr]);
+
   // Compute portfolio totals
   const portfolioSummary = useMemo(() => {
     let totalBuyAmount = 0;
     let totalCurrentAmount = 0;
     let totalPnL = 0;
     
-    holdings.forEach(h => {
-      const cleanTicker = h.ticker.split(':').pop() || h.ticker;
-      const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
-      const livePrice = livePrices[h.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`];
-      const currentPrice = (livePrice && livePrice > 0) ? livePrice : (currentStock?.price || (h as any).currentPrice || h.buyPrice);
-      const buyAmount = h.buyPrice * h.qty;
-      const currentAmount = currentPrice * h.qty;
-      const pnl = currentAmount - buyAmount;
-      
-      totalBuyAmount += buyAmount;
-      totalCurrentAmount += currentAmount;
-      totalPnL += pnl;
-    });
+    if (holdings.length > 0) {
+      holdings.forEach(h => {
+        const cleanTicker = h.ticker.split(':').pop() || h.ticker;
+        const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
+        const livePrice = livePrices[h.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`];
+        const currentPrice = (livePrice && livePrice > 0) ? livePrice : (currentStock?.price || (h as any).currentPrice || h.buyPrice);
+        const buyAmount = h.buyPrice * h.qty;
+        const currentAmount = currentPrice * h.qty;
+        const pnl = currentAmount - buyAmount;
+        
+        totalBuyAmount += buyAmount;
+        totalCurrentAmount += currentAmount;
+        totalPnL += pnl;
+      });
+    } else if (todaySettledLedger) {
+      totalBuyAmount = Number(todaySettledLedger.total_buy) || 0;
+      totalCurrentAmount = Number(todaySettledLedger.total_sell) || 0;
+      totalPnL = Number(todaySettledLedger.net_pnl) || 0;
+    }
 
     return { totalBuyAmount, totalCurrentAmount, totalPnL };
-  }, [holdings, stocks, livePrices]);
+  }, [holdings, stocks, livePrices, todaySettledLedger]);
 
   const handleBuyAll = async () => {
     if (orderStocks.length === 0) return;
@@ -731,15 +757,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           {/* Portfolio Summary Panel */}
           <div className="flex-[2] bg-[#1a1a1a] border border-gray-800 rounded p-4 flex gap-4">
             <div className="flex-1 border-r border-gray-800 pr-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">전체 매입금액</label>
+               <label className="text-gray-500 font-bold text-sm mb-1 block">
+                 {isLiquidatedToday ? '전체 매입금액 (금일 청산)' : '전체 매입금액'}
+               </label>
                <div className="text-xl font-mono text-gray-200 mt-2">{portfolioSummary.totalBuyAmount.toLocaleString()} <span className="text-sm">원</span></div>
             </div>
             <div className="flex-1 border-r border-gray-800 px-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">현재 평가액</label>
+               <label className="text-gray-500 font-bold text-sm mb-1 block">
+                 {isLiquidatedToday ? '15:30 청산금액 (종가 확정)' : '현재 평가액'}
+               </label>
                <div className="text-xl font-mono text-gray-200 mt-2">{portfolioSummary.totalCurrentAmount.toLocaleString()} <span className="text-sm">원</span></div>
             </div>
             <div className="flex-1 pl-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">전체 손익 (종가시 예상)</label>
+               <label className="text-gray-500 font-bold text-sm mb-1 block">
+                 {isLiquidatedToday ? '금일 확정 순손익 (세후)' : '전체 손익 (종가시 예상)'}
+               </label>
                <div className={`text-2xl font-mono font-bold mt-1 ${portfolioSummary.totalPnL > 0 ? 'text-red-400' : (portfolioSummary.totalPnL < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
                  {portfolioSummary.totalPnL > 0 ? '+' : ''}{Math.floor(portfolioSummary.totalPnL).toLocaleString()} <span className="text-sm">원</span>
                </div>
@@ -757,8 +789,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                   disabled={holdings.length === 0 || reservedSellToday}
                   className="bg-blue-900/90 hover:bg-blue-700 disabled:bg-gray-800 disabled:border-gray-700 border border-blue-500 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[80px]"
                >
-                 <span>{reservedSellToday ? '종가매도 예약됨' : '일괄매도'}</span>
-                 <span className="text-[10px] text-blue-300 font-normal">{reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)'}</span>
+                 <span>{isLiquidatedToday ? '청산 완료' : (reservedSellToday ? '종가매도 예약됨' : '일괄매도')}</span>
+                 <span className="text-[10px] text-blue-300 font-normal">{isLiquidatedToday ? '(매매원장 이관됨)' : (reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)')}</span>
                </button>
                <button 
                   onClick={() => setShowLedger(true)}
@@ -976,8 +1008,16 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={9} className="px-3 py-6 text-center text-gray-500 font-bold">
-                      현재 보유 중인 종목이 없습니다. (상단 일괄매수 또는 종목별 매수 시 보유 잔고에 표시됩니다)
+                    <td colSpan={9} className="px-3 py-6 text-center font-bold">
+                      {isLiquidatedToday ? (
+                        <span className="text-emerald-400">
+                          ✅ 금일({todayStr}) 15:30 장마감 종가 일괄청산 완료 (보유 잔고 0종목) — 당일 매매내역 및 확정손익은 상단 [매매원장]에서 확인하실 수 있습니다.
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">
+                          현재 보유 중인 종목이 없습니다. (상단 일괄매수 또는 종목별 매수 시 보유 잔고에 표시됩니다)
+                        </span>
+                      )}
                     </td>
                   </tr>
                 )}

@@ -742,23 +742,51 @@ def update_holding(ticker: str, name: str, qty: int, price: float):
 
 def get_holdings():
     from datetime import datetime, timedelta
+    now_kst = datetime.utcnow() + timedelta(hours=9)
+    today_str = now_kst.strftime("%Y-%m-%d")
+    time_val = now_kst.hour * 60 + now_kst.minute
+
     conn = get_db_connection()
     c = conn.cursor()
+
+    # 1) 당일 이미 종가/일괄 매도 정산(status='SELL' 또는 trade_ledger 정산)이 완료되었거나,
+    #    전일 이전 잔고가 남아있는 경우 holdings를 즉시 비움
+    c.execute(
+        "SELECT COUNT(*) FROM trading_ledger WHERE trade_date = ? AND status = 'SELL'",
+        (today_str,),
+    )
+    sold_today_cnt = c.fetchone()[0]
+    c.execute(
+        "SELECT COUNT(*) FROM trading_ledger WHERE trade_date = ? AND status = 'BUY'",
+        (today_str,),
+    )
+    active_buy_today_cnt = c.fetchone()[0]
+
+    if sold_today_cnt > 0 and active_buy_today_cnt == 0:
+        c.execute("DELETE FROM holdings")
+        conn.commit()
+        conn.close()
+        return []
+
     c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
     rows = c.fetchall()
-    if not rows:
-        # 당일(또는 최근 매매일) 아침 매수 내역이 trading_ledger에 존재하면 언제든(장중/장마감 후/재시작 후) 보유종목 자동 복원
-        today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+
+    # 전일 미정리 잔고가 남아있고 금일 매수 내역이 아예 없는 경우 정리
+    if rows and active_buy_today_cnt == 0 and sold_today_cnt == 0:
+        c.execute("SELECT MAX(trade_date) FROM trading_ledger")
+        latest_td = (c.fetchone() or [None])[0]
+        if latest_td and latest_td < today_str:
+            c.execute("DELETE FROM holdings")
+            conn.commit()
+            rows = []
+
+    # 2) 장중(15:30 이전) 금일 매수 상태(status='BUY')인데 holdings가 비어있는 경우에만 자동 복원
+    if not rows and time_val < (15 * 60 + 30) and active_buy_today_cnt > 0:
         c.execute(
-            "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = ? ORDER BY id ASC",
+            "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = ? AND status = 'BUY' ORDER BY id ASC",
             (today_str,),
         )
         buy_rows = c.fetchall()
-        if not buy_rows:
-            c.execute(
-                "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = (SELECT MAX(trade_date) FROM trading_ledger) ORDER BY id ASC"
-            )
-            buy_rows = c.fetchall()
         if buy_rows:
             for br in buy_rows:
                 tk = br["ticker"]
@@ -773,33 +801,7 @@ def get_holdings():
             conn.commit()
             c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
             rows = c.fetchall()
-    if not rows:
-        # 당일(또는 최근 매매일) 아침 매수 내역이 trading_ledger에 존재하면 언제든(장중/장마감 후/재시작 후) 보유종목 자동 복원
-        today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
-        c.execute(
-            "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = ? ORDER BY id ASC",
-            (today_str,),
-        )
-        buy_rows = c.fetchall()
-        if not buy_rows:
-            c.execute(
-                "SELECT ticker, name, buy_price, qty FROM trading_ledger WHERE trade_date = (SELECT MAX(trade_date) FROM trading_ledger) ORDER BY id ASC"
-            )
-            buy_rows = c.fetchall()
-        if buy_rows:
-            for br in buy_rows:
-                tk = br["ticker"]
-                nm = br["name"] or tk
-                bp = float(br["buy_price"] or 0)
-                qt = int(br["qty"] or 0)
-                if tk and bp > 0 and qt > 0:
-                    c.execute(
-                        "INSERT OR IGNORE INTO holdings (ticker, name, buy_price, qty) VALUES (?, ?, ?, ?)",
-                        (tk, nm, bp, qt),
-                    )
-            conn.commit()
-            c.execute('SELECT ticker, name, buy_price as buyPrice, qty FROM holdings')
-            rows = c.fetchall()
+
     conn.close()
     return [dict(row) for row in rows]
 

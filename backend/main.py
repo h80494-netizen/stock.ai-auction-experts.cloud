@@ -1162,24 +1162,15 @@ def get_stock_summary(ticker: str):
         
     return {"summary": translated_text}
 
-@app.get("/api/report/{ticker}")
-
-def get_analyst_report(ticker: str, peers: str = "", refresh: bool = False):
-
-    """
-
-    시니어 기업분석 애널리스트(Equity Research Analyst) 프롬프트 기반 심층 밸류에이션 & 컨센서스 리포트 생성 API
-
-    - 6대 필수 항목 (산업전망·해자 / 성장·마진·CAPEX Time-lag / 재무안전성·이자보상 / 핵심 밸류에이션·현금흐름 / 주주환원 / 종합 결론·리스크)
-
-    - 2대 핵심 표 (2025A~2028E 시계열 추이 표 & 12M Forward 경쟁사 평균 멀티플 비교 표)
-
-    """
-
-    from equity_research_generator import generate_senior_analyst_report
-
-    return generate_senior_analyst_report(ticker=ticker, peers_param=peers, force_refresh=refresh)
-
+@app.get("/api/report/{ticker}")
+def get_analyst_report(ticker: str, peers: str = "", refresh: bool = False):
+    """
+    시니어 기업분석 애널리스트(Equity Research Analyst) 프롬프트 기반 심층 밸류에이션 & 컨센서스 리포트 생성 API
+    - 6대 필수 항목 (산업전망·해자 / 성장·마진·CAPEX Time-lag / 재무안전성·이자보상 / 핵심 밸류에이션·현금흐름 / 주주환원 / 종합 결론·리스크)
+    - 2대 핵심 표 (2025A~2028E 시계열 추이 표 & 12M Forward 경쟁사 평균 멀티플 비교 표)
+    """
+    from equity_research_generator import generate_senior_analyst_report
+    return generate_senior_analyst_report(ticker=ticker, peers_param=peers, force_refresh=refresh)
 
 @app.get("/api/stock_news/{ticker}")
 def api_stock_news(ticker: str, name: str = "", market: str = "KR"):
@@ -1335,10 +1326,11 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                 pnl = metrics["net_pnl"]
                 rr = metrics["return_rate"]
 
-                # 거래원장 및 실현손익 확정 기록 (멱등 UPSERT, 당일 보유종목 화면 유지를 위해 clear_holdings 생략)
+                # 거래원장 및 실현손익 확정 기록 후 보유잔고(holdings) 비우기
                 add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr)
                 record_trading_sell_all(today_str, items_to_record)
                 add_realized_pnl(today_str, pnl)
+                clear_holdings()
                 _reserved_close_sell_date = ""
                 print(f"[일괄매도정산완료] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
                 return pnl, rr
@@ -1656,12 +1648,22 @@ _holdings_cache_time = 0
 def api_get_holdings():
     global _holdings_price_cache, _holdings_cache_time
     from database import get_holdings, get_stock
+    from datetime import datetime, timedelta
     import time
     import json
     import os
     
     try:
         holdings = get_holdings()
+        # 평일 15:31 이후인데 아직 미청산 보유종목이 남아있다면 자동으로 15:30 종가 정산 실행
+        now_kst = datetime.utcnow() + timedelta(hours=9)
+        if holdings and now_kst.weekday() < 5 and (now_kst.hour * 60 + now_kst.minute) >= (15 * 60 + 31):
+            try:
+                import auto_trader
+                auto_trader.job_1531_ledger_record()
+                holdings = get_holdings()
+            except Exception as auto_err:
+                print(f"[Auto 15:31 Settlement Catch-up Error] {auto_err}")
         now = time.time()
         
         if now - _holdings_cache_time > 60:

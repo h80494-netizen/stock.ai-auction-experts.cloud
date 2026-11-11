@@ -159,7 +159,8 @@ def job_1531_ledger_record():
     if not BROKER:
         return
         
-    if not BROKER.client.is_market_open():
+    now_kst = datetime.utcnow() + timedelta(hours=9)
+    if now_kst.weekday() >= 5:
         return
         
     holdings = db.get_holdings()
@@ -169,7 +170,7 @@ def job_1531_ledger_record():
         
     total_buy = 0.0
     total_sell = 0.0
-    today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+    today_str = now_kst.strftime("%Y-%m-%d")
     sell_items = []
     
     for h in holdings:
@@ -227,7 +228,8 @@ def job_1531_ledger_record():
         
         print(f"15:30 최종 종가 기준 100% 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
         
-    # 당일 매수 종목 및 손익이 화면에서 유지되도록 당일에는 holdings를 비우지 않음 (익일 신규 매수 시 자동 교체)
+    # 15:30 장마감 청산 및 원장 이관 완료 후 보유 잔고(holdings) 비우기
+    db.clear_holdings()
 
 if __name__ == "__main__":
     pass
