@@ -179,6 +179,12 @@ function SvgBarAndLineChart({
   lineLabel,
   lineColor = "#38bdf8",
   lineUnit = "%",
+  secondLineData,
+  secondLineLabel,
+  secondLineColor = "#f59e0b",
+  secondLineUnit = "%",
+  secondLineDashed = true,
+  secondLineExtraText,
   height = 250,
   posBarColor = "#10b981",
   negBarColor = "#f43f5e",
@@ -191,6 +197,12 @@ function SvgBarAndLineChart({
   lineLabel?: string;
   lineColor?: string;
   lineUnit?: string;
+  secondLineData?: number[];
+  secondLineLabel?: string;
+  secondLineColor?: string;
+  secondLineUnit?: string;
+  secondLineDashed?: boolean;
+  secondLineExtraText?: string;
   height?: number;
   posBarColor?: string;
   negBarColor?: string;
@@ -206,7 +218,7 @@ function SvgBarAndLineChart({
   const W = 920;
   const H = height;
   const padL = 58;
-  const padR = lineData && lineData.length ? 62 : 20;
+  const padR = lineData && lineData.length ? 64 : 20;
   const padT = 18;
   const padB = 28;
   const plotW = W - padL - padR;
@@ -228,14 +240,32 @@ function SvgBarAndLineChart({
   let lPadMin = bPadMin;
   let lRange = bRange;
   if (lineData && lineData.length) {
-    const lVals = [0, ...lineData.map((v) => Number(v) || 0)];
-    const lMin = Math.min(...lVals);
-    const lMax = Math.max(...lVals);
+    const combinedLineVals = [
+      0,
+      ...lineData.map((v) => Number(v) || 0),
+      ...(secondLineData && secondLineData.length && secondLineUnit === lineUnit
+        ? secondLineData.map((v) => Number(v) || 0)
+        : []),
+    ];
+    const lMin = Math.min(...combinedLineVals);
+    const lMax = Math.max(...combinedLineVals);
     const lSpan = Math.max(1, lMax - lMin);
     lPadMin = lMin - lSpan * 0.1;
     const lPadMax = lMax + lSpan * 0.1;
     lRange = Math.max(1, lPadMax - lPadMin);
     toLineY = (v: number) => padT + ((lPadMax - v) / lRange) * plotH;
+  }
+
+  let toSecondLineY = toLineY;
+  if (secondLineData && secondLineData.length && secondLineUnit !== lineUnit) {
+    const sVals = secondLineData.map((v) => Number(v) || 0);
+    const sMin = Math.min(...sVals);
+    const sMax = Math.max(...sVals);
+    const sSpan = Math.max(1, sMax - sMin);
+    const sPadMin = sMin - sSpan * 0.1;
+    const sPadMax = sMax + sSpan * 0.1;
+    const sRange = Math.max(1, sPadMax - sPadMin);
+    toSecondLineY = (v: number) => padT + ((sPadMax - v) / sRange) * plotH;
   }
 
   const barWidth = Math.max(1.5, Math.min(12, (plotW / Math.max(1, dates.length)) * 0.72));
@@ -250,6 +280,8 @@ function SvgBarAndLineChart({
 
   const lastBar = barData[barData.length - 1] ?? 0;
   const lastLine = lineData && lineData.length ? lineData[lineData.length - 1] : null;
+  const lastSecondLine =
+    secondLineData && secondLineData.length ? secondLineData[secondLineData.length - 1] : null;
 
   return (
     <div className="w-full">
@@ -272,6 +304,24 @@ function SvgBarAndLineChart({
               ({lastLine >= 0 ? "+" : ""}
               {Number(lastLine).toFixed(lineUnit === "%" ? 2 : 0)}
               {lineUnit})
+            </span>
+          </div>
+        )}
+        {secondLineData && secondLineLabel && lastSecondLine !== null && (
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-3.5 h-1 rounded"
+              style={{
+                backgroundColor: secondLineColor,
+                borderBottom: secondLineDashed ? `2px dashed ${secondLineColor}` : undefined,
+              }}
+            />
+            <span className="text-slate-300 font-medium">{secondLineLabel}</span>
+            <span className="font-mono font-bold" style={{ color: secondLineColor }}>
+              ({lastSecondLine >= 0 && secondLineUnit === "%" ? "+" : ""}
+              {Number(lastSecondLine).toFixed(secondLineUnit === "%" ? 2 : 2)}
+              {secondLineUnit}
+              {secondLineExtraText ? ` · ${secondLineExtraText}` : ""})
             </span>
           </div>
         )}
@@ -335,6 +385,18 @@ function SvgBarAndLineChart({
             />
           );
         })}
+
+        {secondLineData && secondLineData.length > 1 && (
+          <polyline
+            fill="none"
+            stroke={secondLineColor}
+            strokeWidth="2.0"
+            strokeDasharray={secondLineDashed ? "5,3" : undefined}
+            points={secondLineData
+              .map((v, i) => `${toX(i).toFixed(1)},${toSecondLineY(Number(v) || 0).toFixed(1)}`)
+              .join(" ")}
+          />
+        )}
 
         {lineData && lineData.length > 1 && (
           <polyline
@@ -1040,6 +1102,20 @@ export default function FuturesSimulationView({
     ledgerCumRetByDate[String(r.date)] = cPct;
     return cPct;
   });
+
+  // 선택된 매매원장 기간의 KOSPI200 현물지수(pt) 및 기간 누적등락률(%) 산출
+  const baseLedgerK200 =
+    ledgerChronological.length > 0 ? Number(ledgerChronological[0]?.k200_close || 0) : 0;
+  const ledgerK200Closes: number[] = ledgerChronological.map((r: any) => Number(r.k200_close) || 0);
+  const ledgerK200CumRetPct: number[] = ledgerChronological.map((r: any) => {
+    const kVal = Number(r.k200_close) || baseLedgerK200;
+    if (baseLedgerK200 <= 0) return 0;
+    return Number((((kVal / baseLedgerK200) - 1.0) * 100).toFixed(2));
+  });
+  const ledgerLatestK200Close =
+    ledgerK200Closes.length > 0 ? ledgerK200Closes[ledgerK200Closes.length - 1] : 0;
+  const ledgerPeriodK200CumRet =
+    ledgerK200CumRetPct.length > 0 ? ledgerK200CumRetPct[ledgerK200CumRetPct.length - 1] : 0;
   const ledgerTargetContracts: number[] = ledgerChronological.map(
     (r: any) => Number(r.target_contracts) || 0
   );
@@ -1142,6 +1218,13 @@ export default function FuturesSimulationView({
             <strong className={ledgerPeriodTotalPnlKrw >= 0 ? "text-emerald-300" : "text-rose-300"}>
               {ledgerPeriodTotalPnlKrw >= 0 ? "+" : ""}
               {ledgerPeriodTotalPnlKrw.toLocaleString()}원
+            </strong>
+          </span>
+          <span>
+            기간 KOSPI200 현물지수:{" "}
+            <strong className={ledgerPeriodK200CumRet >= 0 ? "text-amber-300" : "text-rose-300"}>
+              {ledgerPeriodK200CumRet >= 0 ? "+" : ""}
+              {ledgerPeriodK200CumRet}% ({ledgerLatestK200Close}pt)
             </strong>
           </span>
         </div>
@@ -2572,7 +2655,7 @@ export default function FuturesSimulationView({
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5">
                 <h4 className="text-xs font-bold text-emerald-300 mb-2">
-                  📈 매매원장 일별 매매수익률(막대, %) &amp; 기간 누적 매매수익률(선, %) 차트 ({ledgerDates.length}거래일)
+                  📈 매매원장 일별 매매수익률(막대, %) &amp; 기간 누적 매매수익률 vs KOSPI200 현물지수(선, %) 차트 ({ledgerDates.length}거래일)
                 </h4>
                 <SvgBarAndLineChart
                   dates={ledgerDates}
@@ -2583,6 +2666,12 @@ export default function FuturesSimulationView({
                   lineLabel="기간 누적 매매수익률"
                   lineColor="#38bdf8"
                   lineUnit="%"
+                  secondLineData={ledgerK200CumRetPct}
+                  secondLineLabel="KOSPI200 현물지수"
+                  secondLineColor="#f59e0b"
+                  secondLineUnit="%"
+                  secondLineDashed={true}
+                  secondLineExtraText={`${ledgerLatestK200Close}pt`}
                 />
               </div>
 
@@ -2608,7 +2697,7 @@ export default function FuturesSimulationView({
             {/* 전체 기간 포지션(-5×M ~ +5×M) 추이 차트 */}
             <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5">
               <h4 className="text-xs font-bold text-sky-300 mb-2">
-                📊 전체 시뮬레이션 구간 포지션 추이 (선택 5모델 합산포지션 -5~+5 &amp; 목표 계약수 -5×M~+5×M)
+                📊 전체 시뮬레이션 구간 포지션 추이 &amp; 포트폴리오 누적수익률 vs KOSPI200 현물지수(%) 차트
               </h4>
               <SvgBarAndLineChart
                 dates={cs.dates || []}
@@ -2619,6 +2708,12 @@ export default function FuturesSimulationView({
                 lineLabel="포트폴리오 누적수익률"
                 lineColor="#10b981"
                 lineUnit="%"
+                secondLineData={cs.k200_cum_return_pct || []}
+                secondLineLabel="KOSPI200 현물지수"
+                secondLineColor="#f59e0b"
+                secondLineUnit="%"
+                secondLineDashed={true}
+                secondLineExtraText={`${lt?.latest_k200_close ?? ""}pt`}
                 height={210}
               />
             </div>
@@ -3835,7 +3930,7 @@ export default function FuturesSimulationView({
 
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
               <h3 className="text-xs font-extrabold text-white mb-2">
-                ⚖️ 일별 목표 포지션 계약수 추이 (-5×M ~ +5×M 계약) &amp; 누적수익률(%) 차트
+                ⚖️ 일별 목표 포지션 계약수 추이 (-5×M ~ +5×M 계약) &amp; 누적수익률(%) vs KOSPI200 현물지수 차트
               </h3>
               <SvgBarAndLineChart
                 dates={cs.dates || []}
@@ -3846,6 +3941,12 @@ export default function FuturesSimulationView({
                 lineLabel="포트폴리오 누적수익률"
                 lineColor="#10b981"
                 lineUnit="%"
+                secondLineData={cs.k200_cum_return_pct || []}
+                secondLineLabel="KOSPI200 현물지수"
+                secondLineColor="#f59e0b"
+                secondLineUnit="%"
+                secondLineDashed={true}
+                secondLineExtraText={`${lt?.latest_k200_close ?? ""}pt`}
                 height={260}
               />
             </div>
@@ -4662,7 +4763,7 @@ export default function FuturesSimulationView({
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
               <h3 className="text-xs font-extrabold text-emerald-300 mb-2">
-                📈 매매원장의 일별 매매수익률(막대, %) &amp; 누적 매매수익률(선, %) 차트
+                📈 매매원장의 일별 매매수익률(막대, %) &amp; 누적 매매수익률 vs KOSPI200 현물지수(선, %) 차트
               </h3>
               <SvgBarAndLineChart
                 dates={ledgerDates}
@@ -4673,6 +4774,12 @@ export default function FuturesSimulationView({
                 lineLabel="기간 누적 매매수익률"
                 lineColor="#38bdf8"
                 lineUnit="%"
+                secondLineData={ledgerK200CumRetPct}
+                secondLineLabel="KOSPI200 현물지수"
+                secondLineColor="#f59e0b"
+                secondLineUnit="%"
+                secondLineDashed={true}
+                secondLineExtraText={`${ledgerLatestK200Close}pt`}
               />
             </div>
 
@@ -4698,7 +4805,7 @@ export default function FuturesSimulationView({
           {/* Step 5 전체 구간 합산포지션(-5 ~ +5) 추이 차트 */}
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
             <h3 className="text-xs font-extrabold text-sky-300 mb-2">
-              📊 매매원장 선택 5모델 합산포지션(-5 ~ +5) &amp; 기간 누적 매매수익률(%) 차트
+              📊 매매원장 선택 5모델 합산포지션(-5 ~ +5) &amp; 기간 누적 매매수익률(%) &amp; KOSPI200 현물지수 비교 차트
             </h3>
             <SvgBarAndLineChart
               dates={ledgerDates}
@@ -4709,6 +4816,12 @@ export default function FuturesSimulationView({
               lineLabel="기간 누적 매매수익률"
               lineColor="#10b981"
               lineUnit="%"
+              secondLineData={ledgerK200CumRetPct}
+              secondLineLabel="KOSPI200 현물지수"
+              secondLineColor="#f59e0b"
+              secondLineUnit="%"
+              secondLineDashed={true}
+              secondLineExtraText={`${ledgerLatestK200Close}pt`}
               height={220}
             />
           </div>
