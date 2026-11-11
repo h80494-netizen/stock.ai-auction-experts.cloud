@@ -484,21 +484,21 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
       </div>
 
       {/* Right Content: Chart */}
-      <div className="flex-1 flex flex-col bg-[#050505] p-4 min-h-[500px] lg:min-h-0">
+      <div className="flex-1 flex flex-col bg-[#050505] p-3 min-h-[500px] lg:min-h-0 overflow-y-auto">
         {selectedStock ? (
-          <div className="h-full flex flex-col">
-            <div className="mb-4 flex justify-between items-end">
-              <div>
-                <h2 className="text-2xl font-bold text-white mb-1">{selectedStock.name} <span className="text-sm text-gray-500 font-mono ml-2">{selectedStock.ticker}</span></h2>
-                <div className="text-gray-400 text-sm flex gap-4">
+          <div className="min-h-full flex flex-col">
+            <div className="mb-2 flex flex-wrap justify-between items-center gap-2">
+              <div className="flex items-baseline gap-3 flex-wrap">
+                <h2 className="text-xl font-bold text-white">{selectedStock.name} <span className="text-xs text-gray-500 font-mono ml-1">{selectedStock.ticker}</span></h2>
+                <div className="text-gray-400 text-xs flex gap-4">
                   <span>증권사 커버리지: <strong className="text-yellow-500">{selectedStock.analystCount}곳</strong></span>
                   <span>평균 목표가: <strong className="text-white">{selectedStock.currentTarget.toLocaleString()}</strong></span>
                 </div>
               </div>
             </div>
-            <div className="flex-1 bg-[#111] border border-gray-800 rounded p-4 flex flex-col overflow-hidden">
-              <h3 className="text-lg font-bold text-gray-200 mb-2">주가(우측 축) vs 목표가(좌측 전용 축) 추이 — Two-Scale 다이나믹 확대 뷰</h3>
-              <div className="h-[56%] relative min-h-[280px]">
+            <div className="flex-1 bg-[#111] border border-gray-800 rounded p-3 flex flex-col min-h-0">
+              <h3 className="text-sm font-bold text-gray-200 mb-2">주가(우측 축) vs 목표가(좌측 전용 축) 추이 — Two-Scale 다이나믹 확대 뷰</h3>
+              <div className="h-[230px] xl:h-[260px] shrink-0 relative">
                 {chartData.length > 0 ? (
                   <div className="w-full h-full absolute inset-0">
                     <KISChart 
@@ -515,13 +515,13 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
               </div>
               
               {/* Target Price History Table */}
-              <div className="mt-6 flex-1 overflow-y-auto">
+              <div className="mt-3 flex-1 min-h-[220px] max-h-[360px] overflow-y-auto border border-gray-800/80 rounded bg-[#0b0b0b]">
                 {selectedStock.fundamentals?.target_history && selectedStock.fundamentals.target_history.length > 0 ? (
-                  <table className="w-full text-left border-collapse text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-700 text-gray-400 bg-[#1a1a1a]">
-                        <th className="p-2 font-normal">일자</th>
-                        <th className="p-2 text-right font-normal">목표가 및 증권사 리포트 내용</th>
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="sticky top-0 z-10 bg-[#1a1a1a] shadow">
+                      <tr className="border-b border-gray-700 text-gray-300">
+                        <th className="py-2 px-3 font-bold w-28">일자</th>
+                        <th className="py-2 px-3 text-right font-bold">목표가 및 증권사 리포트 내용</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -529,15 +529,15 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
                         .filter((h: any) => !(h.time === '2026-07-13' && String(h.text || '').includes('저장된 목표가')) && Number(h.value || 0) > 0)
                         .sort((a: any, b: any) => new Date(b.time).getTime() - new Date(a.time).getTime())
                         .map((hist: any, idx: number) => (
-                        <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-800">
-                          <td className="p-2 text-gray-300 whitespace-nowrap">{hist.time}</td>
-                          <td className="p-2 text-right text-gray-200 font-bold">{hist.text || (hist.value ? hist.value.toLocaleString() : '')}</td>
+                        <tr key={idx} className="border-b border-gray-800/60 hover:bg-gray-800/70">
+                          <td className="py-2 px-3 text-gray-300 font-mono whitespace-nowrap">{hist.time}</td>
+                          <td className="py-2 px-3 text-right text-gray-200 font-bold">{hist.text || (hist.value ? hist.value.toLocaleString() : '')}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 ) : (
-                  <div className="text-center text-gray-600 mt-4">일자별 목표가 데이터가 없습니다.</div>
+                  <div className="text-center text-gray-600 py-8">일자별 목표가 데이터가 없습니다.</div>
                 )}
               </div>
             </div>

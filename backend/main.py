@@ -1527,33 +1527,57 @@ def _load_kospi_history_map(target_latest_date: str = "") -> dict:
 
     cached_latest = max(kospi_map.keys()) if kospi_map else ""
     if not kospi_map or (target_latest_date and target_latest_date > cached_latest):
+        updated = False
+        # 1) yfinance (^KS11) 일별 종가 자동 보강
         try:
-            import requests
-            from bs4 import BeautifulSoup
-            updated = False
-            headers = {"User-Agent": "Mozilla/5.0"}
-            for page in (1, 2):
-                url = f"https://finance.naver.com/sise/sise_index_day.naver?code=KOSPI&page={page}"
-                res = requests.get(url, headers=headers, timeout=3)
-                if res.status_code != 200:
-                    continue
-                soup = BeautifulSoup(res.text, "html.parser")
-                for tr in soup.select("table.type_1 tr"):
-                    tds = tr.find_all("td")
-                    if len(tds) >= 2:
-                        d_txt = tds[0].get_text(strip=True).replace(".", "-")
-                        p_txt = tds[1].get_text(strip=True).replace(",", "")
-                        if len(d_txt) == 10 and d_txt[4] == "-" and p_txt:
-                            fv = _safe_finite_float(p_txt, 0.0)
-                            if fv > 0 and kospi_map.get(d_txt) != fv:
-                                kospi_map[d_txt] = fv
-                                updated = True
-            if updated:
+            def _fetch_yf_ks11():
+                from utils.yf_util import get_yf_ticker
+                return get_yf_ticker("^KS11").history(period="3mo", interval="1d")
+
+            hist_df = yf_executor.submit(_fetch_yf_ks11).result(timeout=4)
+            if hist_df is not None and not hist_df.empty and "Close" in hist_df.columns:
+                for idx, row in hist_df.iterrows():
+                    d_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                    fv = _safe_finite_float(row.get("Close", 0.0), 0.0)
+                    if len(d_str) == 10 and fv > 0 and kospi_map.get(d_str) != round(fv, 2):
+                        kospi_map[d_str] = round(fv, 2)
+                        updated = True
+        except Exception as yf_err:
+            print(f"[KOSPI YF Supplement Notice] {yf_err}")
+
+        # 2) 네이버 금융 KOSPI 일별 시세 보조 보강
+        cached_latest = max(kospi_map.keys()) if kospi_map else ""
+        if not kospi_map or (target_latest_date and target_latest_date > cached_latest):
+            try:
+                import requests
+                from bs4 import BeautifulSoup
+                headers = {"User-Agent": "Mozilla/5.0"}
+                for page in (1, 2):
+                    url = f"https://finance.naver.com/sise/sise_index_day.naver?code=KOSPI&page={page}"
+                    res = requests.get(url, headers=headers, timeout=3)
+                    if res.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(res.text, "html.parser")
+                    for tr in soup.select("table.type_1 tr"):
+                        tds = tr.find_all("td")
+                        if len(tds) >= 2:
+                            d_txt = tds[0].get_text(strip=True).replace(".", "-")
+                            p_txt = tds[1].get_text(strip=True).replace(",", "")
+                            if len(d_txt) == 10 and d_txt[4] == "-" and p_txt:
+                                fv = _safe_finite_float(p_txt, 0.0)
+                                if fv > 0 and kospi_map.get(d_txt) != fv:
+                                    kospi_map[d_txt] = fv
+                                    updated = True
+            except Exception as e:
+                print(f"[KOSPI Naver Supplement Notice] {e}")
+
+        if updated:
+            try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, "w", encoding="utf-8") as f:
                     json.dump(dict(sorted(kospi_map.items())), f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[KOSPI Naver Supplement Notice] {e}")
+            except Exception as save_err:
+                print(f"[KOSPI Cache Save Warning] {save_err}")
 
     return kospi_map
 
