@@ -42,6 +42,8 @@ class SimulationRunRequest(BaseModel):
     point_value_krw: float = 50000.0
     initial_capital_krw: float = 100000000.0
     mdd_threshold_pct: float = 12.0
+    portfolio_risk_mode: str = "MODEL_SWAP_ONLY"
+    portfolio_mdd_limit_pct: float = 12.0
     sharpe_lookback_days: Optional[int] = 126
     initial_selected_ids: Optional[List[str]] = None
     enable_auto_mdd_swap: bool = True
@@ -209,6 +211,8 @@ def api_run_simulation_get(
     point_value_krw: float = 50000.0,
     initial_capital_krw: float = 100000000.0,
     mdd_threshold_pct: float = 12.0,
+    portfolio_risk_mode: str = "MODEL_SWAP_ONLY",
+    portfolio_mdd_limit_pct: float = 12.0,
     sharpe_lookback_days: int = 126,
     enable_auto_mdd_swap: bool = True,
     combine_supply: bool = True,
@@ -222,6 +226,8 @@ def api_run_simulation_get(
             point_value_krw=point_value_krw,
             initial_capital_krw=initial_capital_krw,
             mdd_threshold_pct=mdd_threshold_pct,
+            portfolio_risk_mode=portfolio_risk_mode,
+            portfolio_mdd_limit_pct=portfolio_mdd_limit_pct,
             sharpe_lookback_days=sharpe_lookback_days,
             enable_auto_mdd_swap=enable_auto_mdd_swap,
             combine_supply=combine_supply,
@@ -254,6 +260,8 @@ def api_run_simulation(req: SimulationRunRequest) -> Dict[str, Any]:
             mdd_trigger_mode=req.mdd_trigger_mode,
             point_value_krw=req.point_value_krw,
             initial_capital_krw=req.initial_capital_krw,
+            portfolio_risk_mode=req.portfolio_risk_mode,
+            portfolio_mdd_limit_pct=req.portfolio_mdd_limit_pct,
         )
         if not res.get("success"):
             return {

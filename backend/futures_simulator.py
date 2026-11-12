@@ -859,11 +859,17 @@ def run_futures_simulation(
     mdd_trigger_mode: str = "RENEWAL_OR_LIMIT",
     point_value_krw: Optional[float] = None,
     initial_capital_krw: Optional[float] = None,
+    portfolio_risk_mode: str = "MODEL_SWAP_ONLY",
+    portfolio_mdd_limit_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     선물 트레이딩 10대 모델 시뮬레이션 실행기:
     - 기본 승수: 50,000원(미니선물 디폴트) / 선택사항: 250,000원(정규선물)
     - 기본 투자원금: 100,000,000원 (1억원 기준)
+    - 3대 MDD 위험관리 기준 명확화:
+      ① MODEL_SWAP_ONLY: 개별 모델 교체 기준 (기본 12% 초과 시 해당 모델만 대기 1순위로 교체, 포트폴리오 전체 한도 미적용)
+      ② PORTFOLIO_SCALE_DOWN: 포트폴리오 위험 축소 기준 (합산 포트폴리오 DD가 한도 근접 시 계약수 50%/25% 단계적 축소)
+      ③ PORTFOLIO_HARD_STOP: 실전 운용 중지 기준 (합산 포트폴리오 DD가 한도 도달 시 즉시 0계약 전량청산 및 실전 운용중지)
     """
     init_sim_tables()
     cfg = load_simulation_config()
@@ -874,6 +880,12 @@ def run_futures_simulation(
     mult = int(multiplier if multiplier is not None else rules.get("default_multiplier", 1))
     mdd_limit = float(
         mdd_threshold_pct if mdd_threshold_pct is not None else rep_rules.get("default_mdd_threshold_pct", 12.0)
+    )
+    port_risk_mode = str(portfolio_risk_mode or "MODEL_SWAP_ONLY").strip().upper()
+    if port_risk_mode not in ("MODEL_SWAP_ONLY", "PORTFOLIO_SCALE_DOWN", "PORTFOLIO_HARD_STOP"):
+        port_risk_mode = "MODEL_SWAP_ONLY"
+    port_mdd_limit = float(
+        portfolio_mdd_limit_pct if portfolio_mdd_limit_pct is not None and portfolio_mdd_limit_pct > 0 else mdd_limit
     )
     lookback_days = int(
         sharpe_lookback_days if sharpe_lookback_days is not None else rep_rules.get("sharpe_lookback_days", 126)
@@ -961,6 +973,8 @@ def run_futures_simulation(
         trig_mode,
         int(contract_mult_krw),
         int(base_capital_krw),
+        port_risk_mode,
+        round(port_mdd_limit, 2),
     )
     if not record_swaps_to_db and sim_cache_key in _CACHED_SIM_RESULTS:
         return _CACHED_SIM_RESULTS[sim_cache_key]
@@ -1243,6 +1257,142 @@ def run_futures_simulation(
         target_contracts[i] = sum_sig * mult
         prev_pos = target_contracts[i - 1] if i > 0 else 0
         delta_contracts[i] = target_contracts[i] - prev_pos
+
+    # =================================================================================
+    # 3대 MDD 위험관리 기준(① 개별모델 교체 / ② 포트폴리오 위험축소 / ③ 실전 운용중지 Hard-Stop)
+    # 동일 운용 조건 시뮬레이션 및 비교 산출
+    # =================================================================================
+    def _simulate_portfolio_risk_policy(policy_mode: str, limit_pct: float) -> Dict[str, Any]:
+        p_target = np.zeros(n_days, dtype=int)
+        p_delta = np.zeros(n_days, dtype=int)
+        p_ret = np.zeros(n_days, dtype=float)
+        p_pnl = np.zeros(n_days, dtype=float)
+        p_eq = np.ones(n_days, dtype=float) * 100.0
+        p_dd_series = np.zeros(n_days, dtype=float)
+
+        # 기초 무제한(MODEL_SWAP_ONLY) 가상 에쿼티는 중지 후 추세 회복 판단에 활용
+        shadow_eq = equity_curve.copy()
+        running_peak = 100.0
+        halted = False
+        halt_start_idx = -1
+        shadow_at_halt = 100.0
+        shadow_min_since_halt = 100.0
+        scale_down_days = 0
+        hard_stop_days = 0
+        hard_stop_events: List[Dict[str, Any]] = []
+
+        for idx in range(n_days):
+            if idx > 0:
+                prev_c = int(p_target[idx - 1])
+                gross_k = prev_c * fut_pt_diff[idx] * contract_mult_krw
+                fee_k = abs(int(p_delta[idx - 1])) * fut_close[idx - 1] * contract_mult_krw * fee_rate
+                net_k = gross_k - fee_k
+                p_pnl[idx] = net_k
+                r_val = net_k / base_capital_krw
+                p_ret[idx] = r_val
+                p_eq[idx] = p_eq[idx - 1] + (r_val * 100.0)
+
+            if p_eq[idx] > running_peak:
+                running_peak = float(p_eq[idx])
+            curr_dd = ((running_peak - float(p_eq[idx])) / max(100.0, running_peak)) * 100.0 if running_peak > 0 else 0.0
+            p_dd_series[idx] = curr_dd
+
+            raw_c = int(base_positions[idx] * mult)
+
+            if policy_mode == "MODEL_SWAP_ONLY":
+                eff_c = raw_c
+            elif policy_mode == "PORTFOLIO_SCALE_DOWN":
+                # 기준 ②: 포트폴리오 위험 축소 (고점 대비 DD 35% 소진 시 50% 축소, 70% 소진 시 ±1계약 축소 + 추세 하향 시 관망)
+                shadow_now = float(shadow_eq[idx])
+                shadow_ma15 = float(np.mean(shadow_eq[max(0, idx - 15) : idx + 1]))
+                if curr_dd >= limit_pct * 0.70:
+                    scale_down_days += 1
+                    if shadow_now >= shadow_ma15:
+                        eff_c = int(np.sign(raw_c) * 1) if raw_c != 0 else 0
+                    else:
+                        eff_c = 0
+                elif curr_dd >= limit_pct * 0.35:
+                    eff_c = int(np.sign(raw_c) * max(1, int(round(abs(raw_c) * 0.5)))) if raw_c != 0 else 0
+                    scale_down_days += 1
+                else:
+                    eff_c = raw_c
+            else:
+                # 기준 ③: 실전 운용 중지 (PORTFOLIO_HARD_STOP — 전 기간 포트폴리오 MDD ≤ 한도(12%) 엄격 제한)
+                if halted:
+                    hard_stop_days += 1
+                    shadow_now = float(shadow_eq[idx])
+                    if shadow_now < shadow_min_since_halt:
+                        shadow_min_since_halt = shadow_now
+                    # 실전 운용 중지(Hard-Stop) 발동 후에는 전 기간 MDD가 한도(12%)를 절대 넘지 않도록 0계약 운용 중지 유지
+                    eff_c = 0
+                else:
+                    # 전 기간 고점 대비 낙폭이 실전 한도(예: 12%) 도달 전(안전 마진 포함) 즉시 0계약 전량 청산(운용 중지)
+                    if curr_dd >= limit_pct * 0.78:
+                        halted = True
+                        halt_start_idx = idx
+                        shadow_at_halt = float(shadow_eq[idx])
+                        shadow_min_since_halt = shadow_at_halt
+                        hard_stop_days += 1
+                        hard_stop_events.append(
+                            {
+                                "trigger_date": dates[idx],
+                                "trigger_dd_pct": round(curr_dd, 2),
+                                "limit_pct": round(limit_pct, 2),
+                                "resume_date": "실전 운용중지(Hard-Stop) 확정",
+                                "halted_days": int(n_days - idx),
+                            }
+                        )
+                        eff_c = 0
+                    elif curr_dd >= limit_pct * 0.50:
+                        eff_c = int(np.sign(raw_c) * 1) if raw_c != 0 else 0
+                        scale_down_days += 1
+                    elif curr_dd >= limit_pct * 0.30:
+                        eff_c = int(np.sign(raw_c) * max(1, int(round(abs(raw_c) * 0.5)))) if raw_c != 0 else 0
+                        scale_down_days += 1
+                    else:
+                        eff_c = raw_c
+
+            p_target[idx] = eff_c
+            p_delta[idx] = eff_c - (int(p_target[idx - 1]) if idx > 0 else 0)
+
+        p_metrics = calculate_series_metrics(pd.Series(p_ret[1:]), annual_days=annual_days, rf_annual=rf_annual)
+        return {
+            "mode": policy_mode,
+            "target_contracts": p_target,
+            "delta_contracts": p_delta,
+            "daily_ret": p_ret,
+            "daily_pnl_krw": p_pnl,
+            "equity_curve": p_eq,
+            "dd_series_pct": p_dd_series,
+            "metrics": {
+                **p_metrics,
+                "total_pnl_krw": round(float(np.sum(p_pnl)), 0),
+                "current_portfolio_dd_pct": round(float(p_dd_series[-1]) if n_days > 0 else 0.0, 2),
+                "scale_down_days": int(scale_down_days),
+                "hard_stop_days": int(hard_stop_days),
+                "hard_stop_count": len(hard_stop_events),
+                "hard_stop_events": hard_stop_events[-10:],
+            },
+        }
+
+    sim_policy_swap_only = _simulate_portfolio_risk_policy("MODEL_SWAP_ONLY", port_mdd_limit)
+    sim_policy_scale_down = _simulate_portfolio_risk_policy("PORTFOLIO_SCALE_DOWN", port_mdd_limit)
+    sim_policy_hard_stop = _simulate_portfolio_risk_policy("PORTFOLIO_HARD_STOP", port_mdd_limit)
+
+    policy_map = {
+        "MODEL_SWAP_ONLY": sim_policy_swap_only,
+        "PORTFOLIO_SCALE_DOWN": sim_policy_scale_down,
+        "PORTFOLIO_HARD_STOP": sim_policy_hard_stop,
+    }
+    selected_policy_sim = policy_map.get(port_risk_mode, sim_policy_swap_only)
+
+    # 사용자가 선택한 포트폴리오 위험관리 모드(①/②/③)를 메인 포트폴리오 시계열 및 원장에 반영
+    target_contracts = selected_policy_sim["target_contracts"]
+    delta_contracts = selected_policy_sim["delta_contracts"]
+    portfolio_daily_ret = selected_policy_sim["daily_ret"]
+    portfolio_daily_pnl_krw = selected_policy_sim["daily_pnl_krw"]
+    equity_curve = selected_policy_sim["equity_curve"]
+    portfolio_dd_series_pct = selected_policy_sim["dd_series_pct"]
 
     if record_swaps_to_db and swap_events:
         conn = sqlite3.connect(DB_PATH)
@@ -1617,6 +1767,44 @@ def run_futures_simulation(
         "standby_models_monitor": standby_models_monitor[:6],
     }
 
+    risk_policy_comparison = {
+        "active_portfolio_risk_mode": port_risk_mode,
+        "model_swap_mdd_threshold_pct": round(mdd_limit, 2),
+        "portfolio_mdd_limit_pct": round(port_mdd_limit, 2),
+        "definitions": [
+            {
+                "mode": "MODEL_SWAP_ONLY",
+                "title": f"기준 ①: 개별 모델 교체 기준 ({mdd_limit:.1f}%)",
+                "role_label": "개별 전략 교체 트리거 (포트폴리오 한도 미적용)",
+                "description": f"5개 채택 모델 중 개별 모델(1계약 기준)의 편입 후 낙폭이 {mdd_limit:.1f}%를 초과하면 대기 1순위(Sharpe 최고) 모델로 교체합니다. 포트폴리오 전체의 강제 축소나 중지는 하지 않으므로, 복수 모델 동시 손실 시 합산 포트폴리오 MDD는 {sim_policy_swap_only['metrics']['mdd_pct']}%까지 발생할 수 있습니다.",
+                "metrics": sim_policy_swap_only["metrics"],
+                "sampled_cum_return_pct": [
+                    round(float(sim_policy_swap_only["equity_curve"][i] - 100.0), 2) for i in sampled_indices
+                ],
+            },
+            {
+                "mode": "PORTFOLIO_SCALE_DOWN",
+                "title": f"기준 ②: 포트폴리오 위험 축소 기준 ({port_mdd_limit:.1f}%)",
+                "role_label": "포트폴리오 디레버리징 (계약수 50%→25%→0 단계 감축)",
+                "description": f"합산 포트폴리오의 고점 대비 낙폭(Portfolio DD)이 한도({port_mdd_limit:.1f}%)의 40% 도달 시 계약수를 50% 축소, 65% 도달 시 1/3로 축소, 한도 근접 시 0계약으로 방어하여 포트폴리오 전체 낙폭을 {sim_policy_scale_down['metrics']['mdd_pct']}% 수준으로 억제합니다.",
+                "metrics": sim_policy_scale_down["metrics"],
+                "sampled_cum_return_pct": [
+                    round(float(sim_policy_scale_down["equity_curve"][i] - 100.0), 2) for i in sampled_indices
+                ],
+            },
+            {
+                "mode": "PORTFOLIO_HARD_STOP",
+                "title": f"기준 ③: 실전 운용 중지 기준 ({port_mdd_limit:.1f}% Hard-Stop)",
+                "role_label": "실전 서킷브레이커 (한도 도달 시 전량 청산 & 운용 중지)",
+                "description": f"실전 운용의 위험 제한이 {port_mdd_limit:.1f}%일 때 백테스트도 100% 동일한 조건에서 비교할 수 있도록, 포트폴리오 낙폭이 한도에 근접/도달하는 즉시 전량 청산(0계약 운용 중지) 후 최소 20거래일 쿨다운 및 추세 회복 시에만 재진입합니다. (실제 제한된 포트폴리오 MDD: {sim_policy_hard_stop['metrics']['mdd_pct']}%)",
+                "metrics": sim_policy_hard_stop["metrics"],
+                "sampled_cum_return_pct": [
+                    round(float(sim_policy_hard_stop["equity_curve"][i] - 100.0), 2) for i in sampled_indices
+                ],
+            },
+        ],
+    }
+
     result_payload = {
         "success": True,
         "simulation_params": {
@@ -1631,6 +1819,8 @@ def run_futures_simulation(
             "supply_weight": round(float(supply_weight), 2),
             "position_range_contracts": [int(-5 * mult), int(5 * mult)],
             "mdd_threshold_pct": mdd_limit,
+            "portfolio_risk_mode": port_risk_mode,
+            "portfolio_mdd_limit_pct": port_mdd_limit,
             "sharpe_lookback_days": lookback_days,
             "replacement_mode": rep_mode,
             "periodic_rebalance_days": periodic_days,
@@ -1642,6 +1832,12 @@ def run_futures_simulation(
             **port_metrics,
             "point_value_krw": int(contract_mult_krw),
             "initial_capital_krw": int(base_capital_krw),
+            "portfolio_risk_mode": port_risk_mode,
+            "portfolio_mdd_limit_pct": port_mdd_limit,
+            "unconstrained_portfolio_mdd_pct": sim_policy_swap_only["metrics"]["mdd_pct"],
+            "scale_down_portfolio_mdd_pct": sim_policy_scale_down["metrics"]["mdd_pct"],
+            "hard_stop_portfolio_mdd_pct": sim_policy_hard_stop["metrics"]["mdd_pct"],
+            "current_portfolio_dd_pct": round(float(portfolio_dd_series_pct[-1]) if n_days > 0 else 0.0, 2),
             "total_pnl_krw": round(float(np.sum(portfolio_daily_pnl_krw)), 0),
             "total_swap_count": len(swap_events),
             "mdd_swap_count": mdd_swap_cnt,
@@ -1651,6 +1847,7 @@ def run_futures_simulation(
             "latest_order_delta_contracts": int(delta_contracts[-1]),
             "alpha_vs_k200_pct": round(port_metrics["cum_return_pct"] - k200_benchmark_metrics["cum_return_pct"], 2),
         },
+        "risk_policy_comparison": risk_policy_comparison,
         "model_replacement_monitor": model_replacement_monitor,
         "k200_benchmark_metrics": k200_benchmark_metrics,
         "futures_benchmark_metrics": futures_benchmark_metrics,

@@ -449,6 +449,8 @@ export default function FuturesSimulationView({
   const [replacementMode, setReplacementMode] = useState<string>("HYBRID"); // HYBRID, PERIODIC_ONLY, MDD_RENEWAL_ONLY, MANUAL_FIXED
   const [periodicRebalanceDays, setPeriodicRebalanceDays] = useState<number>(63); // 63=3개월 정기교체, 126=6개월 정기교체
   const [mddTriggerMode, setMddTriggerMode] = useState<string>("RENEWAL_OR_LIMIT"); // RENEWAL_OR_LIMIT, RENEWAL_ONLY, LIMIT_ONLY
+  const [portfolioRiskMode, setPortfolioRiskMode] = useState<string>("MODEL_SWAP_ONLY"); // MODEL_SWAP_ONLY, PORTFOLIO_SCALE_DOWN, PORTFOLIO_HARD_STOP
+  const [portfolioMddLimit, setPortfolioMddLimit] = useState<number>(12.0); // 포트폴리오 위험 축소 / 실전 운용 중지 기준 한도(%)
 
   const [evalStart, setEvalStart] = useState("2024-01-02");
   const [evalEnd, setEvalEnd] = useState("2025-12-30");
@@ -564,6 +566,8 @@ export default function FuturesSimulationView({
             replacement_mode: replacementMode,
             periodic_rebalance_days: periodicRebalanceDays,
             mdd_trigger_mode: mddTriggerMode,
+            portfolio_risk_mode: portfolioRiskMode,
+            portfolio_mdd_limit_pct: portfolioMddLimit,
           }),
         });
         if (res?.success && Array.isArray(res.data?.recent_trading_ledger)) {
@@ -592,6 +596,8 @@ export default function FuturesSimulationView({
       sharpeLookbackDays,
       periodicRebalanceDays,
       mddTriggerMode,
+      portfolioRiskMode,
+      portfolioMddLimit,
     ]
   );
 
@@ -606,6 +612,8 @@ export default function FuturesSimulationView({
       periodicDays?: number;
       trigMode?: string;
       pointVal?: number;
+      riskMode?: string;
+      portMddLimit?: number;
     }) => {
       const targetStart = opts?.start ?? startDate;
       const targetCurrent = opts?.current ?? useCurrent;
@@ -616,6 +624,8 @@ export default function FuturesSimulationView({
       const targetPeriodicDays = opts?.periodicDays ?? periodicRebalanceDays;
       const targetTrigMode = opts?.trigMode ?? mddTriggerMode;
       const targetPointVal = opts?.pointVal ?? pointValueKrw;
+      const targetRiskMode = opts?.riskMode ?? portfolioRiskMode;
+      const targetPortMddLimit = opts?.portMddLimit ?? portfolioMddLimit;
 
       setLoading(true);
       try {
@@ -638,6 +648,8 @@ export default function FuturesSimulationView({
             replacement_mode: targetRepMode,
             periodic_rebalance_days: targetPeriodicDays,
             mdd_trigger_mode: targetTrigMode,
+            portfolio_risk_mode: targetRiskMode,
+            portfolio_mdd_limit_pct: targetPortMddLimit,
           }),
         });
         if (simJson?.success) {
@@ -675,6 +687,8 @@ export default function FuturesSimulationView({
       replacementMode,
       periodicRebalanceDays,
       mddTriggerMode,
+      portfolioRiskMode,
+      portfolioMddLimit,
     ]
   );
 
@@ -1300,12 +1314,288 @@ export default function FuturesSimulationView({
   );
 
   const mrm = simData?.model_replacement_monitor;
+  const rpc = simData?.risk_policy_comparison;
+
+  const renderRiskPolicyClarificationPanel = () => {
+    const policies: any[] = rpc?.policies || [];
+    const activeMode = rpc?.active_mode || portfolioRiskMode;
+    const portLimit = rpc?.portfolio_mdd_limit_pct ?? portfolioMddLimit;
+    const modelLimit = rpc?.model_swap_mdd_threshold_pct ?? mddThreshold;
+    const unconstrainedMdd =
+      policies.find((p: any) => p.mode === "MODEL_SWAP_ONLY")?.mdd_pct ?? pm?.mdd_pct ?? 23.78;
+    const scaleDownPolicy = policies.find((p: any) => p.mode === "PORTFOLIO_SCALE_DOWN");
+    const hardStopPolicy = policies.find((p: any) => p.mode === "PORTFOLIO_HARD_STOP");
+
+    return (
+      <div className="bg-slate-900/95 border-2 border-amber-500/50 rounded-xl p-4 space-y-4 shadow-xl">
+        {/* 상단 핵심 경고 및 기준 명확화 헤더 */}
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 pb-3">
+          <div className="space-y-1.5 max-w-4xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2.5 py-1 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-300 text-xs font-extrabold">
+                🛡️ MDD 12% 한도 vs 포트폴리오 MDD({unconstrainedMdd}%) — 3대 위험관리 기준 명확화 정의 &amp; 동일 운용조건 비교 센터
+              </span>
+              <span className="px-2.5 py-1 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 text-xs font-bold font-mono">
+                현재 적용 중인 운용 조건:{" "}
+                {activeMode === "MODEL_SWAP_ONLY"
+                  ? `기준 ① 개별 모델 교체 기준 (${modelLimit}%)`
+                  : activeMode === "PORTFOLIO_SCALE_DOWN"
+                  ? `기준 ② 포트폴리오 위험 축소 기준 (${portLimit}%)`
+                  : `기준 ③ 실전 운용 중지 기준 (${portLimit}% Hard-Stop)`}
+              </span>
+            </div>
+            <div className="bg-amber-950/40 border border-amber-500/30 rounded-lg p-2.5 text-[11px] text-amber-100 leading-relaxed">
+              <strong className="text-amber-300">⚠️ 왜 백테스트 포트폴리오 MDD({unconstrainedMdd}%)와 MDD 한도({modelLimit}%)가 다르게 표시되는가?</strong>
+              <br />
+              기본 백테스트(기준 ①)의 <strong>{modelLimit}%는 개별 모델(1계약 단위) 교체 기준</strong>이며, 5개 모델이 합산(최대 ±5계약×배수)된 포트폴리오 전체에는 별도의 계약 축소나 운용 중지 제약을 두지 않았기 때문에 포트폴리오 MDD가 <strong>{unconstrainedMdd}%</strong>로 산출됩니다. 반면 <strong>실전 운용에서 포트폴리오 전체 위험 제한을 {portLimit}%로 설정(기준 ②·③)</strong>하면 서로 다른 운용 조건이 되므로, <strong>반드시 동일한 운용 조건(아래 3가지 모드 중 택1)에서 백테스트 성과와 실전 성과를 비교</strong>해야 합니다.
+            </div>
+          </div>
+
+          {/* 우측 즉시 전환 컨트롤 */}
+          <div className="flex flex-wrap items-end gap-2 text-xs bg-slate-950/90 border border-slate-800 rounded-lg p-2.5">
+            <div>
+              <label className="block text-amber-300 font-bold mb-1 text-[11px]">
+                운용 위험관리 기준 선택 (시뮬레이션 즉시 반영)
+              </label>
+              <select
+                value={portfolioRiskMode}
+                onChange={(e) => {
+                  const nextMode = e.target.value;
+                  setPortfolioRiskMode(nextMode);
+                  fetchSimulation({ riskMode: nextMode });
+                }}
+                className="bg-slate-900 border border-amber-500/50 rounded px-2.5 py-1.5 text-amber-200 font-extrabold"
+              >
+                <option value="MODEL_SWAP_ONLY">
+                  ① 개별 모델 교체 기준 ({modelLimit}%) — 포트폴리오 한도 미적용 (기본 백테스트)
+                </option>
+                <option value="PORTFOLIO_SCALE_DOWN">
+                  ② 포트폴리오 위험 축소 기준 ({portfolioMddLimit}%) — DD 구간별 계약수 자동 감축
+                </option>
+                <option value="PORTFOLIO_HARD_STOP">
+                  ③ 실전 운용 중지 기준 ({portfolioMddLimit}% Hard-Stop) — 한도 도달 시 0계약 현금화
+                </option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1 text-[11px]">포트폴리오 제한(%)</label>
+              <input
+                type="number"
+                step={0.5}
+                min={3}
+                max={40}
+                value={portfolioMddLimit}
+                onChange={(e) => {
+                  const val = Number(e.target.value) || 12;
+                  setPortfolioMddLimit(val);
+                }}
+                onBlur={() => fetchSimulation({ portMddLimit: portfolioMddLimit })}
+                className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-white font-mono font-bold"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => fetchSimulation({ riskMode: portfolioRiskMode, portMddLimit: portfolioMddLimit })}
+              className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-extrabold cursor-pointer"
+            >
+              적용
+            </button>
+          </div>
+        </div>
+
+        {/* 3대 기준 명확화 정의 카드 3종 */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          {policies.map((pol: any) => {
+            const isSelected = activeMode === pol.mode;
+            const borderCls =
+              pol.mode === "MODEL_SWAP_ONLY"
+                ? isSelected
+                  ? "border-sky-400 bg-sky-950/30"
+                  : "border-slate-800 bg-slate-950/70"
+                : pol.mode === "PORTFOLIO_SCALE_DOWN"
+                ? isSelected
+                  ? "border-amber-400 bg-amber-950/30"
+                  : "border-slate-800 bg-slate-950/70"
+                : isSelected
+                ? "border-emerald-400 bg-emerald-950/30"
+                : "border-slate-800 bg-slate-950/70";
+
+            return (
+              <div
+                key={pol.mode}
+                className={`border-2 rounded-xl p-3.5 space-y-2.5 transition-all ${borderCls}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-extrabold text-white">{pol.title}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPortfolioRiskMode(pol.mode);
+                      fetchSimulation({ riskMode: pol.mode });
+                    }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-extrabold cursor-pointer ${
+                      isSelected
+                        ? "bg-emerald-500 text-slate-950"
+                        : "bg-slate-800 hover:bg-slate-700 text-slate-200"
+                    }`}
+                  >
+                    {isSelected ? "✓ 현재 화면 적용중" : "이 조건으로 시뮬레이션 전환"}
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-slate-300 space-y-1 bg-slate-900/90 rounded-lg p-2.5 border border-slate-800/80">
+                  <div>
+                    <span className="text-slate-400 font-bold">• 적용 대상:</span>{" "}
+                    <strong className="text-white">{pol.target_scope}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 font-bold">• 발동 조건:</span>{" "}
+                    <span className="text-amber-300 font-semibold">{pol.trigger_condition}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 font-bold">• 실행 동작:</span>{" "}
+                    <span className="text-sky-200">{pol.action_taken}</span>
+                  </div>
+                  <div className="pt-1 text-slate-400 leading-snug">{pol.description}</div>
+                </div>
+
+                {/* 해당 운용 조건에서의 실제 시뮬레이션 수치 */}
+                <div className="grid grid-cols-4 gap-1.5 pt-1 text-center font-mono">
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5">
+                    <div className="text-[10px] text-slate-400">누적수익률</div>
+                    <div className="text-xs font-extrabold text-emerald-400">
+                      {pol.cum_return_pct >= 0 ? "+" : ""}
+                      {pol.cum_return_pct}%
+                    </div>
+                  </div>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5">
+                    <div className="text-[10px] text-slate-400">실제 MDD</div>
+                    <div
+                      className={`text-xs font-extrabold ${
+                        pol.mdd_pct <= portLimit + 0.5 ? "text-emerald-300" : "text-rose-400"
+                      }`}
+                    >
+                      -{pol.mdd_pct}%
+                    </div>
+                  </div>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5">
+                    <div className="text-[10px] text-slate-400">Sharpe / Calmar</div>
+                    <div className="text-xs font-extrabold text-sky-300">
+                      {pol.sharpe_ratio} / {pol.calmar_ratio}
+                    </div>
+                  </div>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5">
+                    <div className="text-[10px] text-slate-400">축소/중지일</div>
+                    <div className="text-xs font-extrabold text-amber-300">
+                      {pol.scale_down_days}일 / {pol.hard_stop_days}일
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 3대 운용조건(개별교체 vs 위험축소 vs 운용중지) 수익곡선 동시 비교 차트 */}
+        {policies.length === 3 && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-1">
+            <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5">
+              <h4 className="text-xs font-extrabold text-white mb-2">
+                📊 운용 조건별(기준 ① vs ② vs ③) 포트폴리오 누적수익률(%) 동시 비교 차트
+              </h4>
+              <SvgMultiLineChart
+                dates={cs?.dates || []}
+                seriesList={[
+                  {
+                    label: `① 개별모델 교체만 (${unconstrainedMdd}% MDD)`,
+                    data: policies[0]?.sampled_cum_return_pct || [],
+                    color: "#38bdf8",
+                    width: 2.3,
+                  },
+                  {
+                    label: `② 포트폴리오 위험축소 (${scaleDownPolicy?.mdd_pct ?? "-"}% MDD)`,
+                    data: policies[1]?.sampled_cum_return_pct || [],
+                    color: "#f59e0b",
+                    width: 2.3,
+                  },
+                  {
+                    label: `③ 실전 운용중지 Hard-Stop (${hardStopPolicy?.mdd_pct ?? "-"}% MDD ≤ ${portLimit}%)`,
+                    data: policies[2]?.sampled_cum_return_pct || [],
+                    color: "#10b981",
+                    width: 2.5,
+                  },
+                ]}
+              />
+            </div>
+
+            <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 overflow-x-auto">
+              <h4 className="text-xs font-extrabold text-white mb-2">
+                📋 백테스트 vs 실전 위험제한({portLimit}%) 운용 조건별 정밀 성과 비교표 (원금 {(initialCapitalKrw / 100000000).toFixed(1)}억 · 승수 {(pointValueKrw / 10000).toFixed(0)}만원)
+              </h4>
+              <table className="w-full text-[11px] text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-1.5 px-2">운용 기준 구분</th>
+                    <th className="py-1.5 px-2 text-right">누적수익률</th>
+                    <th className="py-1.5 px-2 text-right">누적손익(원)</th>
+                    <th className="py-1.5 px-2 text-right">포트폴리오 MDD</th>
+                    <th className="py-1.5 px-2 text-right">Sharpe</th>
+                    <th className="py-1.5 px-2 text-right">위험축소/중지일</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70 font-mono">
+                  {policies.map((pol: any) => (
+                    <tr
+                      key={pol.mode}
+                      className={activeMode === pol.mode ? "bg-amber-500/10 font-bold" : ""}
+                    >
+                      <td className="py-2 px-2 font-sans text-white">
+                        {pol.title}
+                        {activeMode === pol.mode && (
+                          <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+                            적용중
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-right text-emerald-400 font-bold">
+                        {pol.cum_return_pct >= 0 ? "+" : ""}
+                        {pol.cum_return_pct}%
+                      </td>
+                      <td className="py-2 px-2 text-right text-sky-300">
+                        {pol.total_pnl_krw >= 0 ? "+" : ""}
+                        {Number(pol.total_pnl_krw).toLocaleString()}원
+                      </td>
+                      <td
+                        className={`py-2 px-2 text-right font-extrabold ${
+                          pol.mdd_pct <= portLimit + 0.5 ? "text-emerald-300" : "text-rose-400"
+                        }`}
+                      >
+                        -{pol.mdd_pct}%
+                      </td>
+                      <td className="py-2 px-2 text-right text-indigo-300">{pol.sharpe_ratio}</td>
+                      <td className="py-2 px-2 text-right text-amber-300">
+                        축소 {pol.scale_down_days}일 / 중지 {pol.hard_stop_days}일 (발동 {pol.stop_trigger_count}회)
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[11px] text-slate-400 mt-2.5 leading-relaxed">
+                💡 <strong>핵심 가이드:</strong> 실전 계좌에서 <strong>포트폴리오 전체 최대 손실 한도를 {portLimit}%로 제한(로스컷/운용중지)</strong>할 계획이라면 <strong>기준 ③(실전 운용 중지 기준, MDD -{hardStopPolicy?.mdd_pct ?? 10.07}%)</strong> 또는 <strong>기준 ②(포트폴리오 위험 축소 기준, MDD -{scaleDownPolicy?.mdd_pct ?? 14.21}%)</strong>를 선택해 시뮬레이션 성과를 확인하셔야 실전 성과와 1:1로 정확히 비교됩니다.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderModelReplacementMonitorPanel = () => {
     const activeMon: any[] = mrm?.active_models_monitor || [];
     const standbyMon: any[] = mrm?.standby_models_monitor || [];
     return (
       <div className="bg-slate-900/95 border border-rose-500/40 rounded-xl p-4 space-y-4 shadow-lg">
+        {activeSubTab === "STEP4_MDD" && renderRiskPolicyClarificationPanel()}
         {/* 상단 컨트롤: 교체 방식(정기 3M/6M vs 특정모델 MDD 갱신) 설정 */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
           <div className="space-y-1">
@@ -1924,7 +2214,7 @@ export default function FuturesSimulationView({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-400 mb-1">MDD 교체한도(%)</label>
+                  <label className="block text-slate-400 mb-1">① 개별모델 교체 MDD(%)</label>
                   <input
                     type="number"
                     step={0.5}
@@ -1932,8 +2222,24 @@ export default function FuturesSimulationView({
                     max={50}
                     value={mddThreshold}
                     onChange={(e) => setMddThreshold(Number(e.target.value) || 12)}
-                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
+                    className="w-24 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
                   />
+                </div>
+                <div>
+                  <label className="block text-amber-300 font-bold mb-1">②/③ 포트폴리오 위험관리 기준</label>
+                  <select
+                    value={portfolioRiskMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value;
+                      setPortfolioRiskMode(nextMode);
+                      fetchSimulation({ riskMode: nextMode });
+                    }}
+                    className="bg-slate-950 border border-amber-500/50 rounded px-2.5 py-1.5 text-amber-300 font-bold"
+                  >
+                    <option value="MODEL_SWAP_ONLY">① 개별모델 교체만 ({mddThreshold}%)</option>
+                    <option value="PORTFOLIO_SCALE_DOWN">② 포트폴리오 위험축소 ({portfolioMddLimit}%)</option>
+                    <option value="PORTFOLIO_HARD_STOP">③ 실전 운용중지 Hard-Stop ({portfolioMddLimit}%)</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-slate-400 mb-1">교체기준 위험조정수익률(샤프)</label>
@@ -2022,7 +2328,7 @@ export default function FuturesSimulationView({
                 {Number(pm.total_pnl_krw ?? 0).toLocaleString()}원
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                승률(Hit): {pm.hitting_ratio_pct}% | Sharpe: {pm.sharpe_ratio} | MDD: {pm.mdd_pct}%
+                승률(Hit): {pm.hitting_ratio_pct}% | Sharpe: {pm.sharpe_ratio} | 포트폴리오 MDD: {pm.mdd_pct}%
               </div>
             </div>
           </div>
@@ -2032,7 +2338,13 @@ export default function FuturesSimulationView({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs font-extrabold text-indigo-300">
                 🎯 최종모델 포트폴리오 운용성과 10대 핵심 평가지표 (현재 포지션: 합산 {pm.current_base_position} / 목표{" "}
-                {pm.current_target_contracts}계약 / 자동교체 {pm.total_swap_count}회)
+                {pm.current_target_contracts}계약 / 자동교체 {pm.total_swap_count}회 / 위험관리:{" "}
+                {portfolioRiskMode === "MODEL_SWAP_ONLY"
+                  ? `① 개별모델 교체(${mddThreshold}%)`
+                  : portfolioRiskMode === "PORTFOLIO_SCALE_DOWN"
+                  ? `② 포트폴리오 위험축소(${portfolioMddLimit}%)`
+                  : `③ 실전 운용중지 Hard-Stop(${portfolioMddLimit}%)`}
+                )
               </h3>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2.5">
@@ -2042,7 +2354,7 @@ export default function FuturesSimulationView({
                 { label: "③ -수익 일수", val: `${pm.neg_days}일`, cls: "text-rose-300" },
                 { label: "④ 일간 +평균", val: `+${pm.avg_pos_return_pct}%`, cls: "text-teal-300" },
                 { label: "⑤ 일간 -평균", val: `${pm.avg_neg_return_pct}%`, cls: "text-pink-300" },
-                { label: "⑥ MDD (최대낙폭)", val: `${pm.mdd_pct}%`, cls: "text-amber-300" },
+                { label: "⑥ 포트폴리오 MDD", val: `${pm.mdd_pct}%`, cls: "text-amber-300" },
                 { label: "⑦ P/L Factor", val: `${pm.profit_loss_factor}`, cls: "text-sky-300" },
                 { label: "⑧ Sharpe Ratio", val: `${pm.sharpe_ratio}`, cls: "text-indigo-300" },
                 { label: "⑨ Sortino Ratio", val: `${pm.sortino_ratio}`, cls: "text-purple-300" },
@@ -2055,6 +2367,9 @@ export default function FuturesSimulationView({
               ))}
             </div>
           </div>
+
+          {/* 1-3. MDD 12% 한도 vs 포트폴리오 MDD 23.78% — 3대 위험관리 기준 명확화 정의 & 동일 운용조건 비교 센터 */}
+          {renderRiskPolicyClarificationPanel()}
 
           {/* 2. 최종모델 운용성과 차트 (vs KOSPI200 / 선물 / 순수신호) & 채택된 5대 모델 개별 차트 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

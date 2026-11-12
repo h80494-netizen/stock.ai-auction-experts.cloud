@@ -299,16 +299,16 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-2 gap-1.5 max-h-[60vh] overflow-y-auto">
               {[
-                { id: 'dartlab', label: '📊 재무분석 (DartLab)', accent: 'border-indigo-500/60 text-indigo-200' },
-                { id: 'futures_sim', label: '🚀 선물 10대모델', accent: 'border-emerald-500/60 text-emerald-200' },
+                { id: 'futures_sim', label: '🚀 선물 10대모델 시뮬레이션', accent: 'border-emerald-500/60 text-emerald-200' },
                 { id: 'order', label: '🚨 매수주문 (Orders)', accent: 'border-red-500/60 text-red-300' },
+                { id: 'etf_strategy', label: '⚡ ETF 투자전략', accent: 'border-sky-500/50 text-sky-200' },
+                { id: 'etf_history', label: '📜 ETF 시뮬레이션 히스토리', accent: 'border-sky-500/50 text-sky-200' },
+                { id: 'etf', label: '🗺️ ETF/ETN 맵', accent: 'border-sky-500/50 text-sky-200' },
                 { id: 'target', label: '🎯 AI 목표가/수익률', accent: 'border-rose-500/60 text-rose-200' },
+                { id: 'dartlab', label: '📊 재무분석 (DartLab)', accent: 'border-indigo-500/60 text-indigo-200' },
+                { id: 'reports', label: '📑 증권사 리포트 요약', accent: 'border-indigo-500/50 text-indigo-200' },
                 { id: 'price', label: '📈 시세/차트 (Prices)', accent: 'border-gray-600 text-gray-200' },
                 { id: 'search', label: '🔍 종목조회 (Search)', accent: 'border-gray-600 text-gray-200' },
-                { id: 'reports', label: '📑 증권사 리포트 요약', accent: 'border-indigo-500/50 text-indigo-200' },
-                { id: 'etf_strategy', label: '⚡ ETF 투자전략', accent: 'border-sky-500/50 text-sky-200' },
-                { id: 'etf_history', label: '📜 ETF 시뮬 히스토리', accent: 'border-sky-500/50 text-sky-200' },
-                { id: 'etf', label: '🗺️ ETF/ETN 맵', accent: 'border-gray-600 text-gray-200' },
                 { id: 'heatmap', label: '🟩 AI 힛맵', accent: 'border-emerald-500/50 text-emerald-200' },
                 { id: 'trending', label: '🔥 핫 주식 (Trending)', accent: 'border-amber-500/50 text-amber-200' },
                 { id: 'globalnews', label: '🌐 글로벌 뉴스 랭킹', accent: 'border-indigo-500/50 text-indigo-200' },
@@ -339,36 +339,52 @@ export default function Home() {
           </div>
         )}
 
-        <div className="flex items-center gap-1 w-full md:w-auto overflow-x-auto hide-scrollbar pb-1">
+        <div className="flex items-center gap-1 w-full md:flex-1 md:min-w-0 overflow-x-auto top-nav-scroll pb-2">
           <button
-            onClick={() => setActiveTab('globalnews')}
+            onClick={() => setActiveTab('futures_sim')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'globalnews' 
-                ? 'bg-indigo-900/40 border-indigo-600 text-indigo-300' 
-                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+              activeTab === 'futures_sim'
+                ? 'bg-emerald-900/50 border-emerald-500 text-emerald-200 shadow-md shadow-emerald-900/40'
+                : 'bg-emerald-950/30 border-emerald-800/60 text-emerald-400 hover:text-emerald-200'
             }`}
           >
-            글로벌 뉴스 중요도 랭킹
+            🚀 선물 10대모델 시뮬레이션
           </button>
           <button
-            onClick={() => setActiveTab('search')}
+            onClick={() => setActiveTab('order')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'search' 
-                ? 'bg-gray-800 border-gray-600 text-white' 
-                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+              activeTab === 'order' 
+                ? 'bg-red-900/40 border-red-600 text-red-300 shadow-md shadow-red-900/30' 
+                : 'bg-red-950/25 border-red-800/50 text-red-300 hover:text-red-200'
             }`}
           >
-            종목조회 (Search)
+            🚨 매수주문 (Orders)
+          </button>
+          <button 
+            onClick={() => setActiveTab('etf_strategy')} 
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_strategy' ? 'bg-indigo-900/50 border-indigo-400 text-white shadow-md shadow-indigo-900/30' : 'bg-indigo-950/25 border-indigo-800/50 text-indigo-300 hover:text-white'}`}
+          >
+            ⚡ ETF 투자전략
+          </button>
+          <button 
+            onClick={() => setActiveTab('etf_history')} 
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_history' ? 'bg-indigo-900/40 border-indigo-300 text-white' : 'border-transparent text-gray-300 hover:text-white'}`}
+          >
+            시뮬레이션 히스토리
+          </button>
+          <button 
+            onClick={() => setActiveTab('etf')} 
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf' ? 'bg-indigo-900/40 border-indigo-500 text-white' : 'border-transparent text-gray-300 hover:text-white'}`}
+          >
+            ETF/ETN 맵
           </button>
           <button
-            onClick={() => setActiveTab('price')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'price' 
-                ? 'bg-gray-800 border-gray-600 text-white' 
-                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            onClick={() => setActiveTab('target')}
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'target' ? 'bg-rose-900/40 border-red-500 text-white' : 'border-transparent text-gray-300 hover:text-white'
             }`}
           >
-            시세/차트 (Prices)
+            🎯 AI 목표가/수익률
           </button>
           <button
             onClick={() => setActiveTab('dartlab')}
@@ -381,16 +397,6 @@ export default function Home() {
             📊 재무분석 (DartLab)
           </button>
           <button
-            onClick={() => setActiveTab('futures_sim')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'futures_sim'
-                ? 'bg-emerald-900/50 border-emerald-500 text-emerald-200 shadow-md shadow-emerald-900/40'
-                : 'bg-emerald-950/30 border-emerald-800/60 text-emerald-400 hover:text-emerald-200'
-            }`}
-          >
-            🚀 선물 10대모델 시뮬레이션
-          </button>
-          <button
             onClick={() => setActiveTab('reports')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
               activeTab === 'reports' 
@@ -401,44 +407,35 @@ export default function Home() {
             📑 증권사 리포트 요약
           </button>
           <button
-            onClick={() => setActiveTab('scanner')}
+            onClick={() => setActiveTab('price')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'scanner' 
-                ? 'bg-blue-900/30 border-blue-700 text-blue-400' 
+              activeTab === 'price' 
+                ? 'bg-gray-800 border-gray-600 text-white' 
                 : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
-            DB크롤링 스캐너
+            시세/차트 (Prices)
           </button>
           <button
-            onClick={() => setActiveTab('tetris')}
+            onClick={() => setActiveTab('search')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'tetris' 
-                ? 'bg-purple-900/30 border-purple-700 text-purple-400' 
+              activeTab === 'search' 
+                ? 'bg-gray-800 border-gray-600 text-white' 
                 : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
-            종목 필터링 (Tetris)
+            종목조회 (Search)
           </button>
-          <button 
-            onClick={() => setActiveTab('etf')} 
-            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf' ? 'bg-indigo-900/40 border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}
+          <button
+            onClick={() => setActiveTab('globalnews')}
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'globalnews' 
+                ? 'bg-indigo-900/40 border-indigo-600 text-indigo-300' 
+                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            }`}
           >
-            ETF/ETN 맵
+            글로벌 뉴스 중요도 랭킹
           </button>
-          <button 
-            onClick={() => setActiveTab('etf_strategy')} 
-            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_strategy' ? 'bg-indigo-900/40 border-indigo-400 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}
-          >
-            ETF 투자전략
-          </button>
-          <button 
-            onClick={() => setActiveTab('etf_history')} 
-            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_history' ? 'bg-indigo-900/40 border-indigo-300 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}
-          >
-            시뮬레이션 히스토리
-          </button>
-          <button onClick={() => setActiveTab('target')} className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'target' ? 'bg-rose-900/40 border-red-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>AI 목표가/수익률</button>
           <button onClick={() => setActiveTab('heatmap')} className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'heatmap' ? 'bg-emerald-900/40 border-green-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>AI 힛맵</button>
           <button onClick={() => setActiveTab('trending')} className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'trending' ? 'bg-amber-900/40 border-yellow-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>🔥 핫 주식 (Trending)</button>
           <button
@@ -450,16 +447,6 @@ export default function Home() {
             }`}
           >
             업종 분석 (Sectors)
-          </button>
-          <button
-            onClick={() => setActiveTab('order')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'order' 
-                ? 'bg-red-900/40 border-red-600 text-red-300' 
-                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            매수주문 (Orders)
           </button>
           <button
             onClick={() => setActiveTab('competitor')}
@@ -500,6 +487,26 @@ export default function Home() {
             }`}
           >
             파생/수급 랩
+          </button>
+          <button
+            onClick={() => setActiveTab('tetris')}
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'tetris' 
+                ? 'bg-purple-900/30 border-purple-700 text-purple-400' 
+                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            종목 필터링 (Tetris)
+          </button>
+          <button
+            onClick={() => setActiveTab('scanner')}
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'scanner' 
+                ? 'bg-blue-900/30 border-blue-700 text-blue-400' 
+                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            DB크롤링 스캐너
           </button>
           <button
             onClick={() => {
@@ -565,9 +572,9 @@ export default function Home() {
       {/* 모바일 전용 하단 퀵 내비게이션 탭 바 (스마트폰 한 손 조작 최적화) */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0b0f19]/95 backdrop-blur-md border-t border-gray-800 grid grid-cols-5 h-14 px-1">
         {[
-          { id: 'dartlab', icon: '📊', label: '재무분석' },
           { id: 'futures_sim', icon: '🚀', label: '선물모델' },
           { id: 'order', icon: '🚨', label: '매수주문' },
+          { id: 'etf_strategy', icon: '⚡', label: 'ETF전략' },
           { id: 'target', icon: '🎯', label: 'AI목표가' },
         ].map(tab => (
           <button

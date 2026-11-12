@@ -654,14 +654,42 @@ def save_targets_cache(data: Dict[str, Any]):
 @app.get("/api/targets/cache")
 def get_targets_cache():
     """
-    Returns the saved target cache.
+    Returns the saved target cache, ensuring all target_history items have numeric 'value'.
     """
     cache_path = "data/targets_cache.json"
     try:
         if os.path.exists(cache_path):
             with open(cache_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except:
+                data = json.load(f)
+            import re
+            for tk, entry in data.items():
+                if not isinstance(entry, dict):
+                    continue
+                fund = entry.get("fundamentals")
+                if isinstance(fund, dict) and isinstance(fund.get("target_history"), list):
+                    cleaned_th = []
+                    for item in fund["target_history"]:
+                        if not isinstance(item, dict) or not item.get("time"):
+                            continue
+                        val = item.get("value") or item.get("daily_mean") or 0
+                        if (not val or float(val) <= 0) and item.get("text"):
+                            m = re.search(r'([0-9][0-9,]*(?:\.[0-9]+)?)', str(item.get("text")).split(":")[-1])
+                            if m:
+                                try:
+                                    val = float(m.group(1).replace(",", ""))
+                                except Exception:
+                                    val = 0
+                        try:
+                            fval = float(val)
+                        except Exception:
+                            fval = 0.0
+                        if fval > 0:
+                            item["value"] = fval
+                            item["daily_mean"] = fval
+                            cleaned_th.append(item)
+                    fund["target_history"] = cleaned_th
+            return data
+    except Exception:
         pass
     return {}
 
@@ -2225,25 +2253,106 @@ def api_get_fundamentals(ticker: str):
         
         # Generate target price history for chart markers
         raw_targets = []
+        naver_consensus_mean = 0.0
         if is_krx:
             code = pure_ticker
+            existing_report_dates_brokers = set()
             
             # 1. 개별 증권사 리포트 목표가 (실시간 DB)
             try:
                 from routers.reports import get_analyst_reports
                 recent_reports = get_analyst_reports(code, days=365).get("items", [])
                 for rep in recent_reports:
-                    tp_str = rep.get("target_price", "-").replace("원", "").replace(",", "").strip()
+                    tp_str = str(rep.get("target_price", "-")).replace("원", "").replace(",", "").strip()
                     if tp_str.isdigit() and int(tp_str) > 0:
                         broker_name = rep.get('broker', '').strip() or '증권사'
+                        r_date = str(rep.get("date", "")).replace(".", "-").strip()
+                        existing_report_dates_brokers.add((r_date, broker_name))
                         raw_targets.append({
-                            "time": rep["date"],
+                            "time": r_date,
                             "broker": broker_name,
                             "text": f"{broker_name} 목표가: {int(tp_str):,}",
                             "value": float(tp_str)
                         })
             except Exception as e:
                 print(f"Error fetching analyst reports for {code}: {e}")
+
+            # 1-B. 네이버 모바일 종목 통합 API (최신 컨센서스 평균 목표가 & 종목별 누락 리포트 실시간 보충)
+            try:
+                import requests as _req
+                from database import insert_analyst_report
+                int_res = _req.get(
+                    f"https://m.stock.naver.com/api/stock/{code}/integration",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=3.5
+                )
+                if int_res.status_code == 200:
+                    int_json = int_res.json()
+                    c_info = int_json.get("consensusInfo") or {}
+                    pt_mean_str = str(c_info.get("priceTargetMean", "")).replace(",", "").replace("원", "").strip()
+                    if pt_mean_str and pt_mean_str.replace(".", "").isdigit():
+                        naver_consensus_mean = float(pt_mean_str)
+                        c_date = str(c_info.get("createDate", "")).replace(".", "-").strip()
+                        if len(c_date) == 8 and c_date.isdigit():
+                            c_date = f"{c_date[:4]}-{c_date[4:6]}-{c_date[6:]}"
+                        if naver_consensus_mean > 0 and c_date:
+                            raw_targets.append({
+                                "time": c_date,
+                                "broker": "네이버 컨센서스 평균",
+                                "text": f"컨센서스 평균 목표가: {int(naver_consensus_mean):,}원",
+                                "value": naver_consensus_mean
+                            })
+                    # 종목별 최신 리포트 중 DB에 없는 리포트 최대 6건 실시간 목표가 추출
+                    fetched_detail_cnt = 0
+                    for r_item in (int_json.get("researches") or [])[:10]:
+                        if fetched_detail_cnt >= 6:
+                            break
+                        r_id = r_item.get("id")
+                        wdt = str(r_item.get("wdt", "")).strip()
+                        if len(wdt) == 8 and wdt.isdigit():
+                            wdt = f"{wdt[:4]}-{wdt[4:6]}-{wdt[6:]}"
+                        bnm = str(r_item.get("bnm", "")).strip() or "증권사"
+                        if not r_id or not wdt or (wdt, bnm) in existing_report_dates_brokers:
+                            continue
+                        try:
+                            fetched_detail_cnt += 1
+                            d_res = _req.get(
+                                f"https://m.stock.naver.com/api/research/company/{r_id}",
+                                headers={"User-Agent": "Mozilla/5.0"},
+                                timeout=2.5
+                            )
+                            if d_res.status_code == 200:
+                                d_json = d_res.json()
+                                c_obj = d_json.get("researchContent") or {}
+                                gp = c_obj.get("goalPrice")
+                                op = c_obj.get("opinion") or "Buy"
+                                pdf_u = c_obj.get("attachUrl") or ""
+                                if gp and str(gp).replace(",", "").isdigit() and int(str(gp).replace(",", "")) > 0:
+                                    gp_val = int(str(gp).replace(",", ""))
+                                    raw_targets.append({
+                                        "time": wdt,
+                                        "broker": bnm,
+                                        "text": f"{bnm} 목표가: {gp_val:,}",
+                                        "value": float(gp_val)
+                                    })
+                                    existing_report_dates_brokers.add((wdt, bnm))
+                                    try:
+                                        insert_analyst_report(
+                                            wdt,
+                                            str(r_item.get("tit", "")),
+                                            code,
+                                            str(r_item.get("nm", code)),
+                                            f"{gp_val}원",
+                                            op,
+                                            bnm,
+                                            pdf_u
+                                        )
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"Error fetching Naver integration researches for {code}: {e}")
 
             # 2. 네이버 WiseReport 컨센서스 목표가 시계열
             try:
@@ -2282,15 +2391,17 @@ def api_get_fundamentals(ticker: str):
                 from utils.yf_util import get_yf_ticker
                 upgrades = get_yf_ticker(yf_ticker).upgrades_downgrades
                 if upgrades is not None and not upgrades.empty:
-                    recent = upgrades.head(50)
+                    recent = upgrades.head(60)
                     for date, row in recent.iterrows():
                         firm = row.get('Firm', 'Analyst')
                         to_grade = row.get('ToGrade', '')
                         action = row.get('Action', '')
-                        pt = row.get('priorPriceTarget', 0)
+                        pt = row.get('currentPriceTarget', 0)
+                        if pd.isna(pt) or not pt or float(pt) <= 0:
+                            pt = row.get('priorPriceTarget', 0)
                         
                         text_str = f"{firm} {action} {to_grade}"
-                        if pd.notna(pt) and pt > 0:
+                        if pd.notna(pt) and float(pt) > 0:
                             text_str += f" (목표가: {pt})"
                             dt_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split()[0]
                             raw_targets.append({
@@ -2307,16 +2418,31 @@ def api_get_fundamentals(ticker: str):
         daily_groups = defaultdict(list)
         for t in raw_targets:
             # 7월 13일자 과거 더미 및 0 이하 값 배제
-            if t.get("value", 0) <= 0:
+            if not t.get("value") or float(t.get("value", 0)) <= 0:
                 continue
-            if t.get("time") == "2026-07-13" and ("저장된 목표가" in t.get("text", "") or t.get("broker") == "저장"):
+            raw_dt = str(t.get("time", "")).strip().replace(".", "-").replace("/", "-")
+            if len(raw_dt) == 8 and raw_dt.isdigit():
+                raw_dt = f"{raw_dt[:4]}-{raw_dt[4:6]}-{raw_dt[6:]}"
+            if len(raw_dt) < 10:
                 continue
-            daily_groups[t["time"]].append(t)
+            raw_dt = raw_dt[:10]
+            if raw_dt == "2026-07-13" and ("저장된 목표가" in str(t.get("text", "")) or t.get("broker") == "저장"):
+                continue
+            daily_groups[raw_dt].append({**t, "time": raw_dt})
 
         target_history = []
         for date_str in sorted(daily_groups.keys()):
             items = daily_groups[date_str]
-            vals = [item["value"] for item in items if item["value"] > 0]
+            # 동일 날짜·동일 증권사 중복 제거
+            dedup_items = []
+            seen_b = set()
+            for it in items:
+                b_key = (it.get("broker", ""), round(float(it.get("value", 0)), 2))
+                if b_key not in seen_b:
+                    seen_b.add(b_key)
+                    dedup_items.append(it)
+            items = dedup_items
+            vals = [float(item["value"]) for item in items if float(item["value"]) > 0]
             if not vals:
                 continue
             
@@ -2341,13 +2467,17 @@ def api_get_fundamentals(ticker: str):
                 "value": float(avg_val),
                 "daily_mean": float(avg_val),
                 "count": len(items),
-                "items": [{"broker": it.get("broker", ""), "value": it["value"]} for it in items]
+                "items": [{"broker": it.get("broker", ""), "value": float(it["value"])} for it in items]
             })
 
-        # 최신 목표가로 targetMean 갱신
+        # 최신 컨센서스 목표가로 targetMean 결정 (단일 아웃라이어 리포트 왜곡 방지)
         if target_history:
             target_history = sorted(target_history, key=lambda x: x["time"])
-            targetMean = target_history[-1]["value"]
+            if naver_consensus_mean > 0:
+                targetMean = naver_consensus_mean
+            elif not targetMean or targetMean <= 0:
+                recent_slice = [x["value"] for x in target_history[-5:] if x.get("value", 0) > 0]
+                targetMean = round(sum(recent_slice) / len(recent_slice), 0 if is_krx else 2) if recent_slice else target_history[-1]["value"]
             
         # Yearly EPS trend (try to get financials)
         eps_trend = []
@@ -2393,15 +2523,18 @@ def api_get_fundamentals(ticker: str):
             if not df_stk.empty:
                 s_close = df_stk['Close'] if 'Close' in df_stk.columns else df_stk.iloc[:, 3]
                 if isinstance(s_close, pd.DataFrame): s_close = s_close.iloc[:, 0]
+                s_close = s_close.dropna()
                 
                 b_close = df_bnc['Close'] if 'Close' in df_bnc.columns else df_bnc.iloc[:, 3]
                 if isinstance(b_close, pd.DataFrame): b_close = b_close.iloc[:, 0]
+                b_close = b_close.dropna()
                 
                 # Take last 30 trading days for price chart
                 recent_close = s_close.tail(30)
                 for idx, val in recent_close.items():
-                    time_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx).split(" ")[0]
-                    price_chart.append({"time": time_str, "value": float(val)})
+                    if pd.notna(val):
+                        time_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx).split(" ")[0]
+                        price_chart.append({"time": time_str, "value": float(val)})
 
             if not df_stk.empty and not df_bnc.empty:
                 # Align series
@@ -2409,11 +2542,13 @@ def api_get_fundamentals(ticker: str):
                 if len(df_rs) > 0 and len(df_rs.columns) == 2:
                     stk = df_rs.iloc[:, 0]
                     bnc = df_rs.iloc[:, 1]
-                    rs_series = (stk / bnc)
-                    rs_series = (rs_series / rs_series.iloc[0]) * 100
-                    for idx, val in rs_series.items():
-                        time_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx).split(" ")[0]
-                        rs_chart.append({"time": time_str, "value": float(val)})
+                    if float(bnc.iloc[0]) != 0 and float(stk.iloc[0]) != 0:
+                        rs_series = (stk / bnc)
+                        rs_series = ((rs_series / rs_series.iloc[0]) * 100).dropna()
+                        for idx, val in rs_series.items():
+                            if pd.notna(val):
+                                time_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx).split(" ")[0]
+                                rs_chart.append({"time": time_str, "value": float(val)})
         except Exception as e:
             print("Error fetching RS chart:", e)
 
@@ -2476,7 +2611,10 @@ def api_get_fundamentals(ticker: str):
         try:
             if is_krx and 'df_stk' in locals() and not df_stk.empty:
                 s_close = df_stk['Close'] if 'Close' in df_stk.columns else df_stk.iloc[:, 3]
-                krx_price = float(s_close.iloc[-1])
+                if isinstance(s_close, pd.DataFrame): s_close = s_close.iloc[:, 0]
+                s_close_clean = s_close.dropna()
+                if not s_close_clean.empty:
+                    krx_price = float(s_close_clean.iloc[-1])
         except:
             pass
 
@@ -2493,7 +2631,17 @@ def api_get_fundamentals(ticker: str):
         except:
             pass
 
-        return {
+        import math
+        def _sanitize_json(obj):
+            if isinstance(obj, float):
+                return 0.0 if (math.isnan(obj) or math.isinf(obj)) else obj
+            if isinstance(obj, dict):
+                return {k: _sanitize_json(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_sanitize_json(v) for v in obj]
+            return obj
+
+        return _sanitize_json({
             "ticker": pure_ticker if is_krx else ticker,
             "name": info.get("shortName") or db_fallback_name or (pure_ticker if is_krx else yf_ticker),
             "par_value": nv_fund.get("par_value", 0) if nv_fund else 0,
@@ -2508,11 +2656,11 @@ def api_get_fundamentals(ticker: str):
             "targetHigh": info.get("targetHighPrice", 0),
             "targetMean": targetMean,
             "targetLow": info.get("targetLowPrice", 0),
-            "marketCap": info.get("marketCap") or (krx_price * nv_fund.get("shares", 0) if krx_price else 0),
+            "marketCap": info.get("marketCap") or (krx_price * nv_fund.get("shares", 0) if krx_price and isinstance(nv_fund.get("shares"), (int, float)) else 0),
             "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", 0),
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", 0),
             "currentPrice": info.get("currentPrice") or info.get("previousClose") or krx_price or db_fallback_price,
-            "analyst_count": info.get("numberOfAnalystOpinions", 0),
+            "analyst_count": info.get("numberOfAnalystOpinions", 0) or len(target_history),
             "price_chart": price_chart,
             "rs_chart": rs_chart,
             "eps_trend": eps_trend,
@@ -2525,7 +2673,7 @@ def api_get_fundamentals(ticker: str):
             "change": info.get("regularMarketChange", 0) or (info.get("currentPrice", krx_price) - info.get("previousClose", krx_price) if info.get("currentPrice", krx_price) and info.get("previousClose", krx_price) else 0),
             "changePct": info.get("regularMarketChangePercent", 0) or 0,
             "currency": info.get("currency", "KRW" if is_krx else "USD")
-        }
+        })
     except Exception as e:
         print(f"Error fetching fundamentals for {ticker}:", e)
         return {"error": str(e)}

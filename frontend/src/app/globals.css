@@ -65,6 +65,29 @@ body {
   animation: marquee 30s linear infinite;
 }
 
+/* 상단 메뉴바 전용 가시성 높은 가로 스크롤바 */
+.top-nav-scroll {
+  overflow-x: auto !important;
+  scrollbar-width: auto;
+  scrollbar-color: #94a3b8 #1e293b;
+}
+.top-nav-scroll::-webkit-scrollbar {
+  display: block !important;
+  height: 11px !important;
+}
+.top-nav-scroll::-webkit-scrollbar-track {
+  background: #1e293b !important;
+  border-radius: 6px;
+}
+.top-nav-scroll::-webkit-scrollbar-thumb {
+  background: #94a3b8 !important;
+  border-radius: 6px;
+  border: 2px solid #1e293b;
+}
+.top-nav-scroll::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1 !important;
+}
+
 .hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
