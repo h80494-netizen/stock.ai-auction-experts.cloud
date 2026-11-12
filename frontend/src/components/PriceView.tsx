@@ -28,6 +28,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
   const [stockSummary, setStockSummary] = useState<any>(null);
   const [searchTicker, setSearchTicker] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
 
   const executeSearch = async (ticker: string) => {
     if (!ticker.trim()) return;
@@ -275,16 +276,39 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
 
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
+      {/* 모바일 전용 상단 뷰 전환 탭 */}
+      <div className="lg:hidden grid grid-cols-2 gap-1.5 p-2 bg-[#0d111a] border-b border-gray-800 sticky top-0 z-20">
+        <button
+          onClick={() => setMobilePane('list')}
+          className={`py-2 px-3 rounded-lg font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all ${
+            mobilePane === 'list'
+              ? 'bg-blue-600 text-white shadow'
+              : 'bg-gray-900 text-gray-400 border border-gray-800'
+          }`}
+        >
+          <span>📋 종목 목록 ({filteredStocks.length})</span>
+        </button>
+        <button
+          onClick={() => setMobilePane('detail')}
+          className={`py-2 px-3 rounded-lg font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all truncate ${
+            mobilePane === 'detail'
+              ? 'bg-emerald-600 text-white shadow'
+              : 'bg-gray-900 text-gray-400 border border-gray-800'
+          }`}
+        >
+          <span className="truncate">📈 {selectedStock ? `${selectedStock.name} 시세·차트` : '시세·차트·뉴스'}</span>
+        </button>
+      </div>
+
       {/* Left Sidebar: Dense Stock List */}
-      <div className="w-full lg:w-[350px] bg-[#0a0a0a] lg:border-r border-b lg:border-b-0 border-gray-800 flex flex-col h-[300px] lg:h-full shrink-0">
+      <div className={`${mobilePane === 'list' ? 'flex' : 'hidden'} lg:flex w-full lg:w-[350px] bg-[#0a0a0a] lg:border-r border-b lg:border-b-0 border-gray-800 flex-col h-[calc(100vh-190px)] lg:h-full shrink-0`}>
         <div className="p-2 border-b border-gray-800 bg-[#111] flex gap-2">
           <AutocompleteSearch 
             localStocks={combinedList} 
             onSelect={(ticker) => {
               setSearchTicker(ticker);
-              // Instead of manually handling, just call handleSearch manually
-              // We refactor handleSearch to take ticker as argument
               executeSearch(ticker);
+              setMobilePane('detail');
             }} 
           />
         </div>
@@ -373,8 +397,11 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
             return (
               <div 
                 key={stock.ticker}
-                onClick={() => setSelectedStock(stock)}
-                className={`grid grid-cols-[1fr_2fr_2fr_1.5fr] gap-1 px-2 py-1 cursor-pointer border-b border-gray-900/50 hover:bg-gray-800 transition-colors
+                onClick={() => {
+                  setSelectedStock(stock);
+                  setMobilePane('detail');
+                }}
+                className={`grid grid-cols-[1fr_2fr_2fr_1.5fr] gap-1 px-2 py-2 lg:py-1 cursor-pointer border-b border-gray-900/50 hover:bg-gray-800 transition-colors
                   ${isSelected ? 'bg-blue-900/30 border-l-2 border-l-blue-500' : (i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]')}
                 `}
               >
@@ -409,14 +436,14 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
       </div>
 
       {/* Main Detail Area */}
-      <div className="flex-1 flex flex-col overflow-hidden bg-[#050505]">
+      <div className={`${mobilePane === 'detail' ? 'flex' : 'hidden'} lg:flex flex-1 flex-col overflow-y-auto lg:overflow-hidden bg-[#050505]`}>
         {/* Indices Banner */}
         {indices.length > 0 && (
-          <div className="flex bg-[#0f0f0f] border-b border-gray-800 px-4 py-1 overflow-x-auto hide-scrollbar">
+          <div className="flex bg-[#0f0f0f] border-b border-gray-800 px-3 py-1.5 overflow-x-auto hide-scrollbar whitespace-nowrap">
             {indices.map((idx, i) => (
               <div 
                 key={i} 
-                className="flex items-center mx-2 cursor-pointer hover:bg-gray-800 px-3 py-1 rounded transition-colors"
+                className="flex items-center mx-2 cursor-pointer hover:bg-gray-800 px-2.5 py-1 rounded transition-colors shrink-0"
                 onClick={() => setActiveCategory("국내")}
                 title="클릭 시 한국 주요 종목 표시"
               >
@@ -432,13 +459,13 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
         
         {selectedStock ? (
           <>
-            {/* Top Row: Stock Info & Chart (h-[60%]) */}
-            <div className="h-[60%] flex flex-col border-b border-gray-800">
-              <div className="px-2 py-1 bg-[#111] flex items-end justify-between border-b border-gray-800">
-                <div className="flex items-end gap-2">
-                  <h2 className="text-xl font-bold text-white">{selectedStock.name}</h2>
+            {/* Top Row: Stock Info & Chart */}
+            <div className="h-auto lg:h-[60%] flex flex-col border-b border-gray-800">
+              <div className="px-3 py-2 bg-[#111] flex flex-wrap items-center justify-between gap-2 border-b border-gray-800">
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <h2 className="text-lg sm:text-xl font-bold text-white">{selectedStock.name}</h2>
                   <span className="text-xs text-gray-400 font-mono">{selectedStock.ticker.replace(/^(KRX:|TSE:|SZSE:|SSE:|HKEX:)/, '').split('.')[0]}</span>
-                  <div className="flex gap-1 ml-2 mb-0.5">
+                  <div className="flex gap-1">
                     {(selectedStock.categories || []).map((c: string) => (
                       <span key={c} className="bg-gray-800 text-gray-300 px-2 py-0.5 rounded text-[10px]">{c}</span>
                     ))}
@@ -446,31 +473,39 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
                 </div>
                 
                 {/* Period Buttons */}
-                <div className="flex bg-black border border-gray-800 rounded overflow-hidden">
-                  {[
-                    { val: "m", label: "1분봉" },
-                    { val: "D", label: "일봉" },
-                    { val: "W", label: "주봉" },
-                    { val: "M", label: "월봉" }
-                  ].map(p => (
-                    <button
-                      key={p.val}
-                      onClick={() => setPeriod(p.val)}
-                      className={`px-3 py-1 text-xs font-bold transition-colors ${
-                        period === p.val 
-                          ? 'bg-blue-600 text-white' 
-                          : 'bg-transparent text-gray-400 hover:bg-gray-800 hover:text-white'
-                      } ${p.val !== "M" ? 'border-r border-gray-800' : ''}`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-2">
+                  <div className="flex bg-black border border-gray-800 rounded overflow-hidden">
+                    {[
+                      { val: "m", label: "1분봉" },
+                      { val: "D", label: "일봉" },
+                      { val: "W", label: "주봉" },
+                      { val: "M", label: "월봉" }
+                    ].map(p => (
+                      <button
+                        key={p.val}
+                        onClick={() => setPeriod(p.val)}
+                        className={`px-2.5 sm:px-3 py-1 text-xs font-bold transition-colors ${
+                          period === p.val 
+                            ? 'bg-blue-600 text-white' 
+                            : 'bg-transparent text-gray-400 hover:bg-gray-800 hover:text-white'
+                        } ${p.val !== "M" ? 'border-r border-gray-800' : ''}`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setMobilePane('list')}
+                    className="lg:hidden px-2.5 py-1 rounded bg-gray-800 border border-gray-700 text-xs text-gray-200 font-bold"
+                  >
+                    ← 목록
+                  </button>
                 </div>
               </div>
               
               {/* KIS API Chart & Fundamentals Table */}
-              <div className="flex-1 w-full bg-black relative flex">
-                <div className="w-1/2 h-full relative flex flex-col items-center justify-center border-r border-gray-800">
+              <div className="flex-1 w-full bg-black relative flex flex-col md:flex-row">
+                <div className="w-full md:w-1/2 h-[260px] md:h-full relative flex flex-col items-center justify-center border-b md:border-b-0 md:border-r border-gray-800">
                   {loadingChart ? (
                     <div className="text-gray-500">차트 데이터 로딩 중...</div>
                   ) : chartData.length > 0 ? (
@@ -479,7 +514,7 @@ export default function PriceView({ stocks = [], globalStocks = [], news = [], f
                     <div className="text-gray-500">데이터가 없습니다.</div>
                   )}
                 </div>
-                <div className="w-1/2 h-full p-2 flex flex-col justify-center bg-[#0a0a0a] overflow-y-auto">
+                <div className="w-full md:w-1/2 h-auto md:h-full p-2.5 flex flex-col justify-center bg-[#0a0a0a] overflow-y-auto">
                   {fundamentals ? (
                     <div className="bg-[#111] border border-gray-800 rounded p-2 shadow-lg mx-auto w-full max-w-md">
                       <h3 className="text-sm font-bold text-white mb-2 border-b border-gray-800 pb-1">주요 재무 요약</h3>

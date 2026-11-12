@@ -1663,27 +1663,27 @@ export default function FuturesSimulationView({
   };
 
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 p-4 space-y-5 overflow-y-auto h-full">
+    <div className="min-h-screen bg-[#070b14] text-slate-100 p-2.5 sm:p-4 space-y-4 sm:space-y-5 overflow-y-auto h-full">
       {/* 상단 헤더 & 6단계 메뉴 */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 sm:p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div>
-            <span className="text-xs font-mono text-indigo-400 font-bold">
+            <span className="text-[10px] sm:text-xs font-mono text-indigo-400 font-bold">
               STOCK.AI-AUCTION-EXPERTS.CLOUD · KOSPI200 FUTURES 10-MODEL ENGINE
             </span>
-            <h1 className="text-lg font-extrabold text-white">
+            <h1 className="text-base sm:text-lg font-extrabold text-white leading-snug">
               KOSPI200 선물 10대 매매모델 실전 트레이딩 &amp; KOSPI200 비교 운용 시스템
             </h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-emerald-300 font-mono font-bold">
-              현재 채택 모델 ({selectedModelIds.length}개): {selectedModelIds.join(", ")}
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs">
+            <span className="px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-emerald-300 font-mono font-bold text-[11px] sm:text-xs">
+              채택 ({selectedModelIds.length}개): {selectedModelIds.join(", ")}
             </span>
             <button
               onClick={() => setShowManual((v) => !v)}
-              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-extrabold cursor-pointer"
+              className="px-2.5 py-1.5 sm:px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-extrabold cursor-pointer text-[11px] sm:text-xs"
             >
-              {showManual ? "📕 매뉴얼 닫기" : "📖 4대 프로세스 운용 매뉴얼"}
+              {showManual ? "📕 매뉴얼 닫기" : "📖 4대 프로세스 매뉴얼"}
             </button>
             <button
               onClick={() => {
@@ -1691,9 +1691,9 @@ export default function FuturesSimulationView({
                 handleSyncRealtimeNow(true);
               }}
               disabled={realtimeSyncing}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold cursor-pointer"
+              className="px-2.5 py-1.5 sm:px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold cursor-pointer text-[11px] sm:text-xs"
             >
-              {realtimeSyncing ? "Step 5 실시간 동기화중..." : "🔄 실시간 가격 & rawdata.xlsx 갱신 (Step 5)"}
+              {realtimeSyncing ? "Step 5 동기화중..." : "🔄 실시간 가격 & rawdata 갱신 (Step 5)"}
             </button>
           </div>
         </div>
@@ -1798,7 +1798,7 @@ export default function FuturesSimulationView({
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
+        <div className="grid grid-cols-2 lg:grid-cols-6 gap-1.5 sm:gap-2">
           {[
             { id: 6, title: "🏆 실전 종합 & KOSPI200 비교", sub: "운용성과·모델별성과·매매원장 통합" },
             { id: 1, title: "Step 1. 추세·에너지 수급합산", sub: "신고신저×외인 + 차익·OI·PCR 회귀" },
@@ -1810,14 +1810,14 @@ export default function FuturesSimulationView({
             <button
               key={m.id}
               onClick={() => setStep(m.id)}
-              className={`p-3 rounded-xl text-left border transition cursor-pointer ${
+              className={`p-2 sm:p-3 rounded-xl text-left border transition cursor-pointer ${
                 step === m.id
                   ? "bg-indigo-600/30 border-indigo-400 text-white shadow-lg"
                   : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
               }`}
             >
-              <div className="text-xs font-extrabold">{m.title}</div>
-              <div className="text-[11px] opacity-80 mt-0.5">{m.sub}</div>
+              <div className="text-[11px] sm:text-xs font-extrabold leading-tight">{m.title}</div>
+              <div className="text-[10px] sm:text-[11px] opacity-80 mt-0.5 truncate">{m.sub}</div>
             </button>
           ))}
         </div>

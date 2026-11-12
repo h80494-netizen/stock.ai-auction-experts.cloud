@@ -661,20 +661,20 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const isMarketOpenForStats = forceEnable || (now.getHours() > 9) || (now.getHours() === 9 && now.getMinutes() >= 5);
   
   return (
-    <div className="flex h-[calc(100vh-120px)] w-full bg-black text-gray-200">
-      <div className="w-full flex flex-col p-2 h-full">
+    <div className="flex h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-200 overflow-y-auto lg:overflow-hidden">
+      <div className="w-full flex flex-col p-2 sm:p-3 h-auto lg:h-full">
         
-        <div className="flex justify-between items-center mb-2 px-2">
-          <div className="flex items-center gap-3">
-            <h2 className="text-xl font-bold text-red-500 flex-shrink-0">
-              🚨 매수주문 (외국계 창구 순매수 {threshold}%↑, KOSPI·KOSDAQ 전종목 상위 20)
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 mb-2.5 px-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base sm:text-xl font-extrabold text-red-500 leading-tight">
+              🚨 매수주문 <span className="text-xs sm:text-base font-bold text-red-400">(외국계 순매수 {threshold}%↑ 상위 20)</span>
             </h2>
             <div className="flex items-center gap-1">
               <input 
                 type="number" 
                 value={thresholdInput} 
                 onChange={e => setThresholdInput(e.target.value)}
-                className="bg-gray-800 text-xs text-gray-300 border border-gray-600 rounded px-2 py-1 focus:outline-none focus:border-red-500 w-16 text-right font-bold"
+                className="bg-gray-800 text-xs text-gray-300 border border-gray-600 rounded px-2 py-1 focus:outline-none focus:border-red-500 w-14 text-right font-bold"
               />
               <span className="text-gray-400 text-xs">%</span>
               <button 
@@ -706,16 +706,16 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               </button>
             </div>
             {orderStocks.length > 0 && (
-              <span className="text-xs text-yellow-400 bg-yellow-950/60 border border-yellow-800/80 px-2 py-0.5 rounded">
-                조건 부합: {orderStocks.length}개 종목 {orderStocks.length <= 20 ? '(전체 표시)' : '(상위 20개)'}
+              <span className="text-[11px] sm:text-xs text-yellow-400 bg-yellow-950/60 border border-yellow-800/80 px-2 py-0.5 rounded font-bold">
+                조건 부합: {orderStocks.length}종목 {orderStocks.length <= 20 ? '(전체)' : '(상위 20)'}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-between md:justify-end">
             <button 
               onClick={() => fetchForeignStocks(threshold, true)}
               disabled={isScanning}
-              className="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 px-2 py-1 rounded text-gray-300 transition-colors"
+              className="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 px-2.5 py-1.5 rounded text-gray-200 font-bold transition-colors"
             >
               🔄 실시간 전종목 재스캔
             </button>
@@ -726,77 +726,83 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           </div>
         </div>
 
-        <div className="flex gap-2 mb-3">
+        <div className="flex flex-col lg:flex-row gap-2.5 mb-3">
           {/* Investment Amount Input */}
-          <div className="flex-1 bg-[#1a1a1a] border border-gray-800 rounded p-4 flex flex-col gap-2">
-            <label className="text-gray-400 font-bold text-sm mb-1 block">전체 투자 금액 (최대 1억 원 한도)</label>
+          <div className="w-full lg:flex-1 bg-[#1a1a1a] border border-gray-800 rounded-lg p-3 sm:p-4 flex flex-col gap-1.5">
+            <label className="text-gray-400 font-bold text-xs sm:text-sm block">전체 투자 금액 (최대 1억 원 한도)</label>
             <div className="flex items-center gap-2">
               <input 
                 type="text" 
                 value={totalAmount.toLocaleString()} 
                 onChange={handleAmountChange}
                 disabled={alreadyBoughtToday}
-                className={`bg-black border border-gray-700 rounded px-3 py-2 text-right font-mono font-bold w-full text-lg focus:outline-none focus:border-yellow-500 transition-colors ${alreadyBoughtToday ? 'opacity-50 cursor-not-allowed' : ''}`}
+                className={`bg-black border border-gray-700 rounded px-3 py-1.5 sm:py-2 text-right font-mono font-bold w-full text-base sm:text-lg focus:outline-none focus:border-yellow-500 transition-colors ${alreadyBoughtToday ? 'opacity-50 cursor-not-allowed' : ''}`}
               />
-              <span className="text-gray-400 font-bold">원</span>
+              <span className="text-gray-400 font-bold text-sm">원</span>
             </div>
-            <div className="text-xs text-gray-500 mt-1">
-              종목당 배정 금액 (1/20 한도): <span className="font-mono text-gray-300">{Math.floor(amountPerStock).toLocaleString()}</span> 원
-            </div>
-            <div className="flex gap-2 mt-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 mt-1">
+              <div className="text-xs text-gray-400">
+                종목당 배정(1/20): <span className="font-mono font-bold text-gray-200">{Math.floor(amountPerStock).toLocaleString()}</span> 원
+              </div>
               <button 
                 onClick={handleBuyAll}
                 disabled={!isMarketOpenForStats || orderStocks.length === 0 || alreadyBoughtToday}
-                className="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 text-white font-bold py-1.5 px-4 rounded transition-colors whitespace-nowrap flex-1"
+                className="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 text-white font-bold py-2 px-4 rounded transition-colors whitespace-nowrap text-xs sm:text-sm w-full sm:w-auto"
               >
-                {alreadyBoughtToday ? '금일 매수 완료 (추가매수 불가)' : '일괄 매수'}
+                {alreadyBoughtToday ? '금일 매수 완료 (추가매수 불가)' : '🚀 일괄 매수'}
               </button>
             </div>
           </div>
           
           {/* Portfolio Summary Panel */}
-          <div className="flex-[2] bg-[#1a1a1a] border border-gray-800 rounded p-4 flex gap-4">
-            <div className="flex-1 border-r border-gray-800 pr-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">
-                 {isLiquidatedToday ? '전체 매입금액 (금일 청산)' : '전체 매입금액'}
-               </label>
-               <div className="text-xl font-mono text-gray-200 mt-2">{portfolioSummary.totalBuyAmount.toLocaleString()} <span className="text-sm">원</span></div>
+          <div className="w-full lg:flex-[2] bg-[#1a1a1a] border border-gray-800 rounded-lg p-3 sm:p-4 flex flex-col xl:flex-row gap-3 items-stretch xl:items-center justify-between">
+            <div className="grid grid-cols-3 gap-2 sm:gap-4 flex-1">
+              <div className="border-r border-gray-800 pr-2 sm:pr-4">
+                 <label className="text-gray-400 font-bold text-[11px] sm:text-xs mb-1 block truncate">
+                   {isLiquidatedToday ? '매입금액 (금일청산)' : '전체 매입금액'}
+                 </label>
+                 <div className="text-sm sm:text-xl font-mono font-bold text-gray-200 mt-1">
+                   {portfolioSummary.totalBuyAmount.toLocaleString()}<span className="text-[11px] sm:text-xs ml-0.5">원</span>
+                 </div>
+              </div>
+              <div className="border-r border-gray-800 px-1 sm:px-3">
+                 <label className="text-gray-400 font-bold text-[11px] sm:text-xs mb-1 block truncate">
+                   {isLiquidatedToday ? '15:30 청산금액' : '현재 평가액'}
+                 </label>
+                 <div className="text-sm sm:text-xl font-mono font-bold text-gray-200 mt-1">
+                   {portfolioSummary.totalCurrentAmount.toLocaleString()}<span className="text-[11px] sm:text-xs ml-0.5">원</span>
+                 </div>
+              </div>
+              <div className="pl-1 sm:pl-3">
+                 <label className="text-gray-400 font-bold text-[11px] sm:text-xs mb-1 block truncate">
+                   {isLiquidatedToday ? '금일 확정 순손익' : '전체 손익(예상)'}
+                 </label>
+                 <div className={`text-sm sm:text-2xl font-mono font-extrabold mt-1 ${portfolioSummary.totalPnL > 0 ? 'text-red-400' : (portfolioSummary.totalPnL < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
+                   {portfolioSummary.totalPnL > 0 ? '+' : ''}{Math.floor(portfolioSummary.totalPnL).toLocaleString()}<span className="text-[11px] sm:text-xs ml-0.5">원</span>
+                 </div>
+              </div>
             </div>
-            <div className="flex-1 border-r border-gray-800 px-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">
-                 {isLiquidatedToday ? '15:30 청산금액 (종가 확정)' : '현재 평가액'}
-               </label>
-               <div className="text-xl font-mono text-gray-200 mt-2">{portfolioSummary.totalCurrentAmount.toLocaleString()} <span className="text-sm">원</span></div>
-            </div>
-            <div className="flex-1 pl-4">
-               <label className="text-gray-500 font-bold text-sm mb-1 block">
-                 {isLiquidatedToday ? '금일 확정 순손익 (세후)' : '전체 손익 (종가시 예상)'}
-               </label>
-               <div className={`text-2xl font-mono font-bold mt-1 ${portfolioSummary.totalPnL > 0 ? 'text-red-400' : (portfolioSummary.totalPnL < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
-                 {portfolioSummary.totalPnL > 0 ? '+' : ''}{Math.floor(portfolioSummary.totalPnL).toLocaleString()} <span className="text-sm">원</span>
-               </div>
-            </div>
-            <div className="flex items-center ml-2 gap-2">
+            <div className="grid grid-cols-3 gap-2 w-full xl:w-auto shrink-0">
                <button 
                   onClick={() => setShowHoldingsModal(true)}
-                  className="bg-emerald-900/90 hover:bg-emerald-700 border border-emerald-500 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[90px]"
+                  className="bg-emerald-900/90 hover:bg-emerald-700 border border-emerald-500 text-white font-bold py-2 px-2.5 rounded-lg text-xs transition-colors whitespace-nowrap flex flex-col items-center justify-center min-w-[82px]"
                >
-                 <span className="text-sm">📋 보유리스트</span>
-                 <span className="text-[11px] text-emerald-300 font-normal">({holdings.length}종목)</span>
+                 <span className="text-xs sm:text-sm">📋 보유리스트</span>
+                 <span className="text-[10px] sm:text-[11px] text-emerald-300 font-normal">({holdings.length}종목)</span>
                </button>
                <button 
                   onClick={handleSellAll}
                   disabled={holdings.length === 0 || reservedSellToday}
-                  className="bg-blue-900/90 hover:bg-blue-700 disabled:bg-gray-800 disabled:border-gray-700 border border-blue-500 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[80px]"
+                  className="bg-blue-900/90 hover:bg-blue-700 disabled:bg-gray-800 disabled:border-gray-700 border border-blue-500 text-white font-bold py-2 px-2.5 rounded-lg text-xs transition-colors whitespace-nowrap flex flex-col items-center justify-center min-w-[82px]"
                >
-                 <span>{isLiquidatedToday ? '청산 완료' : (reservedSellToday ? '종가매도 예약됨' : '일괄매도')}</span>
-                 <span className="text-[10px] text-blue-300 font-normal">{isLiquidatedToday ? '(매매원장 이관됨)' : (reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)')}</span>
+                 <span className="text-xs sm:text-sm">{isLiquidatedToday ? '청산 완료' : (reservedSellToday ? '종가매도 예약됨' : '일괄매도')}</span>
+                 <span className="text-[10px] text-blue-300 font-normal">{isLiquidatedToday ? '(매매원장 이관)' : (reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)')}</span>
                </button>
                <button 
                   onClick={() => setShowLedger(true)}
-                  className="bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-bold py-2 px-3 rounded text-xs transition-colors whitespace-nowrap h-full flex flex-col items-center justify-center min-w-[80px]"
+                  className="bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-bold py-2 px-2.5 rounded-lg text-xs transition-colors whitespace-nowrap flex flex-col items-center justify-center min-w-[82px]"
                >
-                 <span>매매원장</span>
+                 <span className="text-xs sm:text-sm">📊 매매원장</span>
                  <span className="text-[10px] text-gray-400 font-normal">(조회)</span>
                </button>
             </div>
@@ -804,21 +810,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         </div>
         
         {/* Table Container with Scrollbar */}
-        <div className="flex-1 border border-gray-800 rounded bg-[#0a0a0a] overflow-y-auto">
-          <table className="w-full text-xs text-left relative">
+        <div className="flex-1 min-h-[260px] max-h-[420px] lg:max-h-none border border-gray-800 rounded-lg bg-[#0a0a0a] overflow-x-auto overflow-y-auto">
+          <table className="w-full min-w-[780px] text-xs text-left relative whitespace-nowrap">
             <thead className="bg-gray-900 text-gray-400 border-b border-gray-800 sticky top-0 shadow-md z-10">
               <tr>
-                <th className="px-3 py-2 font-medium w-24">종목코드</th>
-                <th className="px-3 py-2 font-medium">종목명</th>
-                <th className="px-3 py-2 font-medium text-right text-white">현재가</th>
-                <th className="px-3 py-2 font-medium text-right text-yellow-300">등락률(전일대비)</th>
-                <th className="px-3 py-2 font-medium text-right text-purple-400">외국계순매수량</th>
-                <th className="px-3 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
-                <th className="px-3 py-2 font-medium text-right text-orange-400">실시간 비중</th>
-                <th className="px-3 py-2 font-medium text-right text-gray-400">총거래량</th>
-                <th className="px-3 py-2 font-medium text-right text-blue-400">매수수량 (1/N)</th>
-                <th className="px-3 py-2 font-medium text-right text-green-400">주문금액</th>
-                <th className="px-3 py-2 font-medium text-center">개별주문</th>
+                <th className="px-2.5 py-2 font-medium w-20">종목코드</th>
+                <th className="px-2.5 py-2 font-medium sticky left-0 bg-gray-900 z-20">종목명</th>
+                <th className="px-2.5 py-2 font-medium text-right text-white">현재가</th>
+                <th className="px-2.5 py-2 font-medium text-right text-yellow-300">등락률</th>
+                <th className="px-2.5 py-2 font-medium text-right text-purple-400">외국계순매수</th>
+                <th className="px-2.5 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
+                <th className="px-2.5 py-2 font-medium text-right text-orange-400">실시간 비중</th>
+                <th className="px-2.5 py-2 font-medium text-right text-gray-400">총거래량</th>
+                <th className="px-2.5 py-2 font-medium text-right text-blue-400">매수수량(1/N)</th>
+                <th className="px-2.5 py-2 font-medium text-right text-green-400">주문금액</th>
+                <th className="px-2.5 py-2 font-medium text-center">개별주문</th>
               </tr>
             </thead>
             <tbody>
@@ -850,11 +856,12 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                 const totalVol = stock.total_volume || stock.volume || stock.totalVol || 0;
 
                 const market = stock.market || (cleanTicker.startsWith('0') ? 'KOSPI' : 'KOSDAQ');
+                const rowBg = i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]';
 
                 return (
-                  <tr key={stock.ticker} className={`border-b border-gray-800 hover:bg-gray-800/50 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
-                    <td className="px-3 py-3 font-mono text-gray-400">{cleanTicker}</td>
-                    <td className="px-3 py-3 font-bold flex items-center gap-1.5 flex-wrap">
+                  <tr key={stock.ticker} className={`border-b border-gray-800 hover:bg-gray-800/50 ${rowBg}`}>
+                    <td className="px-2.5 py-2.5 font-mono text-gray-400">{cleanTicker}</td>
+                    <td className={`px-2.5 py-2.5 font-bold sticky left-0 z-10 ${rowBg} flex items-center gap-1.5`}>
                       <span className={`text-[10px] font-mono px-1 py-0.5 rounded border ${
                         market === 'KOSDAQ' 
                           ? 'bg-purple-950/70 border-purple-800 text-purple-300' 
@@ -862,26 +869,26 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                       }`}>
                         {market}
                       </span>
-                      <span>{stock.name}</span>
-                      {snap && <span className="ml-1 text-[10px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded border border-green-800">매수가 {(snap.price || 0).toLocaleString()}원 {snap.time ? `(${snap.time})` : ''}</span>}
+                      <span className="text-white">{stock.name}</span>
+                      {snap && <span className="ml-1 text-[10px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded border border-green-800">매수가 {(snap.price || 0).toLocaleString()}원</span>}
                     </td>
-                    <td className="px-3 py-3 text-right font-mono font-bold text-white">{(liveP || stock.price || priceForOrder || 0).toLocaleString()}</td>
-                    <td className={`px-3 py-3 text-right font-mono font-bold ${changeColor}`}>{changePctStr}</td>
-                    <td className="px-3 py-3 text-right font-mono text-purple-300">
+                    <td className="px-2.5 py-2.5 text-right font-mono font-bold text-white">{(liveP || stock.price || priceForOrder || 0).toLocaleString()}</td>
+                    <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${changeColor}`}>{changePctStr}</td>
+                    <td className="px-2.5 py-2.5 text-right font-mono text-purple-300">
                       {netBuy > 0 ? '+' : ''}{Math.floor(netBuy).toLocaleString()}주
                     </td>
-                    <td className="px-3 py-3 text-right font-mono font-bold text-yellow-400">
+                    <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
                       {snapRatio.toFixed(2)}%
                     </td>
-                    <td className={`px-3 py-3 text-right font-mono font-bold ${currentRatio >= threshold ? 'text-orange-400' : 'text-gray-500'}`}>
+                    <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${currentRatio >= threshold ? 'text-orange-400' : 'text-gray-500'}`}>
                       {currentRatio.toFixed(2)}%
                     </td>
-                    <td className="px-3 py-3 text-right font-mono text-gray-300">
+                    <td className="px-2.5 py-2.5 text-right font-mono text-gray-300">
                       {Math.floor(totalVol).toLocaleString()}
                     </td>
-                    <td className="px-3 py-3 text-right font-mono font-bold text-blue-300">{qty.toLocaleString()} 주</td>
-                    <td className="px-3 py-3 text-right font-mono text-green-300">{orderTotal.toLocaleString()}</td>
-                    <td className="px-3 py-2 text-center">
+                    <td className="px-2.5 py-2.5 text-right font-mono font-bold text-blue-300">{qty.toLocaleString()} 주</td>
+                    <td className="px-2.5 py-2.5 text-right font-mono text-green-300">{orderTotal.toLocaleString()}</td>
+                    <td className="px-2.5 py-2 text-center">
                       <div className="flex justify-center gap-1">
                         <button 
                           onClick={() => handleBuySingle(stock.ticker, stock.name, priceForOrder, qty)}
@@ -912,24 +919,24 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         </div>
 
         {/* Holdings / PnL Table (Always Visible) */}
-        <div className="mt-3 flex-none border border-gray-800 rounded bg-[#111]">
-          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-300 flex justify-between items-center">
+        <div className="mt-3 flex-none border border-gray-800 rounded-lg bg-[#111]">
+          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-300 flex justify-between items-center text-xs sm:text-sm">
             <span>📋 보유 잔고 및 실시간 손익 (종가시 최종수익)</span>
             <span className="text-xs text-gray-400 font-normal">보유 종목: {holdings.length}개</span>
           </div>
-          <div className="max-h-[220px] overflow-y-auto">
-            <table className="w-full text-xs text-left">
-              <thead className="bg-[#1a1a1a] text-gray-400 border-b border-gray-800 sticky top-0">
+          <div className="max-h-[260px] overflow-x-auto overflow-y-auto">
+            <table className="w-full min-w-[680px] text-xs text-left whitespace-nowrap">
+              <thead className="bg-[#1a1a1a] text-gray-400 border-b border-gray-800 sticky top-0 z-10">
                 <tr>
-                  <th className="px-3 py-2 font-medium">종목명</th>
-                  <th className="px-3 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
-                  <th className="px-3 py-2 font-medium text-right text-orange-400">실시간 비중</th>
-                  <th className="px-3 py-2 font-medium text-right">보유수량</th>
-                  <th className="px-3 py-2 font-medium text-right">매입단가</th>
-                  <th className="px-3 py-2 font-medium text-right">현재가</th>
-                  <th className="px-3 py-2 font-medium text-right text-orange-400">순이익</th>
-                  <th className="px-3 py-2 font-medium text-right text-green-400">종가시 최종수익(예상)</th>
-                  <th className="px-3 py-2 font-medium text-center">동작</th>
+                  <th className="px-2.5 py-2 font-medium sticky left-0 bg-[#1a1a1a] z-20">종목명</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-orange-400">실시간 비중</th>
+                  <th className="px-2.5 py-2 font-medium text-right">보유수량</th>
+                  <th className="px-2.5 py-2 font-medium text-right">매입단가</th>
+                  <th className="px-2.5 py-2 font-medium text-right">현재가</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-orange-400">순이익</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-green-400">종가시 최종수익(예상)</th>
+                  <th className="px-2.5 py-2 font-medium text-center">동작</th>
                 </tr>
               </thead>
               <tbody>
@@ -977,25 +984,26 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                           : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
                             : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0))));
                     
+                    const hRowBg = i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]';
                     return (
-                      <tr key={h.ticker} className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
-                        <td className="px-3 py-3 font-bold">{h.name}</td>
-                        <td className="px-3 py-3 text-right font-mono font-bold text-yellow-400">
+                      <tr key={h.ticker} className={`border-b border-gray-800 ${hRowBg}`}>
+                        <td className={`px-2.5 py-2.5 font-bold sticky left-0 z-10 ${hRowBg} text-white`}>{h.name}</td>
+                        <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
                           {ratio0905 !== undefined ? ratio0905.toFixed(2) : '-'}%
                         </td>
-                        <td className={`px-3 py-3 text-right font-mono font-bold ${liveRatio >= 5 ? 'text-orange-400' : 'text-gray-500'}`}>
+                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${liveRatio >= 5 ? 'text-orange-400' : 'text-gray-500'}`}>
                           {liveRatio.toFixed(2)}%
                         </td>
-                        <td className="px-3 py-3 text-right font-mono">{h.qty.toLocaleString()}</td>
-                        <td className="px-3 py-3 text-right font-mono">{Math.floor(h.buyPrice).toLocaleString()}</td>
-                        <td className="px-3 py-3 text-right font-mono">{currentPrice.toLocaleString()}</td>
-                        <td className={`px-3 py-3 text-right font-mono font-bold ${pnlColor}`}>
+                        <td className="px-2.5 py-2.5 text-right font-mono">{h.qty.toLocaleString()}</td>
+                        <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(h.buyPrice).toLocaleString()}</td>
+                        <td className="px-2.5 py-2.5 text-right font-mono">{currentPrice.toLocaleString()}</td>
+                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
                           {netProfit > 0 ? '+' : ''}{Math.floor(netProfit).toLocaleString()} 원
                         </td>
-                        <td className={`px-3 py-3 text-right font-mono font-bold ${pnlColor}`}>
+                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
                           {finalProfit > 0 ? '+' : ''}{Math.floor(finalProfit).toLocaleString()} 원
                         </td>
-                        <td className="px-3 py-2 text-center">
+                        <td className="px-2.5 py-2 text-center">
                           <button 
                             onClick={() => handleSellSingle(h.ticker, h.qty)}
                             className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-blue-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors"
@@ -1008,7 +1016,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={9} className="px-3 py-6 text-center font-bold">
+                    <td colSpan={9} className="px-3 py-6 text-center font-bold whitespace-normal">
                       {isLiquidatedToday ? (
                         <span className="text-emerald-400">
                           ✅ 금일({todayStr}) 15:30 장마감 종가 일괄청산 완료 (보유 잔고 0종목) — 당일 매매내역 및 확정손익은 상단 [매매원장]에서 확인하실 수 있습니다.

@@ -21,6 +21,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [cacheLoaded, setCacheLoaded] = useState(false);
+  const [mobilePane, setMobilePane] = useState<'list' | 'chart'>('list');
 
   const targetChartRef = useRef<HTMLDivElement>(null);
   const [chartData, setChartData] = useState<any[]>([]);
@@ -379,12 +380,39 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
 
   return (
     <div className="flex flex-col lg:flex-row h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-300 text-xs overflow-y-auto lg:overflow-hidden">
+      {/* 모바일 전용 상단 뷰 전환 탭 (종목 리스트 ↔ 차트 & 리포트 추이) */}
+      <div className="lg:hidden grid grid-cols-2 gap-1.5 p-2 bg-[#0d111a] border-b border-gray-800 sticky top-0 z-20">
+        <button
+          onClick={() => setMobilePane('list')}
+          className={`py-2 px-3 rounded-lg font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all ${
+            mobilePane === 'list'
+              ? 'bg-indigo-600 text-white shadow'
+              : 'bg-gray-900 text-gray-400 border border-gray-800'
+          }`}
+        >
+          <span>📋 종목 목록 ({filteredData.length})</span>
+        </button>
+        <button
+          onClick={() => setMobilePane('chart')}
+          className={`py-2 px-3 rounded-lg font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all truncate ${
+            mobilePane === 'chart'
+              ? 'bg-rose-600 text-white shadow'
+              : 'bg-gray-900 text-gray-400 border border-gray-800'
+          }`}
+        >
+          <span className="truncate">📈 {selectedStock ? `${selectedStock.name} 차트·추이` : '목표가 차트·추이'}</span>
+        </button>
+      </div>
+
       {/* Left Sidebar: Data Table */}
-      <div className="flex flex-col w-full lg:w-[500px] lg:border-r border-b lg:border-b-0 border-gray-800 h-[400px] lg:h-full bg-[#0a0a0a] shrink-0">
+      <div className={`${mobilePane === 'list' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-[500px] lg:border-r border-b lg:border-b-0 border-gray-800 h-[calc(100vh-190px)] lg:h-full bg-[#0a0a0a] shrink-0`}>
         <div className="p-2 border-b border-gray-800 bg-[#111] flex gap-2">
           <AutocompleteSearch 
             localStocks={combinedList} 
-            onSelect={handleSearch} 
+            onSelect={(tk) => {
+              handleSearch(tk);
+              setMobilePane('chart');
+            }} 
             placeholder="목표가 조회할 종목 검색"
           />
         </div>
@@ -408,15 +436,15 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
           </div>
           
           <div className="flex gap-2 mt-1">
-            <button onClick={() => setFilter('ALL')} className={`flex-1 py-1 px-1 rounded font-bold text-[10px] ${filter === 'ALL' ? 'bg-gray-700 text-white' : 'bg-black text-gray-400 border border-gray-800'}`}>전체</button>
-            <button onClick={() => setFilter('UP')} className={`flex-1 py-1 px-1 rounded font-bold text-[10px] ${filter === 'UP' ? 'bg-red-900/50 text-red-400 border border-red-800' : 'bg-black text-gray-400 border border-gray-800'}`}>상승(UP)</button>
-            <button onClick={() => setFilter('DOWN')} className={`flex-1 py-1 px-1 rounded font-bold text-[10px] ${filter === 'DOWN' ? 'bg-blue-900/50 text-blue-400 border border-blue-800' : 'bg-black text-gray-400 border border-gray-800'}`}>하락(DOWN)</button>
+            <button onClick={() => setFilter('ALL')} className={`flex-1 py-1.5 px-1 rounded font-bold text-[11px] ${filter === 'ALL' ? 'bg-gray-700 text-white' : 'bg-black text-gray-400 border border-gray-800'}`}>전체</button>
+            <button onClick={() => setFilter('UP')} className={`flex-1 py-1.5 px-1 rounded font-bold text-[11px] ${filter === 'UP' ? 'bg-red-900/50 text-red-400 border border-red-800' : 'bg-black text-gray-400 border border-gray-800'}`}>상승(UP)</button>
+            <button onClick={() => setFilter('DOWN')} className={`flex-1 py-1.5 px-1 rounded font-bold text-[11px] ${filter === 'DOWN' ? 'bg-blue-900/50 text-blue-400 border border-blue-800' : 'bg-black text-gray-400 border border-gray-800'}`}>하락(DOWN)</button>
           </div>
           
           <div className="flex gap-1 mt-1 bg-gray-900 p-1 rounded">
              <span className="text-[10px] text-gray-500 my-auto ml-1 font-bold">국가:</span>
              {['ALL', 'KR', 'US', 'JP', 'CN'].map(c => (
-                 <button key={c} onClick={() => setCountryFilter(c as any)} className={`px-2 py-0.5 rounded text-[10px] font-bold ${countryFilter === c ? 'bg-white text-black' : 'text-gray-400 hover:bg-gray-800'}`}>
+                 <button key={c} onClick={() => setCountryFilter(c as any)} className={`px-2.5 py-1 rounded text-[11px] font-bold ${countryFilter === c ? 'bg-white text-black' : 'text-gray-400 hover:bg-gray-800'}`}>
                      {c}
                  </button>
              ))}
@@ -445,8 +473,9 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
                   }
                   setSelectedStock(item);
                   refreshStockTarget(item.ticker);
+                  setMobilePane('chart');
                 }}
-                className={`grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.5fr] gap-1 px-2 py-2 cursor-pointer border-b border-gray-900/50 hover:bg-gray-800 transition-colors text-[11px]
+                className={`grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.5fr] gap-1 px-2 py-2.5 cursor-pointer border-b border-gray-900/50 hover:bg-gray-800 transition-colors text-[11px]
                   ${isSelected ? 'bg-blue-900/30 border-l-2 border-l-blue-500' : (i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]')}
                 `}
               >
@@ -484,7 +513,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
       </div>
 
       {/* Right Content: Chart */}
-      <div className="flex-1 flex flex-col bg-[#050505] p-3 min-h-[500px] lg:min-h-0 overflow-y-auto">
+      <div className={`${mobilePane === 'chart' ? 'flex' : 'hidden'} lg:flex flex-1 flex-col bg-[#050505] p-3 min-h-[500px] lg:min-h-0 overflow-y-auto`}>
         {selectedStock ? (
           <div className="min-h-full flex flex-col">
             <div className="mb-2 flex flex-wrap justify-between items-center gap-2">
@@ -495,6 +524,12 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
                   <span>평균 목표가: <strong className="text-white">{selectedStock.currentTarget.toLocaleString()}</strong></span>
                 </div>
               </div>
+              <button
+                onClick={() => setMobilePane('list')}
+                className="lg:hidden px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-xs text-gray-200 font-bold"
+              >
+                ← 종목 목록으로
+              </button>
             </div>
             <div className="flex-1 bg-[#111] border border-gray-800 rounded p-3 flex flex-col min-h-0">
               <h3 className="text-sm font-bold text-gray-200 mb-2">주가(우측 축) vs 목표가(좌측 전용 축) 추이 — Two-Scale 다이나믹 확대 뷰</h3>
