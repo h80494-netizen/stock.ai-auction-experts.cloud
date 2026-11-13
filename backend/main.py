@@ -114,7 +114,7 @@ def start_scheduler():
         from kis_etf_us_trader import ensure_us_etf_auto_trader_worker, run_scheduled_us_market_close_etf_rotation
         scheduler.add_job(
             run_scheduled_us_market_close_etf_rotation,
-            CronTrigger(hour=15, minute=55, day_of_week='mon-fri', timezone='America/New_York')
+            CronTrigger(hour=15, minute=50, day_of_week='mon-fri', timezone='America/New_York')
         )
         ensure_us_etf_auto_trader_worker()
     except Exception as etf_sched_err:
@@ -420,10 +420,11 @@ class KISEtfUsConfigRequest(BaseModel):
 
 
 class KISEtfUsOrderRequest(BaseModel):
-    action: str = "AUTO_ROTATE"  # AUTO_ROTATE | LIQUIDATE_ALL | MANUAL_ORDER
+    action: str = "RESERVE_US_CLOSE"  # RESERVE_US_CLOSE | AUTO_ROTATE | LIQUIDATE_ALL | MANUAL_ORDER
     manual_ticker: Optional[str] = None
     manual_side: Optional[str] = None
     manual_qty: Optional[int] = None
+    order_qty: Optional[int] = None
     criteria: Optional[str] = None
     top_n: Optional[int] = None
     w1: Optional[float] = None
@@ -471,13 +472,14 @@ async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest):
         req.manual_ticker,
         req.manual_side,
         req.manual_qty,
+        req.order_qty,
         req.criteria,
         req.top_n,
         req.w1,
         req.w5,
         req.w20,
         req.force_rebalance,
-        req.reason or "ETF 투자전략 미국장 종가체결 주문",
+        req.reason or "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
     )
     return res
 

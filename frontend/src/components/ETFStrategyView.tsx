@@ -46,12 +46,12 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   const [swapHistory, setSwapHistory] = useState<any[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // 한국투자증권(KIS) 모의계좌 & 미국시장 종가체결(MOC) ETF 자동매매(디폴트 1주) 상태
+  // 한국투자증권(KIS) 모의계좌 & 미국장 마감 10분 전(15:50 ET) 예약 자동매매(디폴트 100주, 주수 직접 입력) 상태
   const [kisAccount, setKisAccount] = useState<any>(null);
   const [kisMode, setKisMode] = useState<string>('PAPER');
   const [kisCano, setKisCano] = useState<string>('44790516');
   const [kisPrdt, setKisPrdt] = useState<string>('01');
-  const [kisOrderQty, setKisOrderQty] = useState<number>(1);
+  const [kisOrderQty, setKisOrderQty] = useState<number>(100);
   const [kisOrdDvsn, setKisOrdDvsn] = useState<string>('33');
   const [kisAutoTrade, setKisAutoTrade] = useState<boolean>(true);
   const [kisLoading, setKisLoading] = useState<boolean>(false);
@@ -74,7 +74,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
             if (cfg.mode) setKisMode(cfg.mode);
             if (cfg.cano) setKisCano(cfg.cano);
             if (cfg.acnt_prdt_cd) setKisPrdt(cfg.acnt_prdt_cd);
-            if (cfg.order_qty !== undefined) setKisOrderQty(Number(cfg.order_qty) || 1);
+            if (cfg.order_qty !== undefined) setKisOrderQty(Number(cfg.order_qty) || 100);
             if (cfg.ord_dvsn) setKisOrdDvsn(cfg.ord_dvsn);
             if (cfg.auto_trade_enabled !== undefined) setKisAutoTrade(Boolean(cfg.auto_trade_enabled));
           }
@@ -113,7 +113,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
         if (json?.success && json.data) {
           setKisAccount(json.data);
           setToastMessage(
-            `✅ [한투 ${payload.mode === 'LIVE' ? '실전' : '모의'}계좌 설정 저장] 계좌: ${payload.cano}-${payload.acnt_prdt_cd} | 기본수량: ${payload.order_qty}주 | 미국장 종가체결 자동매매: ${payload.auto_trade_enabled ? 'ON' : 'OFF'}`
+            `✅ [한투 ${payload.mode === 'LIVE' ? '실전' : '모의'}계좌 설정 저장] 계좌: ${payload.cano}-${payload.acnt_prdt_cd} | 주문수량: ${payload.order_qty}주 | 미국장 마감 10분 전(15:50 ET) 예약 자동매매: ${payload.auto_trade_enabled ? 'ON' : 'OFF'}`
           );
           setTimeout(() => setToastMessage(null), 4500);
         }
@@ -126,11 +126,12 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
   };
 
   const handleExecuteKisEtfOrder = async (
-    action: 'AUTO_ROTATE' | 'LIQUIDATE_ALL' | 'MANUAL_ORDER',
+    action: 'RESERVE_US_CLOSE' | 'AUTO_ROTATE' | 'LIQUIDATE_ALL' | 'MANUAL_ORDER',
     opts?: { ticker?: string; side?: 'BUY' | 'SELL'; qty?: number; force?: boolean }
   ) => {
     setKisLoading(true);
     try {
+      const targetQty = Math.max(1, Number(opts?.qty ?? kisOrderQty) || 100);
       const res = await fetch('/api/etf/kis-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -138,7 +139,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
           action,
           manual_ticker: opts?.ticker,
           manual_side: opts?.side,
-          manual_qty: opts?.qty ?? kisOrderQty,
+          manual_qty: targetQty,
+          order_qty: targetQty,
           criteria,
           top_n: topN,
           w1: activeWeights.w1,
@@ -146,11 +148,13 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
           w20: activeWeights.w20,
           force_rebalance: Boolean(opts?.force),
           reason:
-            action === 'AUTO_ROTATE'
-              ? `미국장 종가체결(MOC) 전략 추천 ETF ${kisOrderQty}주 자동교체/매수`
+            action === 'RESERVE_US_CLOSE'
+              ? `미국장 마감 10분 전(15:50 ET) 최종 신호 기준 [기존 ETF 매도 + 신규 ETF ${targetQty}주 종가매수] 예약 자동주문`
+              : action === 'AUTO_ROTATE'
+              ? `미국장 종가체결(MOC) 전략 추천 ETF ${targetQty}주 즉시 교체/매수`
               : action === 'LIQUIDATE_ALL'
               ? '미국장 종가체결 보유 ETF 전량 청산 (CASH 전환)'
-              : `미국장 종가체결 수동 주문 (${opts?.ticker} ${opts?.qty ?? kisOrderQty}주 ${opts?.side})`,
+              : `미국장 종가체결 수동 주문 (${opts?.ticker} ${targetQty}주 ${opts?.side})`,
         }),
       });
       if (res.ok) {
@@ -160,8 +164,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
         } else {
           await fetchKisEtfAccount(false);
         }
-        setToastMessage(`🚀 ${json?.message || '한투 모의계좌 미국장 종가체결 주문이 처리되었습니다.'}`);
-        setTimeout(() => setToastMessage(null), 5000);
+        setToastMessage(`🚀 ${json?.message || '한투 모의계좌 미국장 예약/종가체결 주문이 처리되었습니다.'}`);
+        setTimeout(() => setToastMessage(null), 5500);
       }
     } catch (e) {
       console.error('Failed to execute KIS ETF order:', e);
@@ -791,24 +795,59 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
             </p>
           </div>
           <div className="mt-2 md:mt-0 w-full md:w-auto flex flex-wrap items-center gap-2">
+            {/* 주문 주수 직접 입력창 (디폴트 100주) */}
+            <div className="flex items-center gap-1.5 bg-slate-950/90 border border-emerald-400/60 px-3 py-1.5 rounded-xl shadow-lg">
+              <span className="text-xs font-extrabold text-emerald-300 whitespace-nowrap">주문 주수:</span>
+              <input
+                type="number"
+                min={1}
+                max={100000}
+                value={kisOrderQty}
+                onChange={(e) => {
+                  const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                  setKisOrderQty(val);
+                }}
+                onBlur={() => handleSaveKisEtfConfig({ order_qty: kisOrderQty })}
+                className="w-20 bg-slate-900 border border-emerald-500/50 rounded px-2 py-1 text-center font-mono font-extrabold text-white text-sm outline-none focus:border-emerald-300"
+              />
+              <span className="text-xs font-bold text-emerald-200">주 (디폴트 100주)</span>
+            </div>
+
+            {/* 미국장 마감 10분 전(15:50 ET) 최종신호 예약 자동주문 등록 버튼 */}
             <button
               type="button"
               disabled={kisLoading}
-              onClick={() => handleExecuteKisEtfOrder('AUTO_ROTATE')}
+              onClick={() => handleExecuteKisEtfOrder('RESERVE_US_CLOSE', { qty: kisOrderQty })}
               className="w-full sm:w-auto bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold shadow-xl transition-all flex items-center justify-center gap-1.5 border border-emerald-400/50 active:scale-95 cursor-pointer"
             >
-              <span>🏦</span>
-              <span>{kisLoading ? '한투 주문처리중...' : `한투 모의계좌 미국장 종가체결 자동매매 (${kisOrderQty}주)`}</span>
+              <span>📅</span>
+              <span>
+                {kisLoading
+                  ? '예약/주문 처리중...'
+                  : `미국장 마감 10분전(15:50 ET) 교체 자동주문 예약 (${kisOrderQty}주)`}
+              </span>
               <span className="bg-black/40 px-2 py-0.5 text-[11px] rounded text-emerald-200 border border-emerald-400/30 font-mono">
-                보유: {kisAccount?.HeldDisplay || 'CASH'} → 타겟: {kisAccount?.signal?.target_display || topETF?.ticker}
+                보유: {kisAccount?.HeldDisplay || 'CASH'} → 타겟: {kisAccount?.signal?.target_display || topETF?.ticker}({kisOrderQty}주)
               </span>
             </button>
+
+            {/* 현재 시그널로 즉시 모의체결 실행 버튼 */}
+            <button
+              type="button"
+              disabled={kisLoading}
+              onClick={() => handleExecuteKisEtfOrder('AUTO_ROTATE', { qty: kisOrderQty, force: true })}
+              className="px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg bg-amber-600/90 hover:bg-amber-500 text-white border border-amber-400/50 transition-all cursor-pointer"
+            >
+              ⚡ 즉시 모의체결 ({kisOrderQty}주)
+            </button>
+
+            {/* 예약 자동매매 ON/OFF 토글 */}
             <button
               type="button"
               onClick={() => {
                 const nextVal = !kisAutoTrade;
                 setKisAutoTrade(nextVal);
-                handleSaveKisEtfConfig({ auto_trade_enabled: nextVal });
+                handleSaveKisEtfConfig({ auto_trade_enabled: nextVal, order_qty: kisOrderQty });
               }}
               className={`px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg border transition-all cursor-pointer ${
                 kisAutoTrade
@@ -816,8 +855,9 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                   : 'bg-gray-900 border-gray-600 text-gray-400'
               }`}
             >
-              🤖 미국장마감 1주 자동매매: {kisAutoTrade ? 'ON (작동중)' : 'OFF'}
+              🤖 장마감 10분전 자동예약: {kisAutoTrade ? `ON (${kisOrderQty}주)` : 'OFF'}
             </button>
+
             <button 
               onClick={() => setShowModelSwap(true)}
               className="w-full sm:w-auto bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold shadow-xl transition-all flex items-center justify-center gap-2 border border-blue-400/40 active:scale-95 cursor-pointer"
@@ -1317,24 +1357,53 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                           </span>
                         </div>
                       </div>
-                      <div className="pt-2 flex items-center justify-between gap-2 border-t border-gray-800/80">
-                        <span className="text-[10px] text-emerald-300 font-mono">
-                          기본 수량: <strong>{kisOrderQty}주</strong> (${(item.current_price * kisOrderQty).toFixed(2)})
-                        </span>
-                        <button
-                          type="button"
-                          disabled={kisLoading}
-                          onClick={() =>
-                            handleExecuteKisEtfOrder('MANUAL_ORDER', {
-                              ticker: item.ticker,
-                              side: 'BUY',
-                              qty: kisOrderQty,
-                            })
-                          }
-                          className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-extrabold shadow cursor-pointer"
-                        >
-                          🇺🇸 {item.ticker} {kisOrderQty}주 종가매수
-                        </button>
+                      <div className="pt-2 space-y-2 border-t border-gray-800/80">
+                        <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                          <div className="flex items-center gap-1">
+                            <span className="text-emerald-300 font-bold">주문 주수:</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={100000}
+                              value={kisOrderQty}
+                              onChange={(e) => setKisOrderQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                              onBlur={() => handleSaveKisEtfConfig({ order_qty: kisOrderQty })}
+                              className="w-16 bg-slate-950 border border-emerald-500/60 rounded px-1.5 py-0.5 text-center font-extrabold text-white"
+                            />
+                            <span className="text-emerald-200">주</span>
+                          </div>
+                          <span className="text-yellow-300 font-bold">
+                            예상금액: ${(item.current_price * kisOrderQty).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-1.5">
+                          <button
+                            type="button"
+                            disabled={kisLoading}
+                            onClick={() =>
+                              handleExecuteKisEtfOrder('RESERVE_US_CLOSE', {
+                                qty: kisOrderQty,
+                              })
+                            }
+                            className="flex-1 px-2 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-extrabold shadow cursor-pointer"
+                          >
+                            📅 장마감 10분전 예약 ({kisOrderQty}주)
+                          </button>
+                          <button
+                            type="button"
+                            disabled={kisLoading}
+                            onClick={() =>
+                              handleExecuteKisEtfOrder('MANUAL_ORDER', {
+                                ticker: item.ticker,
+                                side: 'BUY',
+                                qty: kisOrderQty,
+                              })
+                            }
+                            className="px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-extrabold shadow cursor-pointer"
+                          >
+                            🇺🇸 즉시 종가매수
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}
@@ -1344,23 +1413,23 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
           </div>
         </div>
 
-        {/* 🏦 한국투자증권(KIS) 모의계좌 연동 & 미국주식시장 종가체결(MOC) ETF 자동매매 센터 (디폴트 1주) */}
+        {/* 🏦 한국투자증권(KIS) 모의계좌 연동 & 미국장 마감 10분 전(15:50 ET) 최종신호 예약 자동주문 센터 (디폴트 100주) */}
         <div className="mt-4 bg-slate-950/95 border-2 border-emerald-500/50 rounded-xl p-4 space-y-4 shadow-2xl">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-extrabold">
-                  🏦 한국투자증권(KIS) 모의계좌 연동 · 미국주식시장 종가체결(MOC) ETF 자동매매 센터
+                  🏦 한국투자증권(KIS) 모의계좌 연동 · 미국장 마감 10분 전(15:50 ET) 예약 자동주문 센터
                 </span>
                 <span className="px-2.5 py-1 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 text-xs font-mono font-bold">
                   TR_ID: {kisMode === 'LIVE' ? 'TTTT1002U(매수) / TTTT1006U(매도)' : 'VTTT1002U(모의매수) / VTTT1001U(모의매도)'}
                 </span>
                 <span className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-mono font-bold">
-                  디폴트 주문수량: ETF {kisOrderQty}주 | 미국장 마감({kisAccount?.market_session?.auto_close_order_time_kst || '15:55 ET'}) 자동교체 {kisAutoTrade ? 'ON' : 'OFF'}
+                  주문수량: ETF {kisOrderQty}주 (디폴트 100주 · 직접입력) | 장마감 10분 전({kisAccount?.market_session?.auto_close_order_time_kst || '15:50 ET'}) 예약자동주문 {kisAutoTrade ? 'ON' : 'OFF'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-300">
-                미국 정규장 마감 시점(<strong>16:00 ET / 한국시간 05:00·06:00</strong>)에 채택된 ETF가 변경되면 <strong>기존 보유 ETF({kisOrderQty}주)를 종가 매도(SELL)함과 동시에 신규 1위 ETF({kisOrderQty}주, 디폴트 1주)를 미국장 종가체결 시스템(MOC 33 / 모의계좌 종가지정가 00 자동연동)으로 자동 매수(BUY)</strong>합니다.
+                미국 주식시장 정규장 마감 <strong>10분 전(15:50 ET / 한국시간 동절기 05:50·서머타임 04:50)</strong>까지 집계된 최종 시그널로 <strong>기존 보유 ETF는 전량 매도(SELL)하고, 새로 선정된 1위 ETF는 입력한 주수({kisOrderQty}주, 디폴트 100주)만큼 미국장 종가체결 시스템(MOC 33 / 모의계좌 종가지정가 00 자동연동)으로 동시 예약 자동매수(BUY)</strong>합니다.
               </p>
             </div>
 
@@ -1407,11 +1476,11 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
             </div>
           </div>
 
-          {/* 1. 현재 보유 포지션 vs 당일 추천 타겟 vs 미국장 종가체결 주문 계획 3단 요약 카드 */}
+          {/* 1. 현재 보유 포지션 vs 당일 추천 타겟 vs 미국장 마감 10분 전(15:50 ET) 예약 교체 판정 3단 요약 카드 */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 text-xs">
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-1.5">
               <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                <span>① 현재 한투 모의계좌 보유 ETF</span>
+                <span>① 현재 한투 모의계좌 보유 ETF (교체 시 전량 매도 대상)</span>
                 <span className="font-mono text-emerald-300">
                   계좌: {kisCano}-{kisPrdt}
                 </span>
@@ -1441,29 +1510,33 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                 </div>
               ) : (
                 <div className="text-[11px] text-slate-400">
-                  현재 보유 중인 미국 ETF가 없습니다. 우측 [종가체결 주문 즉시 실행] 클릭 시 추천 1위 ETF {kisOrderQty}주가 즉시 편입됩니다.
+                  현재 보유 중인 미국 ETF가 없습니다. 예약 또는 즉시 실행 시 추천 1위 ETF {kisOrderQty}주가 편입됩니다.
                 </div>
               )}
             </div>
 
             <div className="bg-slate-900/90 border border-blue-500/40 rounded-xl p-3.5 space-y-1.5">
               <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                <span>② 전략 시그널 목표 ETF (디폴트 {kisOrderQty}주)</span>
+                <span>② 장마감 10분 전(15:50 ET) 매수 타겟 ETF ({kisOrderQty}주)</span>
                 <span className="font-mono text-sky-300">
                   시세기준: {topETF?.quote_updated_at || topETF?.last_updated || '-'}
                 </span>
               </div>
               <div className="text-lg font-extrabold text-yellow-300 font-mono">
-                {kisAccount?.signal?.target_display || (isCash ? 'CASH (현금 방어)' : `${topETF?.ticker} (${kisOrderQty}주)`)}
+                {kisAccount?.signal?.target_display
+                  ? `${kisAccount.signal.target_display} (${kisOrderQty}주)`
+                  : isCash
+                  ? 'CASH (현금 방어)'
+                  : `${topETF?.ticker} (${kisOrderQty}주)`}
               </div>
               <div className="text-[11px] text-slate-300 font-mono">
                 {kisAccount?.signal?.target_details && kisAccount.signal.target_details.length > 0 ? (
                   kisAccount.signal.target_details.map((t: any) => (
                     <div key={t.ticker}>
                       • <strong>{t.ticker}</strong> ({t.exchange_cd}): 실시간 현재가{' '}
-                      <strong className="text-emerald-300">${Number(t.current_price_usd).toFixed(2)}</strong> | 목표수량:{' '}
+                      <strong className="text-emerald-300">${Number(t.current_price_usd).toFixed(2)}</strong> | 예약/주문수량:{' '}
                       <strong className="text-amber-300">{kisOrderQty}주</strong> (약 $
-                      {(Number(t.current_price_usd) * kisOrderQty).toFixed(2)})
+                      {(Number(t.current_price_usd) * kisOrderQty).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
                     </div>
                   ))
                 ) : (
@@ -1474,7 +1547,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
             <div className="bg-slate-900/90 border border-amber-500/40 rounded-xl p-3.5 space-y-1.5">
               <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                <span>③ 미국시장 종가체결(MOC) 교체 판정</span>
+                <span>③ 장마감 10분 전(15:50 ET) 최종신호 예약 &amp; 교체 판정</span>
                 <span className="font-mono text-amber-300">
                   {kisAccount?.market_session?.et_time_str || 'US Market'}
                 </span>
@@ -1486,14 +1559,14 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               >
                 {kisAccount?.signal_status_label || '시그널 상태 조회 중...'}
               </div>
-              <div className="text-[11px] text-slate-400 leading-snug">
-                {kisAccount?.market_session?.session_label ||
-                  '미국 정규장 마감(16:00 ET) 동시호가 종가체결 시스템 연동 중'}
+              <div className="text-[11px] text-slate-300 leading-snug">
+                • <strong>예약 실행 시각:</strong> {kisAccount?.market_session?.auto_close_order_time_kst || '05:50 KST (15:50 ET · 장마감 10분 전)'}
+                <br />• <strong>예약 실행 규칙:</strong> 기존 보유({kisAccount?.HeldDisplay || 'CASH'}) 전량 매도 + 장마감 10분 전 최종 1위 ETF <strong>{kisOrderQty}주</strong> 동시 종가매수
               </div>
             </div>
           </div>
 
-          {/* 2. 계좌번호 · 디폴트 주문수량(1주) · 미국장 종가체결 방식 · 자동매매 설정 및 즉시 실행 바 */}
+          {/* 2. 계좌번호 · 주문 주수 입력(디폴트 100주) · 미국장 종가체결 방식 · 장마감 10분 전 예약 자동주문 컨트롤 바 */}
           <div className="flex flex-wrap items-end justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-xs">
             <div className="flex flex-wrap items-end gap-3">
               <div>
@@ -1518,18 +1591,35 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               </div>
               <div>
                 <label className="block text-emerald-300 font-bold mb-1 text-[11px]">
-                  매매 기본수량 (디폴트 1주)
+                  매수/교체 주문 주수 입력 (디폴트 100주)
                 </label>
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <input
                     type="number"
                     min={1}
-                    max={1000}
+                    max={100000}
                     value={kisOrderQty}
                     onChange={(e) => setKisOrderQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                    className="w-20 bg-slate-950 border border-emerald-500/50 rounded px-2.5 py-1.5 text-emerald-300 font-mono font-extrabold"
+                    className="w-24 bg-slate-950 border-2 border-emerald-500/70 rounded px-2.5 py-1.5 text-emerald-300 font-mono font-extrabold text-sm"
                   />
-                  <span className="text-slate-300 font-bold">주</span>
+                  <span className="text-slate-200 font-bold mr-1">주</span>
+                  {[10, 50, 100, 200, 500].map((qPreset) => (
+                    <button
+                      key={qPreset}
+                      type="button"
+                      onClick={() => {
+                        setKisOrderQty(qPreset);
+                        handleSaveKisEtfConfig({ order_qty: qPreset });
+                      }}
+                      className={`px-2 py-1 rounded text-[11px] font-mono font-bold cursor-pointer border ${
+                        kisOrderQty === qPreset
+                          ? 'bg-emerald-600 text-white border-emerald-400'
+                          : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                      }`}
+                    >
+                      {qPreset}주{qPreset === 100 ? '(기본)' : ''}
+                    </button>
+                  ))}
                 </div>
               </div>
               <div>
@@ -1541,9 +1631,9 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                   onChange={(e) => setKisOrdDvsn(e.target.value)}
                   className="bg-slate-950 border border-amber-500/50 rounded px-2.5 py-1.5 text-amber-200 font-bold"
                 >
-                  <option value="33">33: 미국장 종가체결 (MOC · 모의계좌 종가지정가 00 자동폴백)</option>
+                  <option value="33">33: 미국장 종가체결 (MOC · 장마감 10분전 15:50 ET 최종신호)</option>
                   <option value="34">34: 미국장 마감지정가 (LOC · 유리한 종가체결)</option>
-                  <option value="00">00: 미국장 현재가/종가 지정가 즉시체결</option>
+                  <option value="00">00: 미국장 현재가/종가 지정가 체결</option>
                 </select>
               </div>
               <label className="flex items-center gap-1.5 text-emerald-300 font-extrabold cursor-pointer pb-1.5">
@@ -1553,10 +1643,10 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                   onChange={(e) => {
                     const nextVal = e.target.checked;
                     setKisAutoTrade(nextVal);
-                    handleSaveKisEtfConfig({ auto_trade_enabled: nextVal });
+                    handleSaveKisEtfConfig({ auto_trade_enabled: nextVal, order_qty: kisOrderQty });
                   }}
                 />
-                <span>미국장 마감(15:55 ET) 교체시그널 자동매매 (기본 1주)</span>
+                <span>미국장 마감 10분 전(15:50 ET) 최종신호 예약 자동매매 ({kisOrderQty}주)</span>
               </label>
               <button
                 type="button"
@@ -1564,11 +1654,25 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                 onClick={() => handleSaveKisEtfConfig()}
                 className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold cursor-pointer"
               >
-                💾 설정 저장
+                💾 주수/설정 저장
               </button>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={kisLoading}
+                onClick={() =>
+                  handleExecuteKisEtfOrder('RESERVE_US_CLOSE', {
+                    qty: kisOrderQty,
+                  })
+                }
+                className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-extrabold shadow-lg cursor-pointer"
+              >
+                {kisLoading
+                  ? '처리중...'
+                  : `📅 미국장 마감 10분전(15:50 ET) 교체 자동주문 예약 등록 (${kisOrderQty}주)`}
+              </button>
               <button
                 type="button"
                 disabled={kisLoading}
@@ -1578,11 +1682,9 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                     force: true,
                   })
                 }
-                className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-extrabold shadow-lg cursor-pointer"
+                className="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-extrabold shadow-lg cursor-pointer"
               >
-                {kisLoading
-                  ? '주문 처리중...'
-                  : `🚀 추천 ETF(${topETF?.ticker}) ${kisOrderQty}주 미국장 종가체결 즉시 실행`}
+                ⚡ 현재 시그널로 즉시 모의체결 ({kisOrderQty}주)
               </button>
               <button
                 type="button"
@@ -1630,7 +1732,11 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                         </td>
                         <td
                           className={`py-1.5 px-2 font-bold ${
-                            String(ord.side).includes('BUY') ? 'text-emerald-400' : 'text-rose-400'
+                            String(ord.side).includes('BUY')
+                              ? 'text-emerald-400'
+                              : String(ord.side).includes('RESERVE')
+                              ? 'text-sky-400'
+                              : 'text-rose-400'
                           }`}
                         >
                           {ord.side}
@@ -1945,7 +2051,7 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               <th className="p-3 border-b border-gray-700 font-medium text-right">20일 수익률</th>
               {criteria === 'sharpe' && <th className="p-3 border-b border-gray-700 font-medium text-right">모멘텀 총점</th>}
               <th className="p-3 border-b border-gray-700 font-medium text-right">{criteria === 'sharpe' ? '샤프 지수' : '모멘텀 총점'}</th>
-              <th className="p-3 border-b border-gray-700 font-medium text-center">한투 모의주문 (1주)</th>
+              <th className="p-3 border-b border-gray-700 font-medium text-center">한투 모의주문 ({kisOrderQty || 100}주)</th>
             </tr>
           </thead>
           <tbody className="font-mono text-sm">
@@ -1978,13 +2084,13 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                       handleExecuteKisEtfOrder('MANUAL_ORDER', {
                         ticker: etf.ticker,
                         side: 'BUY',
-                        qty: kisOrderQty || 1,
+                        qty: kisOrderQty || 100,
                       })
                     }
                     disabled={kisLoading}
                     className="px-2 py-1 bg-emerald-900/70 hover:bg-emerald-700/80 border border-emerald-500/40 rounded text-[11px] font-bold text-emerald-200 transition-colors cursor-pointer"
                   >
-                    종가매수 ({kisOrderQty || 1}주)
+                    종가매수 ({kisOrderQty || 100}주)
                   </button>
                 </td>
               </tr>

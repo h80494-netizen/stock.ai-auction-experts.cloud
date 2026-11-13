@@ -98,7 +98,7 @@ def _get_kst_now() -> datetime.datetime:
 
 
 def get_us_market_session_info() -> Dict[str, Any]:
-    """미국 주식시장(ET) 현재 개장/종가체결 시간대 및 한국시간(KST) 기준 스케줄 정보를 반환합니다."""
+    """미국 주식시장(ET) 현재 개장/종가체결 시간대 및 장마감 10분 전(15:50 ET) 예약 자동주문 스케줄 정보를 반환합니다."""
     et_now = _get_us_et_now()
     kst_now = _get_kst_now()
     is_dst = bool(et_now.dst())
@@ -107,22 +107,26 @@ def get_us_market_session_info() -> Dict[str, Any]:
 
     if not is_weekday:
         session_state = "CLOSED_WEEKEND"
-        session_label = "주말 휴장 (미국장 마감 종가 기준으로 대기/모의체결 지원)"
+        session_label = "주말 휴장 — 다음 미국 정규장 마감 10분 전(15:50 ET) 최종 신호로 예약 자동주문 실행 대기"
     elif 930 <= hhmm_et < 1550:
         session_state = "REGULAR_OPEN"
-        session_label = "미국 정규장 진행중 (09:30~16:00 ET) — MOC 종가주문 접수 가능"
+        session_label = "미국 정규장 진행중 (09:30~16:00 ET) — 장마감 10분 전(15:50 ET) 최종 신호 확정 및 동시 매도·매수 대기"
     elif 1550 <= hhmm_et <= 1600:
         session_state = "CLOSING_CROSS"
-        session_label = "미국 장마감 종가체결 동시호가 구간 (15:50~16:00 ET)"
+        session_label = "🔥 미국 장마감 10분 전(15:50~16:00 ET) 최종 신호 확정 및 MOC 종가체결 동시 매도·매수 구간"
     elif 400 <= hhmm_et < 930:
         session_state = "PRE_MARKET"
-        session_label = "미국 프리마켓 (04:00~09:30 ET) — 정규장 MOC 종가주문 예약/접수"
+        session_label = "미국 프리마켓 (04:00~09:30 ET) — 금일 장마감 10분 전(15:50 ET) 최종 신호 예약 자동주문 대기"
     else:
         session_state = "AFTER_HOURS_OR_CLOSED"
-        session_label = "미국 정규장 외 시간 (최근 미국장 확정 종가로 모의계좌 즉시 체결 및 다음 장마감 자동매매 대기)"
+        session_label = "미국 정규장 외 시간 — 다가오는 미국장 마감 10분 전(15:50 ET) 최종 신호 기준 예약 자동주문 작동 대기"
 
     close_kst_str = "05:00 KST (미국 서머타임 적용중)" if is_dst else "06:00 KST (미국 동절기 표준시 적용중)"
-    auto_exec_kst_str = "04:55 KST (15:55 ET)" if is_dst else "05:55 KST (15:55 ET)"
+    auto_exec_kst_str = (
+        "04:50 KST (15:50 ET · 장마감 10분 전 최종신호)"
+        if is_dst
+        else "05:50 KST (15:50 ET · 장마감 10분 전 최종신호)"
+    )
 
     return {
         "et_time_str": et_now.strftime("%Y-%m-%d %H:%M:%S ET"),
@@ -133,13 +137,15 @@ def get_us_market_session_info() -> Dict[str, Any]:
         "session_label": session_label,
         "us_market_close_kst": close_kst_str,
         "auto_close_order_time_kst": auto_exec_kst_str,
+        "signal_cutoff_et": "15:50 ET (미국 정규장 마감 10분 전 최종 신호 확정)",
     }
 
 
 def get_kis_etf_us_config() -> Dict[str, Any]:
     """
-    ETF 투자전략의 한투증권(KIS) 모의계좌/실전계좌 및 미국주식 종가체결 자동매매 설정을 로드합니다.
-    - 디폴트: 모의계좌(PAPER, 44790516-01), 주문수량 1주(order_qty=1), 미국장 종가체결(MOC_CLOSE), 자동매매 ON(auto_trade_enabled=True)
+    ETF 투자전략의 한투증권(KIS) 모의계좌/실전계좌 및 미국주식 장마감 10분 전(15:50 ET) 예약 자동매매 설정을 로드합니다.
+    - 디폴트: 모의계좌(PAPER, 44790516-01), 주문수량 100주(order_qty=100, 주수 직접 입력 가능),
+              미국장 종가체결(MOC 33), 장마감 10분 전(15:50 ET) 예약 자동주문 ON(auto_trade_enabled=True)
     """
     os.makedirs(DATA_DIR, exist_ok=True)
     env_acc = os.environ.get("KIS_ACCOUNT_NO", "44790516-01").strip()
@@ -150,29 +156,55 @@ def get_kis_etf_us_config() -> Dict[str, Any]:
         "mode": "PAPER",  # PAPER (한투 모의투자 VTTT1002U/VTTT1001U) | LIVE (실전투자 TTTT1002U/TTTT1006U)
         "cano": default_cano,
         "acnt_prdt_cd": default_prdt,
-        "order_qty": 1,  # 디폴트 매매 수량: ETF 1주
+        "order_qty": 100,  # 디폴트 매매 수량: ETF 100주 (사용자 직접 주수 입력 가능)
         "ord_dvsn": "33",  # 33: MOC(장마감 종가체결, 모의투자 시 종가/현재가 지정가 00 자동폴백), 34: LOC(장마감 지정가), 00: 지정가
-        "auto_trade_enabled": True,  # 미국시장 장마감(15:55 ET) 교체 시그널 발생 시 자동매매 기본 활성화
+        "auto_trade_enabled": True,  # 미국시장 장마감 10분 전(15:50 ET) 최종 신호 기준 예약 자동매매 기본 활성화
+        "reservation_active": True,  # 장마감 10분 전(15:50 ET) 예약 자동주문 활성화 여부
+        "reserved_at_kst": "",
         "criteria": "sharpe",  # sharpe | momentum
-        "top_n": 1,  # 추천 포트폴리오 채택 종목 수 (기본 1개 종목 1주)
+        "top_n": 1,  # 추천 포트폴리오 채택 종목 수 (기본 1개 종목 100주)
         "weights": {"w1": 0.5, "w5": 0.3, "w20": 0.2},
         "last_auto_traded_us_date": "",
+        "default_100_migrated": True,
     }
 
+    need_save_migration = False
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
+                # 이전 1주 디폴트 설정을 100주 디폴트로 1회 자동 마이그레이션
+                if not saved.get("default_100_migrated"):
+                    if int(saved.get("order_qty") or 1) == 1:
+                        saved["order_qty"] = 100
+                    saved["default_100_migrated"] = True
+                    saved["reservation_active"] = True
+                    need_save_migration = True
                 default_cfg.update(saved)
         except Exception as e:
             print(f"[KIS_ETF_US] 설정 로드 경고: {e}")
+    else:
+        need_save_migration = True
 
-    # 유효성 보정 (디폴트 1주 보장)
+    if need_save_migration:
+        try:
+            _init_etf_kis_tables()
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            c = conn.cursor()
+            c.execute("UPDATE etf_us_kis_holdings SET qty = 100 WHERE qty = 1")
+            conn.commit()
+            conn.close()
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(default_cfg, f, ensure_ascii=False, indent=2)
+        except Exception as mig_err:
+            print(f"[KIS_ETF_US] 100주 디폴트 마이그레이션 참고: {mig_err}")
+
+    # 유효성 보정 (디폴트 100주 보장, 1~100,000주 입력 허용)
     try:
-        default_cfg["order_qty"] = max(1, min(1000, int(default_cfg.get("order_qty") or 1)))
+        default_cfg["order_qty"] = max(1, min(100000, int(default_cfg.get("order_qty") or 100)))
     except Exception:
-        default_cfg["order_qty"] = 1
+        default_cfg["order_qty"] = 100
 
     mode_up = str(default_cfg.get("mode", "PAPER")).upper()
     if mode_up not in ("PAPER", "LIVE"):
@@ -180,14 +212,15 @@ def get_kis_etf_us_config() -> Dict[str, Any]:
     default_cfg["mode"] = mode_up
     default_cfg["is_mock"] = mode_up != "LIVE"
     default_cfg["account_display"] = f"{default_cfg['cano']}-{default_cfg['acnt_prdt_cd']}"
+    default_cfg["reservation_active"] = bool(default_cfg.get("reservation_active", default_cfg.get("auto_trade_enabled", True)))
 
     ord_dvsn = str(default_cfg.get("ord_dvsn", "33"))
     if ord_dvsn == "33":
-        default_cfg["ord_dvsn_label"] = "미국장 종가체결 (MOC 33 / 모의계좌 종가동시체결 00 자동연동)"
+        default_cfg["ord_dvsn_label"] = "미국장 마감 예약 종가체결 (MOC 33 / 장마감 10분 전 15:50 ET 최종신호)"
     elif ord_dvsn == "34":
-        default_cfg["ord_dvsn_label"] = "미국장 마감지정가 (LOC 34)"
+        default_cfg["ord_dvsn_label"] = "미국장 마감지정가 (LOC 34 / 장마감 10분 전 15:50 ET 최종신호)"
     else:
-        default_cfg["ord_dvsn_label"] = "미국장 현재가/종가 지정가 (00)"
+        default_cfg["ord_dvsn_label"] = "미국장 마감 10분 전(15:50 ET) 종가동시지정가 (00)"
 
     return default_cfg
 
@@ -201,11 +234,16 @@ def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
     if "acnt_prdt_cd" in updates and str(updates["acnt_prdt_cd"]).strip():
         cfg["acnt_prdt_cd"] = str(updates["acnt_prdt_cd"]).strip()[:2]
     if "order_qty" in updates and updates["order_qty"] is not None:
-        cfg["order_qty"] = max(1, min(1000, int(updates["order_qty"])))
+        cfg["order_qty"] = max(1, min(100000, int(updates["order_qty"])))
     if "ord_dvsn" in updates and str(updates["ord_dvsn"]) in ("33", "34", "00"):
         cfg["ord_dvsn"] = str(updates["ord_dvsn"])
     if "auto_trade_enabled" in updates:
         cfg["auto_trade_enabled"] = bool(updates["auto_trade_enabled"])
+        cfg["reservation_active"] = bool(updates["auto_trade_enabled"])
+    if "reservation_active" in updates:
+        cfg["reservation_active"] = bool(updates["reservation_active"])
+    if "reserved_at_kst" in updates:
+        cfg["reserved_at_kst"] = str(updates["reserved_at_kst"])
     if "criteria" in updates and str(updates["criteria"]) in ("sharpe", "momentum"):
         cfg["criteria"] = str(updates["criteria"])
     if "top_n" in updates and updates["top_n"] is not None:
@@ -220,6 +258,7 @@ def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         cfg["weights"] = {"w1": round(w1, 4), "w5": round(w5, 4), "w20": round(w20, 4)}
     if "last_auto_traded_us_date" in updates:
         cfg["last_auto_traded_us_date"] = str(updates["last_auto_traded_us_date"])
+    cfg["default_100_migrated"] = True
 
     save_keys = [
         "mode",
@@ -228,10 +267,13 @@ def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         "order_qty",
         "ord_dvsn",
         "auto_trade_enabled",
+        "reservation_active",
+        "reserved_at_kst",
         "criteria",
         "top_n",
         "weights",
         "last_auto_traded_us_date",
+        "default_100_migrated",
     ]
     to_save = {k: cfg[k] for k in save_keys if k in cfg}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -531,16 +573,34 @@ def inquire_kis_etf_us_account(
 
     total_eval_usd = round(sum(h["eval_amount_usd"] for h in effective_holdings), 2)
     total_pnl_usd = round(sum(h["eval_pnl_usd"] for h in effective_holdings), 2)
+    sess = get_us_market_session_info()
+    held_disp = ", ".join([f"{h['ticker']}({h['qty']}주)" for h in effective_holdings]) if effective_holdings else "미보유 (CASH)"
+    target_disp = signal["target_display"]
+
+    reservation_summary = {
+        "active": bool(cfg.get("auto_trade_enabled", True)),
+        "reserved_qty": default_qty,
+        "reserved_at_kst": cfg.get("reserved_at_kst") or "상시 자동예약 가동중",
+        "cutoff_time_et": "15:50 ET (미국장 마감 10분 전 최종 신호 확정)",
+        "cutoff_time_kst": sess.get("auto_close_order_time_kst", "05:50 KST (15:50 ET)"),
+        "current_holding_display": held_disp,
+        "preview_target_display": f"{target_disp} ({default_qty}주)" if not signal["is_cash_defense"] else "CASH (현금방어)",
+        "execution_rule": (
+            f"미국장 마감 10분 전(15:50 ET)까지 집계된 최종 신호로 "
+            f"[기존 보유 ETF({held_disp}) 전량 매도 + 신규 추천 1위 ETF({target_disp}) {default_qty}주 동시 종가매수] 자동 집행"
+        ),
+    }
 
     return {
         "config": cfg,
-        "market_session": get_us_market_session_info(),
+        "market_session": sess,
+        "reservation_summary": reservation_summary,
         "broker_connected": broker_connected,
         "broker_code": broker_code,
         "broker_message": broker_message,
         "holdings": effective_holdings,
         "held_tickers": held_tickers,
-        "HeldDisplay": ", ".join([f"{h['ticker']}({h['qty']}주)" for h in effective_holdings]) if effective_holdings else "미보유 (CASH)",
+        "HeldDisplay": held_disp,
         "total_eval_usd": total_eval_usd,
         "total_pnl_usd": total_pnl_usd,
         "signal": signal,
@@ -553,8 +613,8 @@ def inquire_kis_etf_us_account(
             "endpoint": "/uapi/overseas-stock/v1/trading/order",
             "tr_id_mock": "VTTT1002U (미국 모의매수) / VTTT1001U (미국 모의매도)",
             "tr_id_live": "TTTT1002U (미국 실전매수) / TTTT1006U (미국 실전매도)",
-            "closing_system": "미국 정규장 마감(16:00 ET / 한국시간 05:00·06:00) 종가체결(MOC 33 / 모의지정가 00 자동폴백)",
-            "default_qty": f"{default_qty}주 (디폴트 1주)",
+            "closing_system": "미국 정규장 마감 10분 전(15:50 ET / 한국시간 04:50·05:50) 최종 신호 확정 → MOC 종가체결(33 / 모의지정가 00)",
+            "default_qty": f"{default_qty}주 (디폴트 100주 · 직접 입력 가능)",
         },
     }
 
@@ -771,26 +831,37 @@ def execute_etf_us_rebalance_or_order(
     manual_ticker: Optional[str] = None,
     manual_side: Optional[str] = None,
     manual_qty: Optional[int] = None,
+    order_qty: Optional[int] = None,
     criteria: Optional[str] = None,
     top_n: Optional[int] = None,
     w1: Optional[float] = None,
     w5: Optional[float] = None,
     w20: Optional[float] = None,
     force_rebalance: bool = False,
-    reason: str = "ETF 투자전략 미국장 종가체결 주문",
+    reason: str = "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
 ) -> Dict[str, Any]:
     """
-    ETF 투자전략의 미국장 종가체결 주문을 실행합니다.
+    ETF 투자전략의 미국장 마감 10분 전(15:50 ET) 최종 신호 기준 예약/종가체결 주문을 실행합니다.
+    - action == "RESERVE_US_CLOSE":
+      사용자가 입력한 주수(디폴트 100주)로 다가오는 미국 정규장 마감 10분 전(15:50 ET) 최종 신호에 맞춰
+      [기존 보유 ETF 전량 매도(SELL) + 신규 1위 ETF 지정 주수 매수(BUY)] 예약 자동주문을 등록합니다.
+      (만약 현재 시각이 미국장 15:50~16:00 ET 마감 동시호가 구간이면 즉시 집행)
     - action == "AUTO_ROTATE":
       현재 모의계좌 보유 ETF와 추천 Top N ETF를 비교하여,
       1) 편출된 기존 보유 ETF 전량 종가 매도(SELL)
-      2) 새로 편입된 추천 ETF 디폴트 1주(설정 수량) 동시 종가 매수(BUY)
+      2) 새로 편입된 추천 ETF 디폴트 100주(설정 주수) 동시 종가 매수(BUY)
     - action == "LIQUIDATE_ALL":
       현재 보유 중인 모든 미국 ETF를 전량 종가 매도하여 CASH(현금)로 전환
     - action == "MANUAL_ORDER":
-      특정 ETF(manual_ticker)를 지정 수량(기본 1주) 종가 매수/매도
+      특정 ETF(manual_ticker)를 지정 수량(기본 100주) 종가 매수/매도
     """
     _init_etf_kis_tables()
+
+    # 사용자가 입력한 주수(order_qty 또는 manual_qty)가 전달되면 설정에 즉시 반영
+    effective_input_qty = order_qty if order_qty is not None else manual_qty
+    if effective_input_qty is not None and int(effective_input_qty) > 0:
+        update_kis_etf_us_config({"order_qty": int(effective_input_qty)})
+
     cfg = get_kis_etf_us_config()
     default_qty = int(cfg["order_qty"])
     ord_dvsn = str(cfg.get("ord_dvsn", "33"))
@@ -799,6 +870,96 @@ def execute_etf_us_rebalance_or_order(
     prev_tickers = status_before.get("held_tickers", [])
     prev_str = ", ".join(prev_tickers) if prev_tickers else "CASH"
     target_str = status_before["signal"]["target_display"]
+
+    # 1) 미국장 마감 10분 전(15:50 ET) 예약 자동주문 등록 모드
+    if action == "RESERVE_US_CLOSE":
+        now_kst = _get_kst_now()
+        now_kst_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+        et_now = _get_us_et_now()
+        us_date_str = et_now.strftime("%Y-%m-%d")
+        hhmm_et = et_now.hour * 100 + et_now.minute
+
+        cfg_updates: Dict[str, Any] = {
+            "order_qty": default_qty,
+            "auto_trade_enabled": True,
+            "reservation_active": True,
+            "reserved_at_kst": now_kst_str,
+        }
+        if criteria in ("sharpe", "momentum"):
+            cfg_updates["criteria"] = criteria
+        if top_n is not None:
+            cfg_updates["top_n"] = int(top_n)
+        if w1 is not None and w5 is not None and w20 is not None:
+            cfg_updates["weights"] = {"w1": w1, "w5": w5, "w20": w20}
+        update_kis_etf_us_config(cfg_updates)
+
+        # 현재 만약 미국 정규장 마감 10분 전(15:50~16:00 ET) 구간이라면 즉시 체결까지 수행
+        if et_now.weekday() < 5 and 1550 <= hhmm_et <= 1600:
+            return execute_etf_us_rebalance_or_order(
+                action="AUTO_ROTATE",
+                order_qty=default_qty,
+                criteria=criteria,
+                top_n=top_n,
+                w1=w1,
+                w5=w5,
+                w20=w20,
+                force_rebalance=force_rebalance,
+                reason=f"미국장 마감 10분 전({et_now.strftime('%H:%M ET')}) 최종 신호 확정 즉시 집행 ({default_qty}주)",
+            )
+
+        # 장외 시간 또는 15:50 ET 이전이면 예약 원장에 기록하고 15:50 ET에 자동 실행되도록 예약 완료 응답
+        est_price = 0.0
+        if status_before["signal"].get("target_details"):
+            est_price = float(status_before["signal"]["target_details"][0].get("current_price_usd") or 0.0)
+
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        c = conn.cursor()
+        reserve_order_no = f"RSV1550-{now_kst.strftime('%H%M%S')}"
+        reserve_msg = (
+            f"[예약 자동주문 등록 완료] 미국장 마감 10분 전(15:50 ET / {status_before['market_session']['auto_close_order_time_kst']}) "
+            f"최종 신호 확정 시 [기존 보유({prev_str}) 전량 매도 + 신규 1위 ETF(현재기준 {target_str}) {default_qty}주 종가매수] 자동 실행"
+        )
+        c.execute(
+            """
+            INSERT INTO etf_us_kis_order_log (
+                executed_at_kst, us_trading_date, mode, account_no, ticker, exchange_cd,
+                side, qty, ord_dvsn, ord_dvsn_label, exec_price_usd,
+                prev_holding_tickers, target_holding_tickers,
+                broker_status, broker_order_no, broker_msg, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_kst_str,
+                us_date_str,
+                cfg["mode"],
+                cfg["account_display"],
+                target_str,
+                US_ETF_EXCHANGE_MAP.get(target_str, {}).get("order_excg", "AMEX"),
+                "RESERVE(장마감예약)",
+                default_qty,
+                ord_dvsn,
+                "15:50 ET 최종신호 MOC예약",
+                est_price,
+                prev_str,
+                f"{target_str}({default_qty}주)",
+                "RESERVED_1550_ET",
+                reserve_order_no,
+                reserve_msg,
+                reason or f"미국장 마감 10분 전(15:50 ET) 최종 신호 기준 {default_qty}주 교체 자동주문 예약",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        status_after_rsv = inquire_kis_etf_us_account(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+        return {
+            "success": True,
+            "reserved": True,
+            "skipped": False,
+            "message": reserve_msg,
+            "executed_orders": [],
+            "account_status": status_after_rsv,
+        }
 
     executed_orders: List[Dict[str, Any]] = []
 
@@ -850,7 +1011,7 @@ def execute_etf_us_rebalance_or_order(
             return {
                 "success": True,
                 "skipped": True,
-                "message": f"현재 보유 포지션({prev_str})이 추천 타겟({target_str}, {default_qty}주)과 이미 일치하여 추가 매매 없이 보유를 유지합니다.",
+                "message": f"현재 보유 포지션({status_before.get('HeldDisplay', prev_str)})이 추천 타겟({target_str}, {default_qty}주)과 이미 일치하여 추가 매매 없이 보유를 유지합니다. (다가오는 미국장 마감 10분 전 15:50 ET에 최종 신호 재점검)",
                 "executed_orders": [],
                 "account_status": status_before,
             }
@@ -868,7 +1029,7 @@ def execute_etf_us_rebalance_or_order(
             )
             executed_orders.append(res)
 
-        # 2단계: 신규 편입 타겟 ETF 디폴트 1주(설정 수량) 동시 종가 매수(BUY) 접수
+        # 2단계: 신규 편입 타겟 ETF 디폴트 100주(설정 주수) 동시 종가 매수(BUY) 접수
         for b_item in buy_plan:
             res = _submit_single_kis_us_order(
                 ticker=b_item["ticker"],
@@ -901,26 +1062,28 @@ def execute_etf_us_rebalance_or_order(
 
 def run_scheduled_us_market_close_etf_rotation() -> Dict[str, Any]:
     """
-    미국 정규장 마감 직전(15:50~15:59 ET / 한국시간 04:50~04:59 또는 05:50~05:59 KST)에
-    1) 최신 미국 ETF 가격을 yfinance로 동기화(update_etf_data)하고,
-    2) 교체 시그널 또는 미보유 시 1위 추천 ETF(기본 1주)를 한투 모의계좌 종가체결 시스템으로 자동 매도·매수합니다.
+    미국 정규장 마감 10분 전(15:50 ET / 한국시간 동절기 05:50 KST, 서머타임 04:50 KST)에
+    1) 장마감 10분 전까지의 최신 미국 ETF 가격을 실시간 동기화(sync_live_etf_prices / update_etf_data)하여 최종 신호를 확정하고,
+    2) 교체 시그널 발생 시 [기존 보유 ETF 전량 종가 매도 + 신규 1위 추천 ETF 설정 주수(디폴트 100주) 동시 종가 매수]를 자동 집행합니다.
     """
     cfg = get_kis_etf_us_config()
     if not cfg.get("auto_trade_enabled", True):
-        return {"success": True, "skipped": True, "reason": "자동매매 비활성화 상태"}
+        return {"success": True, "skipped": True, "reason": "예약 자동매매 비활성화 상태"}
 
     et_now = _get_us_et_now()
     if et_now.weekday() >= 5:
         return {"success": True, "skipped": True, "reason": "미국장 주말 휴장"}
 
     try:
-        update_etf_data()
+        from etf_strategy import sync_live_etf_prices
+        sync_live_etf_prices(force=True)
     except Exception as e:
-        print(f"[KIS_ETF_US] 미국장 마감 전 ETF 가격 갱신 참고: {e}")
+        print(f"[KIS_ETF_US] 미국장 마감 10분 전(15:50 ET) ETF 가격 갱신 참고: {e}")
 
     return execute_etf_us_rebalance_or_order(
         action="AUTO_ROTATE",
-        reason=f"미국장 마감({et_now.strftime('%Y-%m-%d %H:%M ET')}) 종가체결 자동 리밸런싱 (기본 {cfg['order_qty']}주)",
+        order_qty=int(cfg.get("order_qty", 100)),
+        reason=f"미국장 마감 10분 전({et_now.strftime('%Y-%m-%d %H:%M ET')}) 최종 신호 확정 예약 자동주문 집행 ({cfg['order_qty']}주)",
     )
 
 
@@ -930,8 +1093,8 @@ _US_ETF_BG_LOCK = threading.Lock()
 
 def _us_etf_closing_background_worker() -> None:
     """
-    서버 기동 시 초기 모의계좌 포지션을 점검(미보유 시 현재 1위 추천 ETF 1주 자동 초기 편입)하고,
-    매 미국 정규장 마감 직전(15:52~15:59 ET)에 하루 1회 자동으로 종가체결 교체 주문을 실행하는 데몬 워커.
+    서버 기동 시 초기 모의계좌 포지션을 점검(미보유 시 현재 1위 추천 ETF 디폴트 100주 자동 초기 편입)하고,
+    매 미국 정규장 마감 10분 전(15:50~15:59 ET)에 최종 신호를 확정하여 하루 1회 자동으로 종가체결 교체 주문을 실행하는 데몬 워커.
     """
     time.sleep(5)
     startup_initialized = False
@@ -941,12 +1104,12 @@ def _us_etf_closing_background_worker() -> None:
             cfg = get_kis_etf_us_config()
             if not startup_initialized:
                 startup_initialized = True
-                # 자동매매가 켜져 있고 아직 보유 포지션과 주문 이력이 전혀 없다면 현재 추천 1위 ETF 1주를 초기 종가체결로 자동 편입
                 if cfg.get("auto_trade_enabled", True):
                     acc = inquire_kis_etf_us_account()
                     if not acc.get("holdings") and not acc.get("recent_orders") and acc.get("buy_plan"):
                         execute_etf_us_rebalance_or_order(
                             action="AUTO_ROTATE",
+                            order_qty=int(cfg.get("order_qty", 100)),
                             reason=f"한투 모의계좌 초기 세팅 — 추천 1위 ETF {cfg['order_qty']}주 미국장 종가체결 자동 편입",
                         )
 
@@ -954,17 +1117,17 @@ def _us_etf_closing_background_worker() -> None:
                 et_now = _get_us_et_now()
                 us_date_str = et_now.strftime("%Y-%m-%d")
                 hhmm_et = et_now.hour * 100 + et_now.minute
-                # 미국 정규장 마감 직전 15:52 ~ 15:59 ET 사이에 당일 자동 리밸런싱 미실행 시 자동 집행
+                # 미국 정규장 마감 10분 전(15:50 ~ 15:59 ET)에 당일 최종 신호 기준 예약 자동매매 집행
                 if (
                     et_now.weekday() < 5
-                    and 1552 <= hhmm_et <= 1559
+                    and 1550 <= hhmm_et <= 1559
                     and cfg.get("last_auto_traded_us_date") != us_date_str
                 ):
                     run_scheduled_us_market_close_etf_rotation()
         except Exception as e:
             print(f"[KIS_ETF_US] 백그라운드 워커 참고: {e}")
 
-        time.sleep(60)
+        time.sleep(30)
 
 
 def ensure_us_etf_auto_trader_worker() -> None:
