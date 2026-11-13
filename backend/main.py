@@ -32,8 +32,22 @@ from database import (
     update_user_request_status,
     verify_user_password,
     change_user_password,
-    admin_update_user_password
+    admin_update_user_password,
+    get_user_trading_account,
+    save_user_trading_account,
+    get_all_users_trading_overview,
+    SUPPORTED_BROKERS,
 )
+
+
+def _resolve_uid(user_id: Optional[str] = None, request: Optional[Request] = None) -> str:
+    if user_id and str(user_id).strip():
+        return str(user_id).strip()
+    if request is not None:
+        hdr = request.headers.get("x-user-id") or request.query_params.get("user_id")
+        if hdr and str(hdr).strip():
+            return str(hdr).strip()
+    return "admin"
 
 app = FastAPI(title="AI Stock Analyst API")
 
@@ -408,6 +422,11 @@ async def api_refresh_etf_live_prices():
 
 
 class KISEtfUsConfigRequest(BaseModel):
+    user_id: Optional[str] = "admin"
+    broker_code: Optional[str] = None
+    account_nickname: Optional[str] = None
+    app_key: Optional[str] = None
+    app_secret: Optional[str] = None
     mode: Optional[str] = None
     cano: Optional[str] = None
     acnt_prdt_cd: Optional[str] = None
@@ -420,6 +439,7 @@ class KISEtfUsConfigRequest(BaseModel):
 
 
 class KISEtfUsOrderRequest(BaseModel):
+    user_id: Optional[str] = "admin"
     action: str = "RESERVE_US_CLOSE"  # RESERVE_US_CLOSE | AUTO_ROTATE | LIQUIDATE_ALL | MANUAL_ORDER
     manual_ticker: Optional[str] = None
     manual_side: Optional[str] = None
@@ -436,13 +456,16 @@ class KISEtfUsOrderRequest(BaseModel):
 
 @app.get("/api/etf/kis-account")
 async def api_get_etf_kis_account(
+    request: Request,
     criteria: Optional[str] = None,
     top_n: Optional[int] = None,
     w1: Optional[float] = None,
     w5: Optional[float] = None,
     w20: Optional[float] = None,
+    user_id: Optional[str] = None,
 ):
     from kis_etf_us_trader import inquire_kis_etf_us_account
+    uid = _resolve_uid(user_id, request)
     data = await asyncio.to_thread(
         inquire_kis_etf_us_account,
         criteria,
@@ -450,22 +473,25 @@ async def api_get_etf_kis_account(
         w1,
         w5,
         w20,
+        uid,
     )
     return {"success": True, "data": data}
 
 
 @app.post("/api/etf/kis-config")
-async def api_update_etf_kis_config(req: KISEtfUsConfigRequest):
+async def api_update_etf_kis_config(req: KISEtfUsConfigRequest, request: Request):
     from kis_etf_us_trader import inquire_kis_etf_us_account, update_kis_etf_us_config
-    updates = {k: v for k, v in req.dict().items() if v is not None}
-    await asyncio.to_thread(update_kis_etf_us_config, updates)
-    data = await asyncio.to_thread(inquire_kis_etf_us_account)
+    uid = _resolve_uid(req.user_id, request)
+    updates = {k: v for k, v in req.dict().items() if v is not None and k != "user_id"}
+    await asyncio.to_thread(update_kis_etf_us_config, updates, uid)
+    data = await asyncio.to_thread(inquire_kis_etf_us_account, None, None, None, None, None, uid)
     return {"success": True, "data": data}
 
 
 @app.post("/api/etf/kis-order")
-async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest):
+async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest, request: Request):
     from kis_etf_us_trader import execute_etf_us_rebalance_or_order
+    uid = _resolve_uid(req.user_id, request)
     res = await asyncio.to_thread(
         execute_etf_us_rebalance_or_order,
         req.action,
@@ -480,6 +506,7 @@ async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest):
         req.w20,
         req.force_rebalance,
         req.reason or "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
+        uid,
     )
     return res
 
@@ -522,7 +549,10 @@ async def api_save_model_swap(req: ModelSwapRequest):
     )
 
 @app.get("/api/etf/swap-history")
-async def api_get_swap_history():
+async def api_get_swap_history(request: Request, user_id: Optional[str] = None):
+    uid = _resolve_uid(user_id, request)
+    if uid != "admin":
+        return []
     from etf_strategy import get_model_swap_history
     return get_model_swap_history()
 
@@ -1322,6 +1352,7 @@ import threading as _threading_mod
 _sell_all_lock = _threading_mod.Lock()
 _buy_order_lock = _threading_mod.Lock()
 _reserved_close_sell_date: str = ""
+_reserved_close_sell_by_user: Dict[str, str] = {}
 
 
 class SellAllRequest(BaseModel):
@@ -1329,66 +1360,92 @@ class SellAllRequest(BaseModel):
 
 
 @app.get("/api/kis/order-status")
-def api_kis_order_status():
+def api_kis_order_status(request: Request, user_id: Optional[str] = None):
     from datetime import datetime, timedelta
-    from database import can_execute_initial_buy, get_today_buy_total
+    from database import can_execute_initial_buy, get_today_buy_total, get_user_trading_account
     from trading_config import get_trading_config
 
+    uid = _resolve_uid(user_id, request)
     today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
     cfg = get_trading_config()
-    can_buy, reason = can_execute_initial_buy(today_str)
+    user_acc = get_user_trading_account(uid, include_secrets=False)
+    can_buy, reason = can_execute_initial_buy(today_str, user_id=uid)
+    reserved_flag = (
+        (_reserved_close_sell_date == today_str)
+        if uid == "admin"
+        else (_reserved_close_sell_by_user.get(uid) == today_str)
+    )
     return {
+        "user_id": uid,
         "date": today_str,
         "already_bought_today": not can_buy,
         "reason": reason,
-        "today_buy_total": get_today_buy_total(today_str),
-        "reserved_close_sell": (_reserved_close_sell_date == today_str),
-        "max_total_capital": cfg["max_total_capital"],
-        "max_stocks": cfg["max_stocks"],
-        "max_per_stock_capital": cfg["max_per_stock_capital"],
+        "today_buy_total": get_today_buy_total(today_str, user_id=uid),
+        "reserved_close_sell": reserved_flag,
+        "max_total_capital": user_acc.get("max_total_capital") or cfg["max_total_capital"],
+        "max_stocks": user_acc.get("max_stocks") or cfg["max_stocks"],
+        "max_per_stock_capital": user_acc.get("max_per_stock_capital") or cfg["max_per_stock_capital"],
+        "account_info": user_acc,
     }
 
 
 @app.post("/api/kis/sell-all")
-def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
+def api_kis_sell_all(
+    request: Request,
+    buy: float = 0,
+    sell: float = 0,
+    mode: str = "close",
+    user_id: Optional[str] = None,
+):
     """
-    일괄 매도 처리 (단일 스레드 잠금 및 멱등 정산 보장):
+    일괄 매도 처리 (회원별 user_id 독립 정산 보장):
     - mode="close" (기본값): 종가 일괄 매도
       1) 15:20 이전: 15:20 장마감 동시호가 매도 주문 단 1회 예약 접수
       2) 15:20 ~ 15:30: 15:20 동시호가 시장가 매도 주문 즉시 전송 후 15:30:30 자동 체결 정산 (단 1회)
       3) 15:30 이후: 당일 확정 종가 기준으로 즉시 정산 및 원장 기록
     - mode="market": 장중 즉시 시장가 매도 (수동 비상 매도용)
     """
-    global _reserved_close_sell_date
+    global _reserved_close_sell_date, _reserved_close_sell_by_user
     try:
-        from database import get_holdings, clear_holdings, add_ledger_record, record_trading_sell_all, add_realized_pnl
+        from database import (
+            get_holdings,
+            clear_holdings,
+            add_ledger_record,
+            record_trading_sell_all,
+            add_realized_pnl,
+            get_user_trading_account,
+        )
         from trading_config import get_trading_config, calculate_settlement_metrics
         from datetime import datetime, timedelta
         from kis_instance import kis_client
         import threading
         import time
 
+        uid = _resolve_uid(user_id, request)
         now_kst = datetime.utcnow() + timedelta(hours=9)
         today_str = now_kst.strftime("%Y-%m-%d")
         kst_hour = now_kst.hour
         kst_minute = now_kst.minute
 
-        holdings = get_holdings()
+        holdings = get_holdings(user_id=uid)
         if not holdings:
             return {"success": False, "error": "No holdings"}
 
+        use_admin_kis = (uid == "admin") and (kis_client is not None)
+
         def _execute_closing_settlement_now():
-            """15:30 확정 종가를 조회하여 거래원장에 단 1회 손익을 기록하고 잔고를 비움"""
-            global _reserved_close_sell_date
+            """15:30 확정 종가를 조회하여 해당 회원(uid) 거래원장에 단 1회 손익을 기록하고 잔고를 비움"""
+            global _reserved_close_sell_date, _reserved_close_sell_by_user
             with _sell_all_lock:
-                live_holdings = get_holdings()
+                live_holdings = get_holdings(user_id=uid)
                 if not live_holdings:
-                    print("[일괄매도정산스킵] 이미 정산 완료되어 보유 잔고가 없습니다.")
+                    print(f"[일괄매도정산스킵:{uid}] 이미 정산 완료되어 보유 잔고가 없습니다.")
                     return 0.0, 0.0
 
                 cfg = get_trading_config()
-                max_per_stock = float(cfg["max_per_stock_capital"])
-                max_total = float(cfg["max_total_capital"])
+                u_acc = get_user_trading_account(uid, include_secrets=False)
+                max_per_stock = float(u_acc.get("max_per_stock_capital") or cfg["max_per_stock_capital"])
+                max_total = float(u_acc.get("max_total_capital") or cfg["max_total_capital"])
 
                 tot_b = 0.0
                 tot_s = 0.0
@@ -1403,7 +1460,6 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                     if qty <= 0:
                         continue
 
-                    # 1. KIS 확정 종가 조회 (캐시 미사용)
                     cp = 0
                     if kis_client and hasattr(kis_client, 'get_closing_price'):
                         try:
@@ -1417,7 +1473,6 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                         except Exception:
                             cp = 0
 
-                    # 2. 네이버 모바일 금융 fallback (15:30 이후 종가)
                     if cp <= 0:
                         try:
                             from naver_finance_scraper import naver_scraper
@@ -1427,7 +1482,6 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                         except Exception:
                             pass
 
-                    # 3. 공공데이터포털 KRX 일봉 종가 fallback
                     if cp <= 0:
                         try:
                             from public_data_api import get_stock_history
@@ -1438,7 +1492,7 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                             pass
 
                     if cp <= 0:
-                        cp = bp  # 최후의 fallback
+                        cp = bp
 
                     tot_b += qty * bp
                     tot_s += qty * cp
@@ -1463,54 +1517,54 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                 pnl = metrics["net_pnl"]
                 rr = metrics["return_rate"]
 
-                # 거래원장 및 실현손익 확정 기록 후 보유잔고(holdings) 비우기
-                add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr)
-                record_trading_sell_all(today_str, items_to_record)
-                add_realized_pnl(today_str, pnl)
-                clear_holdings()
-                _reserved_close_sell_date = ""
-                print(f"[일괄매도정산완료] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
+                add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr, user_id=uid)
+                record_trading_sell_all(today_str, items_to_record, user_id=uid)
+                add_realized_pnl(today_str, pnl, user_id=uid)
+                clear_holdings(user_id=uid)
+                if uid == "admin":
+                    _reserved_close_sell_date = ""
+                else:
+                    _reserved_close_sell_by_user.pop(uid, None)
+                print(f"[일괄매도정산완료:{uid}] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
                 return pnl, rr
 
-        # -------------------------------------------------------------
-        # Case A: 종가 일괄 매도 (mode == "close")
-        # -------------------------------------------------------------
         if mode == "close":
-            # 1) 15시 20분 이전인 경우: 15시 20분 동시호가 주문 대기 예약 (당일 중복 예약 스레드 생성 원천 차단)
             if kst_hour < 15 or (kst_hour == 15 and kst_minute < 20):
                 with _sell_all_lock:
-                    if _reserved_close_sell_date == today_str:
+                    already_rsv = (_reserved_close_sell_date == today_str) if uid == "admin" else (_reserved_close_sell_by_user.get(uid) == today_str)
+                    if already_rsv:
                         return {
                             "success": True,
                             "status": "RESERVED_1520",
                             "already_reserved": True,
                             "message": "이미 금일 15시 20분 장마감 동시호가 일괄매도가 예약되어 있습니다."
                         }
-                    _reserved_close_sell_date = today_str
+                    if uid == "admin":
+                        _reserved_close_sell_date = today_str
+                    else:
+                        _reserved_close_sell_by_user[uid] = today_str
 
                 def _schedule_close_sell_flow():
                     now_cur = datetime.utcnow() + timedelta(hours=9)
                     target_1520 = now_cur.replace(hour=15, minute=20, second=0, microsecond=0)
                     wait_sec = (target_1520 - now_cur).total_seconds()
                     if wait_sec > 0:
-                        print(f"[종가매도예약] 15:20 장마감 동시호가까지 {wait_sec:.0f}초 대기 후 매도 주문 전송...")
                         time.sleep(wait_sec)
 
-                    cur_holdings = get_holdings()
-                    if kis_client and cur_holdings:
+                    cur_holdings = get_holdings(user_id=uid)
+                    if use_admin_kis and cur_holdings:
                         for h_item in cur_holdings:
                             try:
                                 clean_t = h_item['ticker'].split(':')[-1]
                                 kis_client.order_sell(clean_t, h_item['qty'], 0)
                                 time.sleep(0.12)
                             except Exception as o_err:
-                                print(f"[종가매도예약주문오류] {h_item['ticker']}: {o_err}")
+                                print(f"[종가매도예약주문오류:{uid}] {h_item['ticker']}: {o_err}")
 
                     now_cur2 = datetime.utcnow() + timedelta(hours=9)
                     target_1530 = now_cur2.replace(hour=15, minute=30, second=30, microsecond=0)
                     wait_sec2 = (target_1530 - now_cur2).total_seconds()
                     if wait_sec2 > 0:
-                        print(f"[종가매도예약] 15:30:30 확정 종가 형성까지 {wait_sec2:.0f}초 대기 후 정산...")
                         time.sleep(wait_sec2)
 
                     _execute_closing_settlement_now()
@@ -1522,33 +1576,35 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                     "message": "15시 20분 장마감 동시호가에 매도주문이 예약되었습니다. 15시 30분을 기준으로 최종 종가에 체결 정산됩니다."
                 }
 
-            # 2) 15시 20분 ~ 15시 30분 사이인 경우: 지금 즉시 동시호가 매도 주문 전송 후 15:30:30에 정산 (단 1회)
             elif kst_hour == 15 and (20 <= kst_minute < 30):
                 with _sell_all_lock:
-                    if _reserved_close_sell_date == today_str:
+                    already_rsv = (_reserved_close_sell_date == today_str) if uid == "admin" else (_reserved_close_sell_by_user.get(uid) == today_str)
+                    if already_rsv:
                         return {
                             "success": True,
                             "status": "PENDING_CLOSE_1530",
                             "already_reserved": True,
                             "message": "이미 15시 20분 동시호가 일괄매도 정산이 대기 중입니다."
                         }
-                    _reserved_close_sell_date = today_str
+                    if uid == "admin":
+                        _reserved_close_sell_date = today_str
+                    else:
+                        _reserved_close_sell_by_user[uid] = today_str
 
-                if kis_client:
+                if use_admin_kis:
                     for h_item in holdings:
                         try:
                             clean_t = h_item['ticker'].split(':')[-1]
                             kis_client.order_sell(clean_t, h_item['qty'], 0)
                             time.sleep(0.12)
                         except Exception as o_err:
-                            print(f"[동시호가매도주문오류] {h_item['ticker']}: {o_err}")
+                            print(f"[동시호가매도주문오류:{uid}] {h_item['ticker']}: {o_err}")
 
                 def _wait_and_settle():
                     now_cur = datetime.utcnow() + timedelta(hours=9)
                     target_1530 = now_cur.replace(hour=15, minute=30, second=30, microsecond=0)
                     wait_sec = (target_1530 - now_cur).total_seconds()
                     if wait_sec > 0:
-                        print(f"[동시호가정산대기] 15:30:30까지 {wait_sec:.0f}초 대기 후 확정 종가 정산 실행...")
                         time.sleep(wait_sec)
                     _execute_closing_settlement_now()
 
@@ -1559,7 +1615,6 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                     "message": "15시 20분 동시호가 시장가 매도 주문이 정상 접수되었습니다. 15시 30분 장마감 후 최종 종가로 자동 정산됩니다."
                 }
 
-            # 3) 15시 30분 이후인 경우: 이미 장이 마감되었으므로 15:30 확정 종가로 즉시 정산
             else:
                 pnl, rr = _execute_closing_settlement_now()
                 return {
@@ -1571,17 +1626,14 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
                     "message": "15시 30분 최종 종가 기준으로 일괄 매도 정산이 완료되었습니다."
                 }
 
-        # -------------------------------------------------------------
-        # Case B: 장중 즉시 시장가 매도 (mode == "market")
-        # -------------------------------------------------------------
         else:
-            if kis_client:
+            if use_admin_kis:
                 for h_item in holdings:
                     try:
                         clean_t = h_item['ticker'].split(':')[-1]
                         kis_client.order_sell(clean_t, h_item['qty'], 0)
                     except Exception as o_err:
-                        print(f"[즉시매도오류] {h_item['ticker']}: {o_err}")
+                        print(f"[즉시매도오류:{uid}] {h_item['ticker']}: {o_err}")
 
             pnl, rr = _execute_closing_settlement_now()
             return {
@@ -1598,32 +1650,34 @@ def api_kis_sell_all(buy: float = 0, sell: float = 0, mode: str = "close"):
         return {"success": False, "error": str(e)}
 
 @app.get("/api/ledger-history")
-def api_ledger_history():
+def api_ledger_history(request: Request, user_id: Optional[str] = None):
     """
-    Returns the daily summary trading ledger history.
+    Returns the daily summary trading ledger history isolated per user_id.
     """
     try:
         from database import get_ledger_history
-        return get_ledger_history()
+        uid = _resolve_uid(user_id, request)
+        return get_ledger_history(user_id=uid)
     except Exception as e:
         print(f"Ledger history error: {e}")
         return []
 
 @app.get("/api/detailed-trading-ledger")
-def api_detailed_trading_ledger(date: str = None):
+def api_detailed_trading_ledger(request: Request, date: str = None, user_id: Optional[str] = None):
     """
-    Returns per-stock detailed trading ledger entries.
+    Returns per-stock detailed trading ledger entries isolated per user_id.
     """
     try:
         from database import get_detailed_trading_ledger
-        return get_detailed_trading_ledger(date)
+        uid = _resolve_uid(user_id, request)
+        return get_detailed_trading_ledger(date, user_id=uid)
     except Exception as e:
         print(f"Detailed trading ledger error: {e}")
         return []
 
 @app.get("/api/pnl-history")
-def api_pnl_history():
-    return api_ledger_history()
+def api_pnl_history(request: Request, user_id: Optional[str] = None):
+    return api_ledger_history(request=request, user_id=user_id)
 
 _ledger_chart_cache = {"key": None, "timestamp": 0.0, "data": []}
 
@@ -1720,10 +1774,9 @@ def _load_kospi_history_map(target_latest_date: str = "") -> dict:
 
 
 @app.get("/api/ledger-chart-data")
-def api_ledger_chart_data():
+def api_ledger_chart_data(request: Request, user_id: Optional[str] = None):
     """
-    Returns comparative cumulative return data for 매수주문 strategy vs KOSPI index (^KS11).
-    NaN/Inf 방어 및 메모리 캐시를 통해 JSON 직렬화 오류(500)를 원천 차단합니다.
+    Returns comparative cumulative return data for 매수주문 strategy vs KOSPI index (^KS11) isolated per user_id.
     """
     global _ledger_chart_cache
     try:
@@ -1731,13 +1784,18 @@ def api_ledger_chart_data():
         from datetime import datetime, timedelta
         import time
 
-        ledger_rows = get_ledger_history()
+        uid = _resolve_uid(user_id, request)
+        ledger_rows = get_ledger_history(user_id=uid)
         ledger_rows_asc = sorted(ledger_rows, key=lambda x: x.get('date', ''))
+
+        # 일반회원이 아직 매매 기록이 없는 경우 빈 배열 반환 (관리자 수익률 차트 노출 차단)
+        if uid != "admin" and not ledger_rows_asc:
+            return []
 
         today_kst = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
         latest_ledger_date = ledger_rows_asc[-1].get('date', '') if ledger_rows_asc else ''
         total_pnl_sig = round(sum(_safe_finite_float(r.get('net_pnl', 0.0), 0.0) for r in ledger_rows_asc), 2)
-        cache_key = (len(ledger_rows_asc), latest_ledger_date, total_pnl_sig)
+        cache_key = (uid, len(ledger_rows_asc), latest_ledger_date, total_pnl_sig)
 
         now_ts = time.time()
         if (
@@ -1806,7 +1864,7 @@ _holdings_price_cache = {}
 _holdings_cache_time = 0
 
 @app.get("/api/holdings")
-def api_get_holdings():
+def api_get_holdings(request: Request, user_id: Optional[str] = None):
     global _holdings_price_cache, _holdings_cache_time
     from database import get_holdings, get_stock
     from datetime import datetime, timedelta
@@ -1815,14 +1873,15 @@ def api_get_holdings():
     import os
     
     try:
-        holdings = get_holdings()
-        # 평일 15:31 이후인데 아직 미청산 보유종목이 남아있다면 자동으로 15:30 종가 정산 실행
+        uid = _resolve_uid(user_id, request)
+        holdings = get_holdings(user_id=uid)
+        # 관리자(admin)의 경우 평일 15:31 이후 미청산 보유종목 자동 15:30 종가 정산 실행
         now_kst = datetime.utcnow() + timedelta(hours=9)
-        if holdings and now_kst.weekday() < 5 and (now_kst.hour * 60 + now_kst.minute) >= (15 * 60 + 31):
+        if uid == "admin" and holdings and now_kst.weekday() < 5 and (now_kst.hour * 60 + now_kst.minute) >= (15 * 60 + 31):
             try:
                 import auto_trader
                 auto_trader.job_1531_ledger_record()
-                holdings = get_holdings()
+                holdings = get_holdings(user_id="admin")
             except Exception as auto_err:
                 print(f"[Auto 15:31 Settlement Catch-up Error] {auto_err}")
         now = time.time()
@@ -1831,7 +1890,6 @@ def api_get_holdings():
             _holdings_price_cache.clear()
             _holdings_cache_time = now
 
-        # 디스크 캐시 파일에서 9시 5분/스냅샷 데이터가 있는지 확인
         cache_stocks_map = {}
         cache_file = os.path.join(os.path.dirname(__file__), "data", "kis_foreign_stocks_cache.json")
         if os.path.exists(cache_file):
@@ -1852,7 +1910,7 @@ def api_get_holdings():
         ledger_price_map = {}
         try:
             today_kst_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
-            for lr in get_detailed_trading_ledger(today_kst_str):
+            for lr in get_detailed_trading_ledger(today_kst_str, user_id=uid):
                 ltk = str(lr.get("ticker", "")).replace("KRX:", "")
                 sp = float(lr.get("sell_price") or 0)
                 if ltk and sp > 0:
@@ -1865,10 +1923,8 @@ def api_get_holdings():
             clean_ticker = raw_ticker.replace("KRX:", "")
             if not clean_ticker: continue
             
-            # 캐시 데이터 매칭
             cache_match = cache_stocks_map.get(clean_ticker) or cache_stocks_map.get(f"KRX:{clean_ticker}") or {}
             
-            # 현재가 결정 (캐시가 있으면 캐시가, 없으면 당일 정산 종가/이전 캐시가 또는 매입가)
             current_p = cache_match.get('price', 0)
             if current_p <= 0:
                 current_p = ledger_price_map.get(clean_ticker, 0)
@@ -1887,7 +1943,6 @@ def api_get_holdings():
             _holdings_price_cache[clean_ticker] = current_p
             h["currentPrice"] = current_p
             
-            # 외국계 비중 & 9시 5분 비중 매핑
             live_ratio = cache_match.get("foreign_ratio", cache_match.get("foreignRatio", 0.0))
             ratio0905 = snap_0905_map.get(clean_ticker, cache_match.get("ratio0905", live_ratio))
             
@@ -1896,8 +1951,6 @@ def api_get_holdings():
             h["foreign_net_buy"] = cache_match.get("foreign_net_buy", 0)
             h["ratio0905"] = ratio0905
             h["foreign_ratio_0905"] = ratio0905
-
-        return holdings
 
         return holdings
     except Exception as e:
@@ -2077,12 +2130,38 @@ def get_kis_price(ticker: str):
     return {"ticker": pure_ticker if is_korean_stock(ticker) else ticker, "price": price}
 
 @app.post("/api/kis/order/{ticker}")
-def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy", name: str = "", batch_id: str = ""):
-    # --- 가상 모의투자 (Paper Trading) 및 KIS 연동 로직 (최초 매수 외 추가매수 차단 + 총 1억/종목당 500만원 한도 엄수) ---
+def post_kis_order(
+    request: Request,
+    ticker: str,
+    qty: int,
+    price: float = 0.0,
+    type: str = "buy",
+    name: str = "",
+    batch_id: str = "",
+    user_id: Optional[str] = None,
+):
+    # --- 회원별(user_id) 개별 증권사 계좌 연동 및 모의/실전 매매 로직 ---
     from datetime import datetime, timedelta
-    from database import update_holding, get_stock, can_execute_initial_buy, get_today_buy_total, record_trading_buy, record_trading_sell_all
+    from database import (
+        update_holding,
+        get_stock,
+        can_execute_initial_buy,
+        get_today_buy_total,
+        record_trading_buy,
+        record_trading_sell_all,
+        get_user_trading_account,
+    )
     from trading_config import get_trading_config
     from kis_instance import kis_client
+
+    uid = _resolve_uid(user_id, request)
+    user_acc = get_user_trading_account(uid, include_secrets=True)
+    if uid != "admin" and not user_acc.get("is_connected", False):
+        return {
+            "ticker": ticker,
+            "success": False,
+            "error": "본인 증권사 계좌가 아직 연결되지 않았습니다. 상단 [내 증권사 계좌 연결]에서 계좌를 먼저 등록해주세요.",
+        }
 
     pure_ticker = to_pure_ticker(ticker)
     is_kr = is_korean_stock(ticker)
@@ -2092,7 +2171,7 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
     if qty <= 0:
         return {"ticker": final_ticker, "success": False, "error": "주문 수량은 1주 이상이어야 합니다."}
 
-    # 실시간 최신 시장가 우선 조회 (어제 가격이나 과거 캐시 매수 방지)
+    # 실시간 최신 시장가 우선 조회
     live_price = 0
     if kis_client:
         try:
@@ -2117,19 +2196,20 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
         else:
             return {"ticker": final_ticker, "success": False, "error": "유효한 현재가를 확인할 수 없습니다."}
 
+    use_admin_kis = (uid == "admin") and (kis_client is not None)
+
     if type == "buy":
         cfg = get_trading_config()
-        max_total = float(cfg["max_total_capital"])
-        max_per_stock = float(cfg["max_per_stock_capital"])
+        max_total = float(user_acc.get("max_total_capital") or cfg["max_total_capital"])
+        max_per_stock = float(user_acc.get("max_per_stock_capital") or cfg["max_per_stock_capital"])
 
         with _buy_order_lock:
-            allowed, reason = can_execute_initial_buy(today_str, pure_ticker, batch_id=batch_id)
+            allowed, reason = can_execute_initial_buy(today_str, pure_ticker, batch_id=batch_id, user_id=uid)
             if not allowed:
                 return {"ticker": final_ticker, "success": False, "error": reason}
 
-            # 실시간 체결단가 기준으로 종목당 한도(500만원) 및 당일 총 한도(1억원) 이내로 수량 재산정
             max_qty_stock = int(max_per_stock // actual_price)
-            remaining_budget = max(0.0, max_total - get_today_buy_total(today_str))
+            remaining_budget = max(0.0, max_total - get_today_buy_total(today_str, user_id=uid))
             max_qty_total = int(remaining_budget // actual_price)
             capped_qty = min(qty, max_qty_stock, max_qty_total)
 
@@ -2141,16 +2221,19 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
                 }
 
             real_api_success = False
-            if kis_client:
+            if use_admin_kis:
                 try:
                     real_api_success = kis_client.order_buy(pure_ticker, capped_qty, int(actual_price))
                 except Exception as e:
-                    print(f"[KIS Order API Notice] Live buy call: {e}")
+                    print(f"[KIS Order API Notice:{uid}] Live buy call: {e}")
 
-            update_holding(final_ticker, name or final_ticker, capped_qty, actual_price)
-            record_trading_buy(today_str, pure_ticker, name or pure_ticker, actual_price, capped_qty, batch_id=batch_id)
+            update_holding(final_ticker, name or final_ticker, capped_qty, actual_price, user_id=uid)
+            record_trading_buy(
+                today_str, pure_ticker, name or pure_ticker, actual_price, capped_qty, batch_id=batch_id, user_id=uid
+            )
 
             return {
+                "user_id": uid,
                 "ticker": final_ticker,
                 "success": True,
                 "real_api_success": real_api_success,
@@ -2160,22 +2243,29 @@ def post_kis_order(ticker: str, qty: int, price: float = 0.0, type: str = "buy",
             }
     else:
         real_api_success = False
-        if kis_client:
+        if use_admin_kis:
             try:
                 real_api_success = kis_client.order_sell(pure_ticker, qty, int(actual_price))
             except Exception as e:
-                print(f"[KIS Order API Notice] Live sell call: {e}")
+                print(f"[KIS Order API Notice:{uid}] Live sell call: {e}")
 
-        update_holding(final_ticker, name or final_ticker, -qty, actual_price)
-        record_trading_sell_all(today_str, [{
-            'ticker': pure_ticker,
-            'name': name or pure_ticker,
-            'qty': qty,
-            'buy_price': actual_price,
-            'sell_price': actual_price,
-            'pnl': 0.0
-        }])
+        update_holding(final_ticker, name or final_ticker, -qty, actual_price, user_id=uid)
+        record_trading_sell_all(
+            today_str,
+            [
+                {
+                    'ticker': pure_ticker,
+                    'name': name or pure_ticker,
+                    'qty': qty,
+                    'buy_price': actual_price,
+                    'sell_price': actual_price,
+                    'pnl': 0.0,
+                }
+            ],
+            user_id=uid,
+        )
         return {
+            "user_id": uid,
             "ticker": final_ticker,
             "success": True,
             "real_api_success": real_api_success,
@@ -3131,6 +3221,82 @@ def api_admin_reset_password(req: AdminPasswordResetModel):
         raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자리 이상이어야 합니다.")
     res = admin_update_user_password(req.request_id, req.new_password)
     return res
+
+
+class UserTradingAccountUpdateModel(BaseModel):
+    user_id: Optional[str] = None
+    broker_code: str = "KIS"
+    account_nickname: str = ""
+    account_mode: str = "PAPER"
+    account_no: str = ""
+    acnt_prdt_cd: str = "01"
+    app_key: Optional[str] = None
+    app_secret: Optional[str] = None
+    max_total_capital: Optional[float] = None
+    max_per_stock_capital: Optional[float] = None
+    max_stocks: Optional[int] = None
+    etf_order_qty: Optional[int] = None
+    etf_auto_trade: Optional[bool] = None
+    disconnect: Optional[bool] = False
+
+
+@app.get("/api/user/trading-account")
+def api_get_user_trading_account(request: Request, user_id: Optional[str] = None):
+    uid = _resolve_uid(user_id, request)
+    acc = get_user_trading_account(uid, include_secrets=False)
+    brokers = [{"code": k, "name": v} for k, v in SUPPORTED_BROKERS.items()]
+    return {"success": True, "data": acc, "supported_brokers": brokers}
+
+
+@app.post("/api/user/trading-account")
+def api_save_user_trading_account(req: UserTradingAccountUpdateModel, request: Request):
+    uid = _resolve_uid(req.user_id, request)
+    payload = req.dict(exclude_unset=True)
+    saved = save_user_trading_account(uid, payload)
+    try:
+        from kis_etf_us_trader import update_kis_etf_us_config
+        etf_updates: Dict[str, Any] = {
+            "mode": saved.get("account_mode", "PAPER"),
+            "cano": saved.get("account_no", ""),
+            "acnt_prdt_cd": saved.get("acnt_prdt_cd", "01"),
+            "order_qty": int(saved.get("etf_order_qty") or 100),
+            "auto_trade_enabled": bool(saved.get("etf_auto_trade", True)) if saved.get("is_connected") else False,
+        }
+        update_kis_etf_us_config(etf_updates, user_id=uid)
+    except Exception as e:
+        print(f"[UserTradingAccount ETF sync notice:{uid}] {e}")
+    brokers = [{"code": k, "name": v} for k, v in SUPPORTED_BROKERS.items()]
+    return {
+        "success": True,
+        "message": "내 증권사 계좌 설정이 안전하게 저장되었습니다.",
+        "data": saved,
+        "supported_brokers": brokers,
+    }
+
+
+@app.post("/api/auth/admin/trading-overview")
+def api_admin_trading_overview(req: AdminAuthModel):
+    import os
+    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    if req.admin_password != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    overview_list = get_all_users_trading_overview()
+    try:
+        from kis_etf_us_trader import get_all_users_etf_us_summary
+        etf_map = get_all_users_etf_us_summary()
+    except Exception as e:
+        print(f"[Admin Overview ETF summary notice] {e}")
+        etf_map = {}
+
+    for u_item in overview_list:
+        uid = u_item.get("user_id", "")
+        etf_info = etf_map.get(uid, {"holdings": [], "recent_orders": [], "total_eval_usd": 0.0})
+        u_item["etf_us_holdings"] = etf_info.get("holdings", [])
+        u_item["etf_us_recent_orders"] = etf_info.get("recent_orders", [])
+        u_item["etf_us_total_eval_usd"] = etf_info.get("total_eval_usd", 0.0)
+
+    return {"status": "success", "data": overview_list}
+
 
 if __name__ == "__main__":
     import uvicorn

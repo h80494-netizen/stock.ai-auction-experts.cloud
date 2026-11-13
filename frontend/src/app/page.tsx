@@ -25,14 +25,18 @@ import FuturesSimulationView from '@/components/FuturesSimulationView';
 import PrivateAccessGate from '@/components/PrivateAccessGate';
 import AdminApprovalModal from '@/components/AdminApprovalModal';
 import ChangePasswordModal from '@/components/ChangePasswordModal';
+import UserTradingAccountModal from '@/components/UserTradingAccountModal';
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [authChecked, setAuthChecked] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [userName, setUserName] = useState<string>('');
+  const [userId, setUserId] = useState<string>('admin');
+  const [inspectingUser, setInspectingUser] = useState<{ userId: string; userName: string } | null>(null);
   const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
+  const [showAccountModal, setShowAccountModal] = useState<boolean>(false);
   const [showMobileMenuDrawer, setShowMobileMenuDrawer] = useState<boolean>(false);
 
   const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
@@ -52,10 +56,13 @@ export default function Home() {
       const auth = sessionStorage.getItem('stock_terminal_auth');
       if (auth === 'true') {
         setIsAuthenticated(true);
-        if (sessionStorage.getItem('stock_terminal_is_admin') === 'true') {
+        const adminFlag = sessionStorage.getItem('stock_terminal_is_admin') === 'true';
+        if (adminFlag) {
           setIsAdmin(true);
         }
         setUserName(sessionStorage.getItem('stock_terminal_user_name') || '');
+        const storedUid = sessionStorage.getItem('stock_terminal_user_id');
+        setUserId(storedUid || (adminFlag ? 'admin' : 'guest'));
       }
     }
     setAuthChecked(true);
@@ -138,17 +145,24 @@ export default function Home() {
         onAuthenticate={() => {
           setIsAuthenticated(true);
           if (typeof window !== 'undefined') {
-            if (sessionStorage.getItem('stock_terminal_is_admin') === 'true') {
+            const adminFlag = sessionStorage.getItem('stock_terminal_is_admin') === 'true';
+            if (adminFlag) {
               setIsAdmin(true);
             } else {
               setIsAdmin(false);
             }
             setUserName(sessionStorage.getItem('stock_terminal_user_name') || '');
+            const storedUid = sessionStorage.getItem('stock_terminal_user_id');
+            setUserId(storedUid || (adminFlag ? 'admin' : 'guest'));
+            setInspectingUser(null);
           }
         }}
       />
     );
   }
+
+  const activeUserId = isAdmin && inspectingUser ? inspectingUser.userId : userId;
+  const activeUserName = isAdmin && inspectingUser ? inspectingUser.userName : userName;
 
   if (loading) {
     return (
@@ -236,14 +250,35 @@ export default function Home() {
             {isAdmin && (
               <button
                 onClick={() => setShowAdminModal(true)}
-                title="회원 가입 및 비밀번호 승인 DB 관리 (관리자 전용)"
+                title="회원 가입 승인 및 회원별 트레이딩 계좌 감독 (관리자 전용)"
                 className="px-2 py-1 text-[11px] bg-red-950/80 hover:bg-red-900 border border-red-500 text-red-200 hover:text-white rounded-lg transition-all flex items-center gap-1 shadow cursor-pointer font-bold animate-pulse"
               >
                 <span>👑</span>
-                <span className="hidden sm:inline">회원 승인 DB 관리</span>
-                <span className="sm:hidden">승인관리</span>
+                <span className="hidden sm:inline">회원 승인 & 계좌 감독</span>
+                <span className="sm:hidden">승인/계좌관리</span>
               </button>
             )}
+
+            {/* 관리자가 특정 회원 계좌를 열람 중일 때 복귀 버튼 */}
+            {isAdmin && inspectingUser && (
+              <button
+                onClick={() => setInspectingUser(null)}
+                className="px-2 py-1 text-[11px] bg-amber-600 hover:bg-amber-500 border border-amber-300 text-slate-950 rounded-lg font-extrabold flex items-center gap-1 shadow cursor-pointer"
+              >
+                <span>🔍 {inspectingUser.userName} 계좌 열람중 (내 계좌로 복귀 ✕)</span>
+              </button>
+            )}
+
+            {/* 모든 회원 개별 증권사 계좌 연결 및 트레이딩 설정 버튼 */}
+            <button
+              onClick={() => setShowAccountModal(true)}
+              title="내 증권사 계좌 연결 및 개인별 독립 트레이딩 설정"
+              className="px-2 py-1 text-[11px] bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/70 text-emerald-200 hover:text-white rounded-lg transition-all flex items-center gap-1 shadow-sm cursor-pointer font-bold"
+            >
+              <span>🏦</span>
+              <span className="hidden sm:inline">내 증권사 계좌 연결</span>
+              <span className="sm:hidden">계좌연결</span>
+            </button>
 
             {/* 모든 사용자 비밀번호 변경 버튼 */}
             <button
@@ -263,9 +298,11 @@ export default function Home() {
                   sessionStorage.removeItem('stock_terminal_auth');
                   sessionStorage.removeItem('stock_terminal_is_admin');
                   sessionStorage.removeItem('stock_terminal_user_name');
+                  sessionStorage.removeItem('stock_terminal_user_id');
                   localStorage.removeItem('stock_terminal_auth');
                 }
                 setIsAdmin(false);
+                setInspectingUser(null);
                 setIsAuthenticated(false);
               }}
               title="세션 종료 및 비밀번호 재인증"
@@ -535,7 +572,13 @@ export default function Home() {
         ) : activeTab === 'target' ? (
           <TargetAnalysis stocks={stocks} globalStocks={globalData.stocks} globalSearchTicker={globalSearchTicker} setGlobalSearchTicker={setGlobalSearchTicker} />
         ) : activeTab === 'order' ? (
-          <OrderWindow stocks={stocks} />
+          <OrderWindow
+            stocks={stocks}
+            userId={activeUserId}
+            isAdmin={isAdmin}
+            userName={activeUserName}
+            onOpenAccountModal={() => setShowAccountModal(true)}
+          />
         ) : activeTab === 'competitor' ? (
           <CompetitorAnalysis />
         ) : activeTab === 'global' ? (
@@ -545,7 +588,14 @@ export default function Home() {
         ) : activeTab === 'etf' ? (
           <ETFView />
         ) : activeTab === 'etf_strategy' ? (
-          <ETFStrategyView etfWeights={etfWeights} setEtfWeights={setEtfWeights} />
+          <ETFStrategyView
+            etfWeights={etfWeights}
+            setEtfWeights={setEtfWeights}
+            userId={activeUserId}
+            isAdmin={isAdmin}
+            userName={activeUserName}
+            onOpenAccountModal={() => setShowAccountModal(true)}
+          />
         ) : activeTab === 'etf_history' ? (
           <ETFSimulationHistoryView etfWeights={etfWeights} setEtfWeights={setEtfWeights} />
         ) : activeTab === 'derivatives' ? (
@@ -612,13 +662,29 @@ export default function Home() {
         <div>MARKET OPEN</div>
       </footer>
 
-      {/* 관리자 승인 관리 모달 (오직 관리자일 때만 렌더) */}
+      {/* 관리자 승인 관리 및 회원별 개별 계좌 감독 모달 (오직 관리자일 때만 렌더) */}
       {isAdmin && (
         <AdminApprovalModal
           isOpen={showAdminModal}
           onClose={() => setShowAdminModal(false)}
+          onInspectUser={(targetUid, targetName) => {
+            if (targetUid === 'admin') {
+              setInspectingUser(null);
+            } else {
+              setInspectingUser({ userId: targetUid, userName: targetName });
+            }
+          }}
         />
       )}
+
+      {/* 회원별 개별 증권사 계좌 연결 및 트레이딩 설정 모달 */}
+      <UserTradingAccountModal
+        isOpen={showAccountModal}
+        onClose={() => setShowAccountModal(false)}
+        userId={activeUserId}
+        userName={activeUserName}
+        isAdmin={isAdmin}
+      />
 
       {/* 비밀번호 변경 모달 */}
       <ChangePasswordModal

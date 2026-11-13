@@ -17,8 +17,22 @@ load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
 
 from etf_strategy import DATA_DIR, DB_PATH, ETF_TARGETS, get_etf_strategy_results, update_etf_data
 from kis_api import KISApiClient
+import database as _user_db
 
 CONFIG_PATH = os.path.join(DATA_DIR, "kis_etf_us_config.json")
+
+
+def _normalize_uid(user_id: Optional[str] = None) -> str:
+    u = (user_id or "admin").strip()
+    return u if u else "admin"
+
+
+def _get_user_config_path(user_id: str = "admin") -> str:
+    uid = _normalize_uid(user_id)
+    if uid == "admin":
+        return CONFIG_PATH
+    safe_uid = "".join(ch for ch in uid if ch.isalnum() or ch in ("_", "-"))
+    return os.path.join(DATA_DIR, f"kis_etf_us_config_{safe_uid}.json")
 
 # KIS 해외주식 미국 거래소 코드 매핑 (주문용 OVRS_EXCG_CD / 시세용 EXCD)
 # QQQ는 NASDAQ(NASD), 나머지 글로벌/원자재/지수 ETF(SPY, EWY, EWJ, FXI, INDA, EWZ, EWA, EZU, USO, GLD)는 NYSE Arca(AMEX) 상장
@@ -36,7 +50,7 @@ US_ETF_EXCHANGE_MAP: Dict[str, Dict[str, str]] = {
     "GLD": {"order_excg": "AMEX", "quote_excd": "AMS", "fallback_excg": "NYSE"},
 }
 
-_SHARED_US_KIS_CLIENT: Optional[KISApiClient] = None
+_SHARED_US_KIS_CLIENTS: Dict[str, KISApiClient] = {}
 _SHARED_LOCK = threading.Lock()
 
 
@@ -44,23 +58,61 @@ def _init_etf_kis_tables() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS etf_us_kis_holdings (
-            ticker TEXT PRIMARY KEY,
-            name TEXT,
-            exchange_cd TEXT,
-            qty INTEGER,
-            avg_buy_price_usd REAL,
-            curr_price_usd REAL,
-            updated_at_kst TEXT
+
+    # 1. etf_us_kis_holdings (user_id, ticker 복합 PK 마이그레이션)
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='etf_us_kis_holdings'")
+    if c.fetchone():
+        c.execute("PRAGMA table_info(etf_us_kis_holdings)")
+        cols = [r[1] for r in c.fetchall()]
+        if "user_id" not in cols:
+            c.execute("ALTER TABLE etf_us_kis_holdings RENAME TO etf_us_kis_holdings_old")
+            c.execute(
+                """
+                CREATE TABLE etf_us_kis_holdings (
+                    user_id TEXT DEFAULT 'admin',
+                    ticker TEXT,
+                    name TEXT,
+                    exchange_cd TEXT,
+                    qty INTEGER,
+                    avg_buy_price_usd REAL,
+                    curr_price_usd REAL,
+                    updated_at_kst TEXT,
+                    PRIMARY KEY (user_id, ticker)
+                )
+                """
+            )
+            c.execute(
+                """
+                INSERT OR REPLACE INTO etf_us_kis_holdings
+                (user_id, ticker, name, exchange_cd, qty, avg_buy_price_usd, curr_price_usd, updated_at_kst)
+                SELECT 'admin', ticker, name, exchange_cd, qty, avg_buy_price_usd, curr_price_usd, updated_at_kst
+                FROM etf_us_kis_holdings_old
+                """
+            )
+            c.execute("DROP TABLE etf_us_kis_holdings_old")
+    else:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS etf_us_kis_holdings (
+                user_id TEXT DEFAULT 'admin',
+                ticker TEXT,
+                name TEXT,
+                exchange_cd TEXT,
+                qty INTEGER,
+                avg_buy_price_usd REAL,
+                curr_price_usd REAL,
+                updated_at_kst TEXT,
+                PRIMARY KEY (user_id, ticker)
+            )
+            """
         )
-        """
-    )
+
+    # 2. etf_us_kis_order_log (user_id 컬럼 보장)
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS etf_us_kis_order_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'admin',
             executed_at_kst TEXT,
             us_trading_date TEXT,
             mode TEXT,
@@ -81,6 +133,12 @@ def _init_etf_kis_tables() -> None:
         )
         """
     )
+    c.execute("PRAGMA table_info(etf_us_kis_order_log)")
+    log_cols = [r[1] for r in c.fetchall()]
+    if "user_id" not in log_cols:
+        c.execute("ALTER TABLE etf_us_kis_order_log ADD COLUMN user_id TEXT DEFAULT 'admin'")
+        c.execute("UPDATE etf_us_kis_order_log SET user_id = 'admin' WHERE user_id IS NULL OR user_id = ''")
+
     conn.commit()
     conn.close()
 
@@ -141,41 +199,61 @@ def get_us_market_session_info() -> Dict[str, Any]:
     }
 
 
-def get_kis_etf_us_config() -> Dict[str, Any]:
+def get_kis_etf_us_config(user_id: str = "admin") -> Dict[str, Any]:
     """
-    ETF 투자전략의 한투증권(KIS) 모의계좌/실전계좌 및 미국주식 장마감 10분 전(15:50 ET) 예약 자동매매 설정을 로드합니다.
-    - 디폴트: 모의계좌(PAPER, 44790516-01), 주문수량 100주(order_qty=100, 주수 직접 입력 가능),
-              미국장 종가체결(MOC 33), 장마감 10분 전(15:50 ET) 예약 자동주문 ON(auto_trade_enabled=True)
+    회원별(user_id) ETF 투자전략의 증권사 계좌 및 미국주식 장마감 10분 전(15:50 ET) 예약 자동매매 설정을 로드합니다.
+    - 관리자(admin): 기존 한투 모의계좌(44790516-01), 디폴트 100주, 자동매매 ON 유지
+    - 일반회원(user_*): 본인이 직접 연결한 개별 증권사 계좌만 표시 (미연결 시 is_connected=False, 관리자 모의계좌 절대 비노출)
     """
     os.makedirs(DATA_DIR, exist_ok=True)
-    env_acc = os.environ.get("KIS_ACCOUNT_NO", "44790516-01").strip()
-    default_cano = env_acc.split("-")[0] if "-" in env_acc else env_acc[:8]
-    default_prdt = env_acc.split("-")[1] if "-" in env_acc and len(env_acc.split("-")[1]) == 2 else "01"
+    uid = _normalize_uid(user_id)
+    cfg_path = _get_user_config_path(uid)
+    user_acc = _user_db.get_user_trading_account(uid, include_secrets=False)
+
+    if uid == "admin":
+        env_acc = os.environ.get("KIS_ACCOUNT_NO", "44790516-01").strip()
+        default_cano = env_acc.split("-")[0] if "-" in env_acc else env_acc[:8]
+        default_prdt = env_acc.split("-")[1] if "-" in env_acc and len(env_acc.split("-")[1]) == 2 else "01"
+        is_connected = True
+        broker_code = user_acc.get("broker_code") or "KIS"
+        broker_name = user_acc.get("broker_name") or "한국투자증권"
+        account_nickname = user_acc.get("account_nickname") or "주인장(관리자) 한투 계좌"
+    else:
+        is_connected = bool(user_acc.get("is_connected", False))
+        default_cano = str(user_acc.get("account_no") or "").strip() if is_connected else ""
+        default_prdt = str(user_acc.get("acnt_prdt_cd") or "01").strip() if is_connected else "01"
+        broker_code = str(user_acc.get("broker_code") or "KIS")
+        broker_name = str(user_acc.get("broker_name") or ("미연결" if not is_connected else "한국투자증권"))
+        account_nickname = str(user_acc.get("account_nickname") or "")
 
     default_cfg: Dict[str, Any] = {
-        "mode": "PAPER",  # PAPER (한투 모의투자 VTTT1002U/VTTT1001U) | LIVE (실전투자 TTTT1002U/TTTT1006U)
+        "user_id": uid,
+        "is_connected": is_connected,
+        "broker_code": broker_code,
+        "broker_name": broker_name,
+        "account_nickname": account_nickname,
+        "mode": str(user_acc.get("account_mode") or "PAPER").upper(),
         "cano": default_cano,
         "acnt_prdt_cd": default_prdt,
-        "order_qty": 100,  # 디폴트 매매 수량: ETF 100주 (사용자 직접 주수 입력 가능)
-        "ord_dvsn": "33",  # 33: MOC(장마감 종가체결, 모의투자 시 종가/현재가 지정가 00 자동폴백), 34: LOC(장마감 지정가), 00: 지정가
-        "auto_trade_enabled": True,  # 미국시장 장마감 10분 전(15:50 ET) 최종 신호 기준 예약 자동매매 기본 활성화
-        "reservation_active": True,  # 장마감 10분 전(15:50 ET) 예약 자동주문 활성화 여부
+        "order_qty": int(user_acc.get("etf_order_qty") or 100),
+        "ord_dvsn": "33",
+        "auto_trade_enabled": bool(user_acc.get("etf_auto_trade", True)) if is_connected else False,
+        "reservation_active": bool(user_acc.get("etf_auto_trade", True)) if is_connected else False,
         "reserved_at_kst": "",
-        "criteria": "sharpe",  # sharpe | momentum
-        "top_n": 1,  # 추천 포트폴리오 채택 종목 수 (기본 1개 종목 100주)
+        "criteria": "sharpe",
+        "top_n": 1,
         "weights": {"w1": 0.5, "w5": 0.3, "w20": 0.2},
         "last_auto_traded_us_date": "",
         "default_100_migrated": True,
     }
 
     need_save_migration = False
-    if os.path.exists(CONFIG_PATH):
+    if os.path.exists(cfg_path):
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(cfg_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                # 이전 1주 디폴트 설정을 100주 디폴트로 1회 자동 마이그레이션
-                if not saved.get("default_100_migrated"):
+                if uid == "admin" and not saved.get("default_100_migrated"):
                     if int(saved.get("order_qty") or 1) == 1:
                         saved["order_qty"] = 100
                     saved["default_100_migrated"] = True
@@ -183,24 +261,48 @@ def get_kis_etf_us_config() -> Dict[str, Any]:
                     need_save_migration = True
                 default_cfg.update(saved)
         except Exception as e:
-            print(f"[KIS_ETF_US] 설정 로드 경고: {e}")
-    else:
+            print(f"[KIS_ETF_US] 설정 로드 경고 ({uid}): {e}")
+    elif uid == "admin":
         need_save_migration = True
 
-    if need_save_migration:
+    # 일반회원은 DB(user_trading_accounts)의 계좌 연결 여부를 최우선으로 동기화 (관리자 계좌 노출 원천 차단)
+    if uid != "admin":
+        default_cfg["user_id"] = uid
+        default_cfg["is_connected"] = is_connected
+        default_cfg["broker_code"] = broker_code
+        default_cfg["broker_name"] = broker_name
+        default_cfg["account_nickname"] = account_nickname
+        if not is_connected:
+            default_cfg["cano"] = ""
+            default_cfg["acnt_prdt_cd"] = "01"
+            default_cfg["auto_trade_enabled"] = False
+            default_cfg["reservation_active"] = False
+        else:
+            if user_acc.get("account_no"):
+                default_cfg["cano"] = str(user_acc["account_no"])
+                default_cfg["acnt_prdt_cd"] = str(user_acc.get("acnt_prdt_cd") or "01")
+            if user_acc.get("account_mode"):
+                default_cfg["mode"] = str(user_acc["account_mode"]).upper()
+    else:
+        default_cfg["user_id"] = "admin"
+        default_cfg["is_connected"] = True
+        default_cfg["broker_code"] = broker_code
+        default_cfg["broker_name"] = broker_name
+        default_cfg["account_nickname"] = account_nickname
+
+    if need_save_migration and uid == "admin":
         try:
             _init_etf_kis_tables()
             conn = sqlite3.connect(DB_PATH, timeout=30.0)
             c = conn.cursor()
-            c.execute("UPDATE etf_us_kis_holdings SET qty = 100 WHERE qty = 1")
+            c.execute("UPDATE etf_us_kis_holdings SET qty = 100 WHERE user_id = 'admin' AND qty = 1")
             conn.commit()
             conn.close()
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            with open(cfg_path, "w", encoding="utf-8") as f:
                 json.dump(default_cfg, f, ensure_ascii=False, indent=2)
         except Exception as mig_err:
             print(f"[KIS_ETF_US] 100주 디폴트 마이그레이션 참고: {mig_err}")
 
-    # 유효성 보정 (디폴트 100주 보장, 1~100,000주 입력 허용)
     try:
         default_cfg["order_qty"] = max(1, min(100000, int(default_cfg.get("order_qty") or 100)))
     except Exception:
@@ -211,8 +313,17 @@ def get_kis_etf_us_config() -> Dict[str, Any]:
         mode_up = "PAPER"
     default_cfg["mode"] = mode_up
     default_cfg["is_mock"] = mode_up != "LIVE"
-    default_cfg["account_display"] = f"{default_cfg['cano']}-{default_cfg['acnt_prdt_cd']}"
-    default_cfg["reservation_active"] = bool(default_cfg.get("reservation_active", default_cfg.get("auto_trade_enabled", True)))
+
+    if default_cfg["is_connected"] and default_cfg.get("cano"):
+        default_cfg["account_display"] = f"{default_cfg['cano']}-{default_cfg['acnt_prdt_cd']}"
+    else:
+        default_cfg["account_display"] = "미연결 (본인 증권사 계좌 등록 필요)"
+
+    default_cfg["reservation_active"] = (
+        bool(default_cfg.get("reservation_active", default_cfg.get("auto_trade_enabled", True)))
+        if default_cfg["is_connected"]
+        else False
+    )
 
     ord_dvsn = str(default_cfg.get("ord_dvsn", "33"))
     if ord_dvsn == "33":
@@ -225,14 +336,17 @@ def get_kis_etf_us_config() -> Dict[str, Any]:
     return default_cfg
 
 
-def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = get_kis_etf_us_config()
+def update_kis_etf_us_config(updates: Dict[str, Any], user_id: str = "admin") -> Dict[str, Any]:
+    uid = _normalize_uid(user_id)
+    cfg_path = _get_user_config_path(uid)
+    cfg = get_kis_etf_us_config(user_id=uid)
+
     if "mode" in updates and str(updates["mode"]).upper() in ("PAPER", "LIVE"):
         cfg["mode"] = str(updates["mode"]).upper()
     if "cano" in updates and str(updates["cano"]).strip():
-        cfg["cano"] = str(updates["cano"]).strip()[:8]
+        cfg["cano"] = str(updates["cano"]).strip()[:14]
     if "acnt_prdt_cd" in updates and str(updates["acnt_prdt_cd"]).strip():
-        cfg["acnt_prdt_cd"] = str(updates["acnt_prdt_cd"]).strip()[:2]
+        cfg["acnt_prdt_cd"] = str(updates["acnt_prdt_cd"]).strip()[:4]
     if "order_qty" in updates and updates["order_qty"] is not None:
         cfg["order_qty"] = max(1, min(100000, int(updates["order_qty"])))
     if "ord_dvsn" in updates and str(updates["ord_dvsn"]) in ("33", "34", "00"):
@@ -260,6 +374,27 @@ def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         cfg["last_auto_traded_us_date"] = str(updates["last_auto_traded_us_date"])
     cfg["default_100_migrated"] = True
 
+    # DB(user_trading_accounts)에도 동기화
+    try:
+        db_sync: Dict[str, Any] = {
+            "etf_order_qty": cfg["order_qty"],
+            "etf_auto_trade": cfg["auto_trade_enabled"],
+            "account_mode": cfg["mode"],
+        }
+        if "broker_code" in updates:
+            db_sync["broker_code"] = updates["broker_code"]
+        if "account_nickname" in updates:
+            db_sync["account_nickname"] = updates["account_nickname"]
+        if "cano" in updates and str(updates["cano"]).strip():
+            db_sync["account_no"] = f"{cfg['cano']}-{cfg['acnt_prdt_cd']}"
+        if "app_key" in updates:
+            db_sync["app_key"] = updates["app_key"]
+        if "app_secret" in updates:
+            db_sync["app_secret"] = updates["app_secret"]
+        _user_db.save_user_trading_account(uid, db_sync)
+    except Exception as e:
+        print(f"[KIS_ETF_US] user_trading_accounts 동기화 참고 ({uid}): {e}")
+
     save_keys = [
         "mode",
         "cano",
@@ -276,32 +411,52 @@ def update_kis_etf_us_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         "default_100_migrated",
     ]
     to_save = {k: cfg[k] for k in save_keys if k in cfg}
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(to_save, f, ensure_ascii=False, indent=2)
 
-    return get_kis_etf_us_config()
+    return get_kis_etf_us_config(user_id=uid)
 
 
-def _get_kis_client(is_mock: bool = True, cano: str = "", acnt_prdt_cd: str = "01") -> Optional[KISApiClient]:
-    global _SHARED_US_KIS_CLIENT
-    app_key = os.environ.get("KIS_API_KEY", "PS7qebWyCKOenh2K32vrFUzuFLNguRPtJad2").strip()
-    app_secret = os.environ.get(
-        "KIS_APP_SECRET",
-        "X4uheemKo6gRCwa6aZjCVcanJlok52HJCLi7yXpAyGMIYZV9ueUcuXT0HKftn4Sx64fdN+/pSOJEiQzei0oi6eM7MpzOYpXIvp2lUqftn60497mGsWaNh5Noe3M4lxrV4qfJ9wChBIKoiyOshWPi2pNFdossVKkP6k80I1GhPXLDN7GJmsQ=",
-    ).strip()
-    acc_str = f"{cano}-{acnt_prdt_cd}" if cano else os.environ.get("KIS_ACCOUNT_NO", "44790516-01").strip()
+def _get_kis_client(
+    is_mock: bool = True,
+    cano: str = "",
+    acnt_prdt_cd: str = "01",
+    user_id: str = "admin",
+) -> Optional[KISApiClient]:
+    uid = _normalize_uid(user_id)
+    user_acc = _user_db.get_user_trading_account(uid, include_secrets=True)
+
+    if uid == "admin":
+        app_key = (user_acc.get("app_key") or os.environ.get("KIS_API_KEY", "PS7qebWyCKOenh2K32vrFUzuFLNguRPtJad2")).strip()
+        app_secret = (
+            user_acc.get("app_secret")
+            or os.environ.get(
+                "KIS_APP_SECRET",
+                "X4uheemKo6gRCwa6aZjCVcanJlok52HJCLi7yXpAyGMIYZV9ueUcuXT0HKftn4Sx64fdN+/pSOJEiQzei0oi6eM7MpzOYpXIvp2lUqftn60497mGsWaNh5Noe3M4lxrV4qfJ9wChBIKoiyOshWPi2pNFdossVKkP6k80I1GhPXLDN7GJmsQ=",
+            )
+        ).strip()
+        acc_str = f"{cano}-{acnt_prdt_cd}" if cano else os.environ.get("KIS_ACCOUNT_NO", "44790516-01").strip()
+    else:
+        # 일반회원은 본인이 직접 한국투자증권(KIS) AppKey/AppSecret을 등록한 경우에만 KIS 브로커 API 호출 (관리자 API Key 절대 사용 금지)
+        if not user_acc.get("is_connected") or user_acc.get("broker_code") != "KIS":
+            return None
+        app_key = str(user_acc.get("app_key") or "").strip()
+        app_secret = str(user_acc.get("app_secret") or "").strip()
+        if not app_key or not app_secret or not cano:
+            return None
+        acc_str = f"{cano}-{acnt_prdt_cd}"
+
+    cache_key = f"{uid}:{is_mock}:{acc_str}:{app_key[:8]}"
     with _SHARED_LOCK:
-        if (
-            _SHARED_US_KIS_CLIENT is None
-            or _SHARED_US_KIS_CLIENT.is_mock != is_mock
-            or _SHARED_US_KIS_CLIENT.cano != acc_str.split("-")[0]
-        ):
+        client = _SHARED_US_KIS_CLIENTS.get(cache_key)
+        if client is None:
             try:
-                _SHARED_US_KIS_CLIENT = KISApiClient(app_key, app_secret, acc_str, is_mock=is_mock)
+                client = KISApiClient(app_key, app_secret, acc_str, is_mock=is_mock)
+                _SHARED_US_KIS_CLIENTS[cache_key] = client
             except Exception as e:
-                print(f"[KIS_ETF_US] KISApiClient 초기화 예외: {e}")
+                print(f"[KIS_ETF_US] KISApiClient 초기화 예외 ({uid}): {e}")
                 return None
-        return _SHARED_US_KIS_CLIENT
+        return client
 
 
 def get_us_etf_closing_or_live_price(ticker: str) -> float:
@@ -349,9 +504,11 @@ def get_current_etf_signal(
     w1: Optional[float] = None,
     w5: Optional[float] = None,
     w20: Optional[float] = None,
+    user_id: str = "admin",
 ) -> Dict[str, Any]:
     """현재 ETF 투자전략 설정 기준 추천 타겟 ETF(들)와 스코어 정보를 반환합니다."""
-    cfg = get_kis_etf_us_config()
+    uid = _normalize_uid(user_id)
+    cfg = get_kis_etf_us_config(user_id=uid)
     use_criteria = criteria or cfg.get("criteria", "sharpe")
     use_top_n = top_n if top_n is not None else int(cfg.get("top_n", 1))
     w_cfg = cfg.get("weights", {"w1": 0.5, "w5": 0.3, "w20": 0.2})
@@ -405,15 +562,61 @@ def inquire_kis_etf_us_account(
     w1: Optional[float] = None,
     w5: Optional[float] = None,
     w20: Optional[float] = None,
+    user_id: str = "admin",
 ) -> Dict[str, Any]:
     """
-    한투증권(KIS) 해외주식 모의계좌(VTTS3012R)/실전계좌(TTTS3012R) 잔고 및
-    내장 미국 ETF 모의계좌 원장 보유 현황, 당일 장마감 교체 시그널 여부를 통합 조회합니다.
+    회원별(user_id) 증권사 해외주식 계좌 잔고 및 내장 원장 보유 현황, 당일 장마감 교체 시그널 여부를 통합 조회합니다.
+    - 일반회원(user_id != 'admin')이 아직 본인 계좌를 연결하지 않은 경우(is_connected == False):
+      관리자의 한투 모의계좌(44790516-01) 및 보유/주문 내역을 일절 노출하지 않고 빈 상태를 반환합니다.
     """
     _init_etf_kis_tables()
-    cfg = get_kis_etf_us_config()
+    uid = _normalize_uid(user_id)
+    cfg = get_kis_etf_us_config(user_id=uid)
     is_mock = cfg["is_mock"]
-    client = _get_kis_client(is_mock=is_mock, cano=cfg["cano"], acnt_prdt_cd=cfg["acnt_prdt_cd"])
+    sess = get_us_market_session_info()
+    signal = get_current_etf_signal(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid)
+    default_qty = int(cfg["order_qty"])
+    target_disp = signal["target_display"]
+
+    # 일반회원이 아직 본인 증권사 계좌를 등록/연결하지 않은 경우 -> 관리자 계좌 및 잔고 절대 비노출
+    if uid != "admin" and not cfg.get("is_connected", False):
+        return {
+            "config": cfg,
+            "market_session": sess,
+            "reservation_summary": {
+                "active": False,
+                "reserved_qty": default_qty,
+                "reserved_at_kst": "계좌 미연결",
+                "cutoff_time_et": "15:50 ET (미국장 마감 10분 전 최종 신호 확정)",
+                "cutoff_time_kst": sess.get("auto_close_order_time_kst", "05:50 KST (15:50 ET)"),
+                "current_holding_display": "계좌 미연결",
+                "preview_target_display": f"{target_disp} ({default_qty}주)",
+                "execution_rule": "본인 증권사 계좌를 연결하면 미국장 마감 10분 전(15:50 ET) 최종 신호로 개별 자동매매가 가동됩니다.",
+            },
+            "broker_connected": False,
+            "broker_code": "",
+            "broker_message": "본인 증권사 계좌 미연결 상태입니다. [내 증권사 계좌 연결]에서 본인 계좌를 등록해주세요.",
+            "holdings": [],
+            "held_tickers": [],
+            "HeldDisplay": "계좌 미연결",
+            "total_eval_usd": 0.0,
+            "total_pnl_usd": 0.0,
+            "signal": signal,
+            "rotation_needed": False,
+            "signal_status_label": "🔒 본인 증권사 계좌 미연결 — 상단 [내 증권사 계좌 연결]에서 개별 계좌를 등록해 운용하세요.",
+            "sell_plan": [],
+            "buy_plan": [],
+            "recent_orders": [],
+            "api_spec_info": {
+                "endpoint": "/uapi/overseas-stock/v1/trading/order",
+                "tr_id_mock": "개별 증권사 계좌 연동 대기",
+                "tr_id_live": "개별 증권사 실전/모의계좌 독립 운용",
+                "closing_system": "미국 정규장 마감 10분 전(15:50 ET) 최종 신호 확정 → 종가체결 자동매매",
+                "default_qty": f"{default_qty}주 (디폴트 100주 · 직접 입력 가능)",
+            },
+        }
+
+    client = _get_kis_client(is_mock=is_mock, cano=cfg["cano"], acnt_prdt_cd=cfg["acnt_prdt_cd"], user_id=uid)
 
     broker_connected = False
     broker_code = ""
@@ -469,13 +672,19 @@ def inquire_kis_etf_us_account(
             except Exception as e:
                 broker_message = f"KIS 해외주식 잔고조회 통신 참고: {e}"
 
-    # 2. 내장 모의계좌 보유 원장 조회 및 최신 USD 가격 평가
+    # 2. 해당 회원(user_id)의 보유 원장 및 체결 로그 조회
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM etf_us_kis_holdings WHERE qty > 0 ORDER BY ticker ASC")
+    c.execute(
+        "SELECT * FROM etf_us_kis_holdings WHERE user_id = ? AND qty > 0 ORDER BY ticker ASC",
+        (uid,),
+    )
     local_rows = [dict(r) for r in c.fetchall()]
-    c.execute("SELECT * FROM etf_us_kis_order_log ORDER BY id DESC LIMIT 20")
+    c.execute(
+        "SELECT * FROM etf_us_kis_order_log WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+        (uid,),
+    )
     order_logs = [dict(r) for r in c.fetchall()]
     conn.close()
 
@@ -507,9 +716,7 @@ def inquire_kis_etf_us_account(
     held_tickers = [h["ticker"] for h in effective_holdings if h["qty"] > 0]
 
     # 3. 현재 전략 추천 시그널 및 교체 필요 여부(Delta) 계산
-    signal = get_current_etf_signal(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
     target_tickers = signal["target_tickers"]
-    default_qty = int(cfg["order_qty"])
 
     sell_plan: List[Dict[str, Any]] = []
     buy_plan: List[Dict[str, Any]] = []
@@ -573,9 +780,7 @@ def inquire_kis_etf_us_account(
 
     total_eval_usd = round(sum(h["eval_amount_usd"] for h in effective_holdings), 2)
     total_pnl_usd = round(sum(h["eval_pnl_usd"] for h in effective_holdings), 2)
-    sess = get_us_market_session_info()
     held_disp = ", ".join([f"{h['ticker']}({h['qty']}주)" for h in effective_holdings]) if effective_holdings else "미보유 (CASH)"
-    target_disp = signal["target_display"]
 
     reservation_summary = {
         "active": bool(cfg.get("auto_trade_enabled", True)),
@@ -627,14 +832,20 @@ def _submit_single_kis_us_order(
     prev_tickers_str: str = "",
     target_tickers_str: str = "",
     reason: str = "미국 ETF 종가체결 자동매매",
+    user_id: str = "admin",
 ) -> Dict[str, Any]:
     """
-    단일 미국 ETF 종목에 대해 KIS 해외주식 모의/실전 주문을 전송하고 내장 모의원장을 동기화합니다.
-    - 모의투자(VTTT1002U/VTTT1001U)에서 MOC(33) 코드가 제한될 경우 자동으로 종가/현재가 기준 체결형 지정가(00)로 재전송하여
-      한투 모의계좌에서도 100% 정상 접수되도록 처리합니다.
+    단일 미국 ETF 종목에 대해 회원별(user_id) 증권사 해외주식 주문을 전송하고 회원 전용 원장을 동기화합니다.
     """
     _init_etf_kis_tables()
-    cfg = get_kis_etf_us_config()
+    uid = _normalize_uid(user_id)
+    cfg = get_kis_etf_us_config(user_id=uid)
+    if uid != "admin" and not cfg.get("is_connected", False):
+        return {
+            "success": False,
+            "error": "본인 증권사 계좌가 아직 연결되지 않았습니다. 먼저 [내 증권사 계좌 연결]에서 계좌를 등록해주세요.",
+        }
+
     is_mock = cfg["is_mock"]
     clean_t = str(ticker).upper().strip()
     is_buy = str(side).upper() == "BUY"
@@ -645,28 +856,25 @@ def _submit_single_kis_us_order(
     fallback_excg = ex_info.get("fallback_excg", "NYSE")
 
     exec_price_usd = get_us_etf_closing_or_live_price(clean_t)
-    # 종가/동시체결 보장을 위한 유리한 지정가(매수 +0.5%, 매도 -0.5%) 산출
     marketable_limit_usd = round(exec_price_usd * (1.005 if is_buy else 0.995), 2)
 
-    client = _get_kis_client(is_mock=is_mock, cano=cfg["cano"], acnt_prdt_cd=cfg["acnt_prdt_cd"])
+    client = _get_kis_client(is_mock=is_mock, cano=cfg["cano"], acnt_prdt_cd=cfg["acnt_prdt_cd"], user_id=uid)
     tr_id = ("VTTT1002U" if is_buy else "VTTT1001U") if is_mock else ("TTTT1002U" if is_buy else "TTTT1006U")
 
     now_kst = _get_kst_now()
     now_kst_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
     us_date_str = _get_us_et_now().strftime("%Y-%m-%d")
+    broker_label = cfg.get("broker_name") or "한국투자증권"
 
     broker_status = "PAPER_MOC_FILLED"
     broker_order_no = f"USMOC-{now_kst.strftime('%H%M%S')}"
-    broker_msg = f"한투 모의계좌 미국장 종가체결(${exec_price_usd:.2f}) 처리 완료"
+    broker_msg = f"{broker_label}({cfg['account_display']}) 미국장 종가체결(${exec_price_usd:.2f}) 처리 완료"
     used_ord_dvsn = ord_dvsn
 
     if client is not None:
         url = f"{client.base_url}/uapi/overseas-stock/v1/trading/order"
-        # 시도 순서:
-        # 1) 사용자가 설정한 주문유형(기본 33 MOC 종가체결, 모의투자는 00 지정가도 함께 시도)
         attempt_list = []
         if is_mock:
-            # KIS 모의투자(VTTT1002U/1001U)는 00(지정가)만 허용하는 경우가 많으므로 33 시도 후 거절 시 즉시 00(종가동시체결용 지정가)으로 폴백
             if ord_dvsn in ("33", "34"):
                 attempt_list.append((order_excg, ord_dvsn, "0"))
             attempt_list.append((order_excg, "00", f"{exec_price_usd:.2f}"))
@@ -676,7 +884,6 @@ def _submit_single_kis_us_order(
             unit_p = "0" if ord_dvsn == "33" else f"{marketable_limit_usd:.2f}"
             attempt_list.append((order_excg, ord_dvsn, unit_p))
             if ord_dvsn == "33":
-                # MOC 마감시간 이후에는 체결형 지정가(00)로 폴백
                 attempt_list.append((order_excg, "00", f"{marketable_limit_usd:.2f}"))
 
         last_err_cd = ""
@@ -704,7 +911,7 @@ def _submit_single_kis_us_order(
                         used_ord_dvsn = dvsn_try
                         order_excg = excg_try
                         broker_msg = (
-                            f"KIS {'모의' if is_mock else '실전'}서버({tr_id}) 미국장 종가주문 접수 완료 "
+                            f"{broker_label} {'모의' if is_mock else '실전'}서버({tr_id}) 미국장 종가주문 접수 완료 "
                             f"[{excg_try}:{clean_t} {qty}주 @ ${exec_price_usd:.2f}] ({js.get('msg1', '')})"
                         )
                         break
@@ -718,18 +925,21 @@ def _submit_single_kis_us_order(
             if not is_mock:
                 return {
                     "success": False,
-                    "error": f"[KIS 해외주식 실전주문 거부: {last_err_cd}] {last_err_msg}",
+                    "error": f"[{broker_label} 해외주식 실전주문 거부: {last_err_cd}] {last_err_msg}",
                 }
             broker_status = f"PAPER_MOC_FILLED ({last_err_cd or 'SIM'})"
             broker_msg = (
-                f"KIS 모의계좌({cfg['account_display']}) 연동 [{last_err_msg or '미국장 외 시간/모의원장 처리'}] "
-                f"→ 미국장 종가체결 시스템(${exec_price_usd:.2f})으로 {clean_t} {qty}주 모의계좌 체결 완료"
+                f"{broker_label} 계좌({cfg['account_display']}) 연동 [{last_err_msg or '미국장 외 시간/모의원장 처리'}] "
+                f"→ 미국장 종가체결 시스템(${exec_price_usd:.2f})으로 {clean_t} {qty}주 체결 완료"
             )
 
-    # 내장 모의계좌 보유 원장(etf_us_kis_holdings) 업데이트
+    # 회원별 보유 원장(etf_us_kis_holdings) 업데이트
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
-    c.execute("SELECT qty, avg_buy_price_usd FROM etf_us_kis_holdings WHERE ticker = ?", (clean_t,))
+    c.execute(
+        "SELECT qty, avg_buy_price_usd FROM etf_us_kis_holdings WHERE user_id = ? AND ticker = ?",
+        (uid, clean_t),
+    )
     row = c.fetchone()
     old_qty = int(row[0]) if row else 0
     old_avg = float(row[1]) if row else 0.0
@@ -740,10 +950,11 @@ def _submit_single_kis_us_order(
         c.execute(
             """
             INSERT OR REPLACE INTO etf_us_kis_holdings
-            (ticker, name, exchange_cd, qty, avg_buy_price_usd, curr_price_usd, updated_at_kst)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (user_id, ticker, name, exchange_cd, qty, avg_buy_price_usd, curr_price_usd, updated_at_kst)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                uid,
                 clean_t,
                 ETF_TARGETS.get(clean_t, clean_t),
                 order_excg,
@@ -756,15 +967,15 @@ def _submit_single_kis_us_order(
     else:
         new_qty = max(0, old_qty - qty)
         if new_qty == 0:
-            c.execute("DELETE FROM etf_us_kis_holdings WHERE ticker = ?", (clean_t,))
+            c.execute("DELETE FROM etf_us_kis_holdings WHERE user_id = ? AND ticker = ?", (uid, clean_t))
         else:
             c.execute(
                 """
                 UPDATE etf_us_kis_holdings
                 SET qty = ?, curr_price_usd = ?, updated_at_kst = ?
-                WHERE ticker = ?
+                WHERE user_id = ? AND ticker = ?
                 """,
-                (new_qty, exec_price_usd, now_kst_str, clean_t),
+                (new_qty, exec_price_usd, now_kst_str, uid, clean_t),
             )
 
     ord_dvsn_label = (
@@ -777,13 +988,14 @@ def _submit_single_kis_us_order(
     c.execute(
         """
         INSERT INTO etf_us_kis_order_log (
-            executed_at_kst, us_trading_date, mode, account_no, ticker, exchange_cd,
+            user_id, executed_at_kst, us_trading_date, mode, account_no, ticker, exchange_cd,
             side, qty, ord_dvsn, ord_dvsn_label, exec_price_usd,
             prev_holding_tickers, target_holding_tickers,
             broker_status, broker_order_no, broker_msg, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            uid,
             now_kst_str,
             us_date_str,
             cfg["mode"],
@@ -808,6 +1020,7 @@ def _submit_single_kis_us_order(
 
     return {
         "success": True,
+        "user_id": uid,
         "executed_at_kst": now_kst_str,
         "us_trading_date": us_date_str,
         "mode": cfg["mode"],
@@ -839,34 +1052,38 @@ def execute_etf_us_rebalance_or_order(
     w20: Optional[float] = None,
     force_rebalance: bool = False,
     reason: str = "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
+    user_id: str = "admin",
 ) -> Dict[str, Any]:
     """
-    ETF 투자전략의 미국장 마감 10분 전(15:50 ET) 최종 신호 기준 예약/종가체결 주문을 실행합니다.
-    - action == "RESERVE_US_CLOSE":
-      사용자가 입력한 주수(디폴트 100주)로 다가오는 미국 정규장 마감 10분 전(15:50 ET) 최종 신호에 맞춰
-      [기존 보유 ETF 전량 매도(SELL) + 신규 1위 ETF 지정 주수 매수(BUY)] 예약 자동주문을 등록합니다.
-      (만약 현재 시각이 미국장 15:50~16:00 ET 마감 동시호가 구간이면 즉시 집행)
-    - action == "AUTO_ROTATE":
-      현재 모의계좌 보유 ETF와 추천 Top N ETF를 비교하여,
-      1) 편출된 기존 보유 ETF 전량 종가 매도(SELL)
-      2) 새로 편입된 추천 ETF 디폴트 100주(설정 주수) 동시 종가 매수(BUY)
-    - action == "LIQUIDATE_ALL":
-      현재 보유 중인 모든 미국 ETF를 전량 종가 매도하여 CASH(현금)로 전환
-    - action == "MANUAL_ORDER":
-      특정 ETF(manual_ticker)를 지정 수량(기본 100주) 종가 매수/매도
+    회원별(user_id) ETF 투자전략의 미국장 마감 10분 전(15:50 ET) 최종 신호 기준 예약/종가체결 주문을 실행합니다.
     """
     _init_etf_kis_tables()
+    uid = _normalize_uid(user_id)
+    cfg = get_kis_etf_us_config(user_id=uid)
 
-    # 사용자가 입력한 주수(order_qty 또는 manual_qty)가 전달되면 설정에 즉시 반영
+    if uid != "admin" and not cfg.get("is_connected", False):
+        return {
+            "success": False,
+            "skipped": True,
+            "message": "본인 증권사 계좌가 아직 연결되지 않았습니다. 상단 [내 증권사 계좌 연결]에서 본인 계좌를 먼저 등록해주세요.",
+            "executed_orders": [],
+            "account_status": inquire_kis_etf_us_account(
+                criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+            ),
+        }
+
     effective_input_qty = order_qty if order_qty is not None else manual_qty
     if effective_input_qty is not None and int(effective_input_qty) > 0:
-        update_kis_etf_us_config({"order_qty": int(effective_input_qty)})
+        update_kis_etf_us_config({"order_qty": int(effective_input_qty)}, user_id=uid)
 
-    cfg = get_kis_etf_us_config()
+    cfg = get_kis_etf_us_config(user_id=uid)
     default_qty = int(cfg["order_qty"])
     ord_dvsn = str(cfg.get("ord_dvsn", "33"))
+    broker_label = cfg.get("broker_name") or "한국투자증권"
 
-    status_before = inquire_kis_etf_us_account(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+    status_before = inquire_kis_etf_us_account(
+        criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+    )
     prev_tickers = status_before.get("held_tickers", [])
     prev_str = ", ".join(prev_tickers) if prev_tickers else "CASH"
     target_str = status_before["signal"]["target_display"]
@@ -891,9 +1108,8 @@ def execute_etf_us_rebalance_or_order(
             cfg_updates["top_n"] = int(top_n)
         if w1 is not None and w5 is not None and w20 is not None:
             cfg_updates["weights"] = {"w1": w1, "w5": w5, "w20": w20}
-        update_kis_etf_us_config(cfg_updates)
+        update_kis_etf_us_config(cfg_updates, user_id=uid)
 
-        # 현재 만약 미국 정규장 마감 10분 전(15:50~16:00 ET) 구간이라면 즉시 체결까지 수행
         if et_now.weekday() < 5 and 1550 <= hhmm_et <= 1600:
             return execute_etf_us_rebalance_or_order(
                 action="AUTO_ROTATE",
@@ -905,9 +1121,9 @@ def execute_etf_us_rebalance_or_order(
                 w20=w20,
                 force_rebalance=force_rebalance,
                 reason=f"미국장 마감 10분 전({et_now.strftime('%H:%M ET')}) 최종 신호 확정 즉시 집행 ({default_qty}주)",
+                user_id=uid,
             )
 
-        # 장외 시간 또는 15:50 ET 이전이면 예약 원장에 기록하고 15:50 ET에 자동 실행되도록 예약 완료 응답
         est_price = 0.0
         if status_before["signal"].get("target_details"):
             est_price = float(status_before["signal"]["target_details"][0].get("current_price_usd") or 0.0)
@@ -916,19 +1132,20 @@ def execute_etf_us_rebalance_or_order(
         c = conn.cursor()
         reserve_order_no = f"RSV1550-{now_kst.strftime('%H%M%S')}"
         reserve_msg = (
-            f"[예약 자동주문 등록 완료] 미국장 마감 10분 전(15:50 ET / {status_before['market_session']['auto_close_order_time_kst']}) "
+            f"[{broker_label}({cfg['account_display']}) 예약 자동주문 등록 완료] 미국장 마감 10분 전(15:50 ET / {status_before['market_session']['auto_close_order_time_kst']}) "
             f"최종 신호 확정 시 [기존 보유({prev_str}) 전량 매도 + 신규 1위 ETF(현재기준 {target_str}) {default_qty}주 종가매수] 자동 실행"
         )
         c.execute(
             """
             INSERT INTO etf_us_kis_order_log (
-                executed_at_kst, us_trading_date, mode, account_no, ticker, exchange_cd,
+                user_id, executed_at_kst, us_trading_date, mode, account_no, ticker, exchange_cd,
                 side, qty, ord_dvsn, ord_dvsn_label, exec_price_usd,
                 prev_holding_tickers, target_holding_tickers,
                 broker_status, broker_order_no, broker_msg, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                uid,
                 now_kst_str,
                 us_date_str,
                 cfg["mode"],
@@ -951,7 +1168,9 @@ def execute_etf_us_rebalance_or_order(
         conn.commit()
         conn.close()
 
-        status_after_rsv = inquire_kis_etf_us_account(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+        status_after_rsv = inquire_kis_etf_us_account(
+            criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+        )
         return {
             "success": True,
             "reserved": True,
@@ -974,6 +1193,7 @@ def execute_etf_us_rebalance_or_order(
             prev_tickers_str=prev_str,
             target_tickers_str=manual_ticker if use_side == "BUY" else "CASH",
             reason=reason or f"수동 지정 {manual_ticker} {use_qty}주 종가체결 {use_side}",
+            user_id=uid,
         )
         if not res.get("success"):
             return {"success": False, "message": res.get("error", "주문 실패")}
@@ -999,11 +1219,11 @@ def execute_etf_us_rebalance_or_order(
                     prev_tickers_str=prev_str,
                     target_tickers_str="CASH",
                     reason=reason or f"보유 ETF({h['ticker']}) 전량 종가 청산 (CASH 전환)",
+                    user_id=uid,
                 )
                 executed_orders.append(res)
 
     else:
-        # AUTO_ROTATE: 미국시장 종가체결 동시 매도·매수 교체 실행
         sell_plan = status_before.get("sell_plan", [])
         buy_plan = status_before.get("buy_plan", [])
 
@@ -1016,7 +1236,6 @@ def execute_etf_us_rebalance_or_order(
                 "account_status": status_before,
             }
 
-        # 1단계: 편출 종목 먼저 종가 매도(SELL) 접수
         for s_item in sell_plan:
             res = _submit_single_kis_us_order(
                 ticker=s_item["ticker"],
@@ -1026,10 +1245,10 @@ def execute_etf_us_rebalance_or_order(
                 prev_tickers_str=prev_str,
                 target_tickers_str=target_str,
                 reason=s_item.get("reason") or reason,
+                user_id=uid,
             )
             executed_orders.append(res)
 
-        # 2단계: 신규 편입 타겟 ETF 디폴트 100주(설정 주수) 동시 종가 매수(BUY) 접수
         for b_item in buy_plan:
             res = _submit_single_kis_us_order(
                 ticker=b_item["ticker"],
@@ -1039,13 +1258,16 @@ def execute_etf_us_rebalance_or_order(
                 prev_tickers_str=prev_str,
                 target_tickers_str=target_str,
                 reason=b_item.get("reason") or reason,
+                user_id=uid,
             )
             executed_orders.append(res)
 
     us_today = _get_us_et_now().strftime("%Y-%m-%d")
-    update_kis_etf_us_config({"last_auto_traded_us_date": us_today})
+    update_kis_etf_us_config({"last_auto_traded_us_date": us_today}, user_id=uid)
 
-    status_after = inquire_kis_etf_us_account(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+    status_after = inquire_kis_etf_us_account(
+        criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+    )
     summary_text = (
         " / ".join([f"{o['side']} {o['ticker']} {o['qty']}주(@${o['exec_price_usd']:.2f})" for o in executed_orders])
         if executed_orders
@@ -1054,21 +1276,65 @@ def execute_etf_us_rebalance_or_order(
     return {
         "success": True,
         "skipped": False,
-        "message": f"한투 모의계좌 미국장 종가체결 주문 완료: {summary_text}",
+        "message": f"{broker_label}({cfg['account_display']}) 미국장 종가체결 주문 완료: {summary_text}",
         "executed_orders": executed_orders,
         "account_status": status_after,
     }
 
 
-def run_scheduled_us_market_close_etf_rotation() -> Dict[str, Any]:
+def get_all_users_etf_us_summary() -> Dict[str, Dict[str, Any]]:
+    """관리자(Admin) 전용: 모든 회원(user_id)의 미국 ETF 보유 현황 및 최근 주문내역 요약을 반환합니다."""
+    _init_etf_kis_tables()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM etf_us_kis_holdings WHERE qty > 0 ORDER BY user_id ASC, ticker ASC")
+    h_rows = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM etf_us_kis_order_log ORDER BY id DESC LIMIT 100")
+    o_rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    by_user: Dict[str, Dict[str, Any]] = {}
+    for hr in h_rows:
+        u = hr.get("user_id") or "admin"
+        if u not in by_user:
+            by_user[u] = {"holdings": [], "recent_orders": [], "total_eval_usd": 0.0}
+        cur_p = float(hr.get("curr_price_usd") or hr.get("avg_buy_price_usd") or 0.0)
+        qty = int(hr.get("qty") or 0)
+        eval_usd = round(cur_p * qty, 2)
+        by_user[u]["holdings"].append(
+            {
+                "ticker": hr["ticker"],
+                "name": hr.get("name") or hr["ticker"],
+                "qty": qty,
+                "avg_buy_price_usd": round(float(hr.get("avg_buy_price_usd") or 0.0), 2),
+                "curr_price_usd": round(cur_p, 2),
+                "eval_amount_usd": eval_usd,
+                "updated_at_kst": hr.get("updated_at_kst") or "",
+            }
+        )
+        by_user[u]["total_eval_usd"] = round(by_user[u]["total_eval_usd"] + eval_usd, 2)
+
+    for orow in o_rows:
+        u = orow.get("user_id") or "admin"
+        if u not in by_user:
+            by_user[u] = {"holdings": [], "recent_orders": [], "total_eval_usd": 0.0}
+        if len(by_user[u]["recent_orders"]) < 10:
+            by_user[u]["recent_orders"].append(orow)
+
+    return by_user
+
+
+def run_scheduled_us_market_close_etf_rotation(user_id: str = "admin") -> Dict[str, Any]:
     """
     미국 정규장 마감 10분 전(15:50 ET / 한국시간 동절기 05:50 KST, 서머타임 04:50 KST)에
-    1) 장마감 10분 전까지의 최신 미국 ETF 가격을 실시간 동기화(sync_live_etf_prices / update_etf_data)하여 최종 신호를 확정하고,
+    1) 장마감 10분 전까지의 최신 미국 ETF 가격을 실시간 동기화하여 최종 신호를 확정하고,
     2) 교체 시그널 발생 시 [기존 보유 ETF 전량 종가 매도 + 신규 1위 추천 ETF 설정 주수(디폴트 100주) 동시 종가 매수]를 자동 집행합니다.
     """
-    cfg = get_kis_etf_us_config()
-    if not cfg.get("auto_trade_enabled", True):
-        return {"success": True, "skipped": True, "reason": "예약 자동매매 비활성화 상태"}
+    uid = _normalize_uid(user_id)
+    cfg = get_kis_etf_us_config(user_id=uid)
+    if not cfg.get("is_connected", False) or not cfg.get("auto_trade_enabled", True):
+        return {"success": True, "skipped": True, "reason": "예약 자동매매 비활성화 또는 계좌 미연결 상태"}
 
     et_now = _get_us_et_now()
     if et_now.weekday() >= 5:
@@ -1084,6 +1350,7 @@ def run_scheduled_us_market_close_etf_rotation() -> Dict[str, Any]:
         action="AUTO_ROTATE",
         order_qty=int(cfg.get("order_qty", 100)),
         reason=f"미국장 마감 10분 전({et_now.strftime('%Y-%m-%d %H:%M ET')}) 최종 신호 확정 예약 자동주문 집행 ({cfg['order_qty']}주)",
+        user_id=uid,
     )
 
 

@@ -1,13 +1,27 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 
-export default function OrderWindow({ stocks }: { stocks: any[] }) {
+export default function OrderWindow({
+  stocks,
+  userId = 'admin',
+  isAdmin = false,
+  userName = '',
+  onOpenAccountModal,
+}: {
+  stocks: any[];
+  userId?: string;
+  isAdmin?: boolean;
+  userName?: string;
+  onOpenAccountModal?: () => void;
+}) {
+  const effectiveUserId = (userId || 'admin').trim() || 'admin';
+  const [userAccount, setUserAccount] = useState<any>(null);
   const MAX_TOTAL_CAPITAL = 100000000;
 
-  // Default investment amount: 100,000,000 won (최대 1억 원 한도 고정)
+  // Default investment amount: 100,000,000 won (최대 1억 원 한도 고정, 회원별 분리)
   const [totalAmount, setTotalAmount] = useState<number>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('orderTotalAmount');
+      const saved = localStorage.getItem(`orderTotalAmount_${effectiveUserId}`);
       if (saved) {
         const parsed = Number(saved);
         if (!isNaN(parsed) && parsed > 0) return Math.min(MAX_TOTAL_CAPITAL, parsed);
@@ -184,14 +198,14 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      localStorage.setItem('orderTotalAmount', totalAmount.toString());
+      localStorage.setItem(`orderTotalAmount_${effectiveUserId}`, totalAmount.toString());
     }
-  }, [totalAmount]);
+  }, [totalAmount, effectiveUserId]);
 
   // KST(한국 표준시) 기준 오늘 날짜
   const todayStr = new Date(Date.now() + 9 * 3600 * 1000).toISOString().split('T')[0];
 
-  // Local state for tracking bought stocks (Holdings) — 껐다 켜도 즉시 유지되도록 localStorage 초기화
+  // Local state for tracking bought stocks (Holdings) — 회원별 localStorage 격리
   const [holdings, setHoldings] = useState<{
     ticker: string;
     name: string;
@@ -199,9 +213,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     qty: number;
   }[]>(() => {
     if (typeof window !== 'undefined') {
-      const savedDate = localStorage.getItem('saved_holdings_date');
+      const savedDate = localStorage.getItem(`saved_holdings_date_${effectiveUserId}`);
       if (savedDate === todayStr) {
-        const savedData = localStorage.getItem('saved_holdings_data');
+        const savedData = localStorage.getItem(`saved_holdings_data_${effectiveUserId}`);
         if (savedData) {
           try {
             const parsed = JSON.parse(savedData);
@@ -290,9 +304,23 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   }, [chartData, pnlHistory]);
   const [showHoldingsModal, setShowHoldingsModal] = useState(false);
 
+  const fetchUserAccount = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/user/trading-account?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.account) setUserAccount(data.account);
+      }
+    } catch (e) { console.error(e); }
+  }, [effectiveUserId]);
+
   const fetchHoldings = async () => {
     try {
-      const res = await fetch('/api/holdings');
+      const res = await fetch(`/api/holdings?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (!res.ok) {
         console.warn('fetchHoldings returned status:', res.status);
         return;
@@ -302,11 +330,11 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         setHoldings(data);
         if (typeof window !== 'undefined') {
           if (data.length > 0) {
-            localStorage.setItem('saved_holdings_date', todayStr);
-            localStorage.setItem('saved_holdings_data', JSON.stringify(data));
+            localStorage.setItem(`saved_holdings_date_${effectiveUserId}`, todayStr);
+            localStorage.setItem(`saved_holdings_data_${effectiveUserId}`, JSON.stringify(data));
           } else {
-            localStorage.removeItem('saved_holdings_date');
-            localStorage.removeItem('saved_holdings_data');
+            localStorage.removeItem(`saved_holdings_date_${effectiveUserId}`);
+            localStorage.removeItem(`saved_holdings_data_${effectiveUserId}`);
           }
         }
       }
@@ -315,7 +343,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
 
   const fetchLedger = async () => {
     try {
-      const res = await fetch('/api/ledger-history');
+      const res = await fetch(`/api/ledger-history?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (res.ok) {
         const data = await res.json();
         const hist = Array.isArray(data) ? data : [];
@@ -324,7 +354,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     } catch (e) { console.error(e); }
 
     try {
-      const resDetailed = await fetch('/api/detailed-trading-ledger');
+      const resDetailed = await fetch(`/api/detailed-trading-ledger?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (resDetailed.ok) {
         const dataDetailed = await resDetailed.json();
         const rows = Array.isArray(dataDetailed) ? dataDetailed : [];
@@ -337,8 +369,8 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         if (settledSellRows.length > 0 && activeBuyRows.length === 0) {
           setHoldings([]);
           if (typeof window !== 'undefined') {
-            localStorage.removeItem('saved_holdings_date');
-            localStorage.removeItem('saved_holdings_data');
+            localStorage.removeItem(`saved_holdings_date_${effectiveUserId}`);
+            localStorage.removeItem(`saved_holdings_data_${effectiveUserId}`);
           }
         } else if (activeBuyRows.length > 0) {
           setHoldings(prev => {
@@ -351,17 +383,21 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
               currentPrice: Number(r.sell_price) || Number(r.buy_price) || 0,
             }));
             if (typeof window !== 'undefined') {
-              localStorage.setItem('saved_holdings_date', todayStr);
-              localStorage.setItem('saved_holdings_data', JSON.stringify(restored));
+              localStorage.setItem(`saved_holdings_date_${effectiveUserId}`, todayStr);
+              localStorage.setItem(`saved_holdings_data_${effectiveUserId}`, JSON.stringify(restored));
             }
             return restored;
           });
+        } else {
+          setHoldings([]);
         }
       }
     } catch (e) { console.error(e); }
 
     try {
-      const resStatus = await fetch('/api/kis/order-status');
+      const resStatus = await fetch(`/api/kis/order-status?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (resStatus.ok) {
         const statusData = await resStatus.json();
         setReservedSellToday(Boolean(statusData.reserved_close_sell));
@@ -370,7 +406,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     } catch (e) { console.error(e); }
 
     try {
-      const resChart = await fetch('/api/ledger-chart-data');
+      const resChart = await fetch(`/api/ledger-chart-data?user_id=${encodeURIComponent(effectiveUserId)}`, {
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (resChart.ok) {
         const dataChart = await resChart.json();
         setChartData(Array.isArray(dataChart) ? dataChart : []);
@@ -379,14 +417,20 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   };
 
   useEffect(() => {
+    setHoldings([]);
+    setPnlHistory([]);
+    setDetailedLedger([]);
+    setChartData([]);
+    fetchUserAccount();
     fetchHoldings();
     fetchLedger();
     const interval = setInterval(() => {
+      fetchUserAccount();
       fetchHoldings();
       fetchLedger();
     }, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [effectiveUserId, fetchUserAccount]);
 
   // 최초 매수 완료 여부 판별 (최초 매수 후 추가 매수 엄격 제한)
   const alreadyBoughtToday =
@@ -401,9 +445,9 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   useEffect(() => {
     if (holdings.length > 0) {
       let existingSnapshot: Record<string, any> = {};
-      const savedDate = localStorage.getItem('buySnapshot_date');
+      const savedDate = localStorage.getItem(`buySnapshot_date_${effectiveUserId}`);
       if (savedDate === todayStr) {
-        const savedData = localStorage.getItem('buySnapshot_data');
+        const savedData = localStorage.getItem(`buySnapshot_data_${effectiveUserId}`);
         if (savedData) {
           try { existingSnapshot = JSON.parse(savedData); } catch(e) {}
         }
@@ -422,16 +466,12 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         };
       });
       setBuySnapshot(snapshot);
-      localStorage.setItem('buySnapshot_date', todayStr);
-      localStorage.setItem('buySnapshot_data', JSON.stringify(snapshot));
+      localStorage.setItem(`buySnapshot_date_${effectiveUserId}`, todayStr);
+      localStorage.setItem(`buySnapshot_data_${effectiveUserId}`, JSON.stringify(snapshot));
     } else {
-      const savedDate = localStorage.getItem('buySnapshot_date');
-      if (savedDate === todayStr) {
-        const savedData = localStorage.getItem('buySnapshot_data');
-        if (savedData) setBuySnapshot(JSON.parse(savedData));
-      }
+      setBuySnapshot({});
     }
-  }, [holdings, todayStr]);
+  }, [holdings, todayStr, effectiveUserId]);
 
   // 금일 15:30 장마감 종가 청산 완료 원장 레코드
   const todaySettledLedger = useMemo(() => {
@@ -513,7 +553,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         if (qty <= 0) return 0;
 
         try {
-          const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&price=${price}&type=buy&name=${encodeURIComponent(stock.name)}&batch_id=${encodeURIComponent(batchId)}`, { method: 'POST' });
+          const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&price=${price}&type=buy&name=${encodeURIComponent(stock.name)}&batch_id=${encodeURIComponent(batchId)}&user_id=${encodeURIComponent(effectiveUserId)}`, {
+            method: 'POST',
+            headers: { 'x-user-id': effectiveUserId },
+          });
           if (!res.ok) return 0;
           const data = await res.json();
           return data.success ? 1 : 0;
@@ -549,7 +592,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
         } catch(e) {}
       }
       const singleBatchId = `SINGLE_${todayStr}_${Date.now()}`;
-      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${finalPrice}&name=${encodeURIComponent(name)}&batch_id=${encodeURIComponent(singleBatchId)}`, { method: 'POST' });
+      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=buy&price=${finalPrice}&name=${encodeURIComponent(name)}&batch_id=${encodeURIComponent(singleBatchId)}&user_id=${encodeURIComponent(effectiveUserId)}`, {
+        method: 'POST',
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (!res.ok) throw new Error(res.statusText || 'API Error');
       const data = await res.json();
       if (data.success) {
@@ -567,7 +613,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   const handleSellSingle = async (ticker: string, qty: number) => {
     try {
       const cleanTicker = ticker.split(':').pop() || ticker;
-      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=sell`, { method: 'POST' });
+      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=sell&user_id=${encodeURIComponent(effectiveUserId)}`, {
+        method: 'POST',
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (!res.ok) throw new Error(res.statusText || 'API Error');
       const data = await res.json();
       if (data.success) {
@@ -613,7 +662,10 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
     }
 
     try {
-      const res = await fetch(`/api/kis/sell-all?mode=close`, { method: 'POST' });
+      const res = await fetch(`/api/kis/sell-all?mode=close&user_id=${encodeURIComponent(effectiveUserId)}`, {
+        method: 'POST',
+        headers: { 'x-user-id': effectiveUserId },
+      });
       if (!res.ok) {
         alert("일괄매도 처리 중 서버 오류가 발생했습니다. (상태 코드: " + res.status + ")");
         return;
@@ -632,7 +684,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
           await fetchHoldings();
           await fetchLedger();
           if (typeof window !== 'undefined') {
-            localStorage.removeItem('orderTotalAmount');
+            localStorage.removeItem(`orderTotalAmount_${effectiveUserId}`);
           }
           setTotalAmount(MAX_TOTAL_CAPITAL);
           alert(`✅ [15:30 종가 일괄매도 완료]\n\n총 확정순이익 ${(data.net_pnl || 0).toLocaleString()}원이 거래원장에 성공적으로 기록되었습니다.`);
@@ -652,7 +704,7 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
       const clamped = Math.min(MAX_TOTAL_CAPITAL, Math.max(0, val));
       setTotalAmount(clamped);
       if (typeof window !== 'undefined') {
-        localStorage.setItem('orderTotalAmount', String(clamped));
+        localStorage.setItem(`orderTotalAmount_${effectiveUserId}`, String(clamped));
       }
     }
   };
@@ -663,6 +715,34 @@ export default function OrderWindow({ stocks }: { stocks: any[] }) {
   return (
     <div className="flex h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-200 overflow-y-auto lg:overflow-hidden">
       <div className="w-full flex flex-col p-2 sm:p-3 h-auto lg:h-full">
+        {/* 🏦 회원별 독립 트레이딩 계좌 & 프라이버시 상태 바 */}
+        <div className="mb-2 px-3 py-2 rounded-lg bg-[#0d121d] border border-emerald-500/40 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold">
+              {effectiveUserId === 'admin'
+                ? '👑 관리자(주인장) 전용 트레이딩 원장'
+                : `🔒 ${userName || effectiveUserId}님 전용 독립 트레이딩 원장 (타 회원 비밀보장)`}
+            </span>
+            {effectiveUserId !== 'admin' && !userAccount?.is_connected ? (
+              <span className="text-amber-300 font-bold">
+                ⚠️ 현재 연결된 증권사 계좌가 없습니다. 본인 증권사 계좌를 연결하여 개별 운용을 시작하세요.
+              </span>
+            ) : (
+              <span className="text-slate-300 font-mono">
+                연결 계좌: <strong className="text-emerald-300">{userAccount?.broker_name || '한국투자증권 (KIS)'}</strong> ({userAccount?.account_display || (effectiveUserId === 'admin' ? '44790516-01' : '-')}) · {userAccount?.mode === 'LIVE' ? '🔥 실전계좌' : '🧪 모의계좌'}
+              </span>
+            )}
+          </div>
+          {onOpenAccountModal && (
+            <button
+              type="button"
+              onClick={onOpenAccountModal}
+              className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold shadow cursor-pointer"
+            >
+              🏦 {effectiveUserId !== 'admin' && !userAccount?.is_connected ? '내 증권사 계좌 연결하기' : '내 증권사 계좌 설정/변경'}
+            </button>
+          )}
+        </div>
         
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 mb-2.5 px-1">
           <div className="flex flex-wrap items-center gap-2">

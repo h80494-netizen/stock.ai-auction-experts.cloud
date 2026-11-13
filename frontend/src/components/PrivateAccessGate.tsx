@@ -69,11 +69,18 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
       const data = await res.json();
       if (res.ok && data.authenticated) {
         if (typeof window !== 'undefined') {
+          const resolvedUserId = data.user_id || (data.is_admin ? 'admin' : 'guest');
           sessionStorage.setItem('stock_terminal_auth', 'true');
+          sessionStorage.setItem('stock_terminal_user_id', resolvedUserId);
           if (data.is_admin) {
             sessionStorage.setItem('stock_terminal_is_admin', 'true');
           } else {
             sessionStorage.removeItem('stock_terminal_is_admin');
+            // 일반회원 접속 시 과거 관리자 공용 로컬스토리지 캐시 제거 (관리자 매매기록 노출 원천 차단)
+            localStorage.removeItem('saved_holdings_data');
+            localStorage.removeItem('saved_ledger_history');
+            localStorage.removeItem('saved_detailed_trading_ledger');
+            localStorage.removeItem('saved_pnl_history');
           }
           if (data.name) {
             sessionStorage.setItem('stock_terminal_user_name', data.name);
