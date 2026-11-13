@@ -384,6 +384,61 @@ def get_cached_etf_pivot(cache_key=None):
     pivot = pivot.ffill().dropna()
     return pivot
 
+
+def get_kospi_aligned_series(dates: list) -> list:
+    """
+    KOSPI 지수(^KS11) 일별 종가 캐시(kospi_history_cache.json) 및 최신 시세를 로드하여
+    시뮬레이션 거래일(dates)에 맞춰 전방/후방 보간(ffill/bfill) 후 Base=100 정규화 배열을 반환합니다.
+    """
+    if not dates:
+        return []
+    kospi_cache_path = os.path.join(DATA_DIR, "kospi_history_cache.json")
+    kospi_dict = {}
+    try:
+        if os.path.exists(kospi_cache_path):
+            import json
+            with open(kospi_cache_path, "r", encoding="utf-8") as f:
+                raw_k = json.load(f)
+                if isinstance(raw_k, dict):
+                    kospi_dict = {str(k)[:10]: float(v) for k, v in raw_k.items() if v is not None and float(v) > 0}
+    except Exception as e:
+        print(f"[KOSPI Series] Cache read error: {e}")
+
+    # 캐시 데이터가 부족하거나 가장 오래된 날짜가 dates[0]보다 늦으면 ^KS11 보강
+    need_fetch = (not kospi_dict) or (min(kospi_dict.keys()) > dates[0]) or (max(kospi_dict.keys()) < dates[-1])
+    if need_fetch:
+        try:
+            period_str = "5y" if (not kospi_dict or min(kospi_dict.keys()) > dates[0]) else "5d"
+            ks_hist = yf.Ticker("^KS11").history(period=period_str, interval="1d")
+            if not ks_hist.empty and "Close" in ks_hist.columns:
+                for dt_idx, row in ks_hist.iterrows():
+                    d_str = dt_idx.strftime("%Y-%m-%d") if hasattr(dt_idx, "strftime") else str(dt_idx)[:10]
+                    c_val = row["Close"]
+                    if not pd.isna(c_val) and float(c_val) > 0:
+                        kospi_dict[d_str] = round(float(c_val), 2)
+                try:
+                    import json
+                    with open(kospi_cache_path, "w", encoding="utf-8") as f:
+                        json.dump(dict(sorted(kospi_dict.items())), f, indent=2)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[KOSPI Series] yfinance ^KS11 fetch notice: {e}")
+
+    if not kospi_dict:
+        return [100.0] * len(dates)
+
+    try:
+        all_dates = sorted(set(dates) | set(kospi_dict.keys()))
+        s = pd.Series(kospi_dict, dtype=float).reindex(all_dates).sort_index().ffill().bfill()
+        aligned = s.reindex(dates).ffill().bfill()
+        base_val = float(aligned.iloc[0]) if len(aligned) > 0 and float(aligned.iloc[0]) > 0 else 1.0
+        return [sanitize_val((float(v) / base_val) * 100.0, 100.0) for v in aligned.tolist()]
+    except Exception as e:
+        print(f"[KOSPI Series] Alignment error: {e}")
+        return [100.0] * len(dates)
+
+
 def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pivot=None, precalc=None):
     try:
         top_n = max(1, min(3, int(top_n)))
@@ -503,9 +558,12 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
             
         current_targets = selected_tickers
 
+    kospi_series = precalc.get("kospi") if (precalc and "kospi" in precalc) else get_kospi_aligned_series(dates)
+
     return {
         "dates": dates,
         "strategy": strategy_returns,
+        "kospi": kospi_series,
         "selected_etf": selected_etf,
         "selected_etf_list": selected_etf_lists,
         "etfs": etf_normalized
@@ -528,12 +586,15 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
     if pivot is None:
         return []
 
+    kospi_aligned = get_kospi_aligned_series(pivot.index.tolist())
+
     # Pre-calculate returns dataframes
     precalc = {
         'r1': pivot.pct_change(1) * 100,
         'r5': pivot.pct_change(5) * 100,
         'r20': pivot.pct_change(20) * 100,
-        'rstd': (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None
+        'rstd': (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None,
+        'kospi': kospi_aligned,
     }
 
     models = []
@@ -645,6 +706,7 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
             "avg_loss": sanitize_float(avg_loss),
             "dates": dates,
             "strategy": [sanitize_float(s) for s in strategy],
+            "kospi": [sanitize_float(k) for k in sim_data.get("kospi", [])],
             "selected_etf": selected_etf,
             "selected_etf_list": sim_data.get("selected_etf_list", [])
         })

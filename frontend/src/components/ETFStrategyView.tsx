@@ -275,19 +275,120 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
     return null;
   }, [selectedSwapModel, previousModel, currentModel, modelsList]);
 
-  const compareChartData = useMemo(() => {
+  const { compareChartData, comparePeriodStats } = useMemo(() => {
     const target = selectedSwapModel || displaySwapTarget;
-    if (!currentModel || !target || !currentModel.dates) return [];
-    const dates = currentModel.dates;
-    const currStrat = currentModel.strategy;
-    const swapStrat = target.strategy;
+    const defaultStats = {
+      currRet: currentModel?.total_ret ?? 0,
+      currSharpe: currentModel?.sharpe ?? 0,
+      swapRet: target?.total_ret ?? 0,
+      swapSharpe: target?.sharpe ?? 0,
+      kospiRet: 0,
+      kospiSharpe: 0,
+      startDateLabel: '',
+      endDateLabel: '',
+    };
+    if (!currentModel || !target || !currentModel.dates || currentModel.dates.length === 0) {
+      return { compareChartData: [], comparePeriodStats: defaultStats };
+    }
 
-    return dates.map((d: string, idx: number) => ({
-      date: d,
-      [currentModel.model || '현재 모델']: currStrat ? currStrat[idx] : 100,
-      [target.model || '비교/교체 모델']: swapStrat ? swapStrat[idx] : 100
-    }));
-  }, [currentModel, selectedSwapModel, displaySwapTarget]);
+    const dates: string[] = currentModel.dates;
+    const currStrat: number[] = currentModel.strategy || [];
+    const swapStrat: number[] = target.strategy || [];
+    const kospiSeries: number[] =
+      (currentModel.kospi && currentModel.kospi.length === dates.length
+        ? currentModel.kospi
+        : simData?.kospi && simData.kospi.length === dates.length
+        ? simData.kospi
+        : simData?.etfs?.EWY && simData.etfs.EWY.length === dates.length
+        ? simData.etfs.EWY
+        : []) || [];
+
+    // 상단 선택된 기간(period)에 맞춰 시작일 계산
+    let startDate = '1900-01-01';
+    const latestDateStr = dates[dates.length - 1];
+    const refDate = latestDateStr ? new Date(latestDateStr + 'T00:00:00') : new Date();
+
+    if (period === 'YTD(26.01~)') {
+      startDate = '2026-01-02';
+    } else if (period === '3개월') {
+      const d = new Date(refDate);
+      d.setMonth(d.getMonth() - 3);
+      startDate = d.toISOString().split('T')[0];
+    } else if (period === '6개월') {
+      const d = new Date(refDate);
+      d.setMonth(d.getMonth() - 6);
+      startDate = d.toISOString().split('T')[0];
+    } else if (period === '12개월') {
+      const d = new Date(refDate);
+      d.setFullYear(d.getFullYear() - 1);
+      startDate = d.toISOString().split('T')[0];
+    }
+
+    const indices: number[] = [];
+    for (let i = 0; i < dates.length; i++) {
+      if (dates[i] >= startDate) {
+        indices.push(i);
+      }
+    }
+    if (indices.length === 0) {
+      for (let i = 0; i < dates.length; i++) indices.push(i);
+    }
+
+    const firstIdx = indices[0];
+    const lastIdx = indices[indices.length - 1];
+
+    const baseCurr = currStrat[firstIdx] && currStrat[firstIdx] > 0 ? currStrat[firstIdx] : 100;
+    const baseSwap = swapStrat[firstIdx] && swapStrat[firstIdx] > 0 ? swapStrat[firstIdx] : 100;
+    const baseKospi = kospiSeries[firstIdx] && kospiSeries[firstIdx] > 0 ? kospiSeries[firstIdx] : 100;
+
+    const currKey = currentModel.model || '현재 모델';
+    const swapKey = target.model || '비교/교체 모델';
+
+    const rows = indices.map((idx) => {
+      const cVal = currStrat[idx] ? (currStrat[idx] / baseCurr) * 100 : 100;
+      const sVal = swapStrat[idx] ? (swapStrat[idx] / baseSwap) * 100 : 100;
+      const kVal = kospiSeries[idx] ? (kospiSeries[idx] / baseKospi) * 100 : 100;
+      return {
+        date: dates[idx],
+        [currKey]: Number(cVal.toFixed(2)),
+        [swapKey]: Number(sVal.toFixed(2)),
+        KOSPI: Number(kVal.toFixed(2)),
+      };
+    });
+
+    const calcSharpe = (arr: number[]) => {
+      const rets: number[] = [];
+      for (let k = 1; k < indices.length; k++) {
+        const prev = arr[indices[k - 1]];
+        const cur = arr[indices[k]];
+        if (prev && prev > 0 && cur !== undefined) {
+          rets.push((cur - prev) / prev);
+        }
+      }
+      if (rets.length < 2) return 0;
+      const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+      const std = Math.sqrt(rets.reduce((sq, v) => sq + Math.pow(v - mean, 2), 0) / rets.length);
+      return std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+    };
+
+    const currEnd = currStrat[lastIdx] || baseCurr;
+    const swapEnd = swapStrat[lastIdx] || baseSwap;
+    const kospiEnd = kospiSeries[lastIdx] || baseKospi;
+
+    return {
+      compareChartData: rows,
+      comparePeriodStats: {
+        currRet: ((currEnd / baseCurr) - 1) * 100,
+        currSharpe: calcSharpe(currStrat),
+        swapRet: ((swapEnd / baseSwap) - 1) * 100,
+        swapSharpe: calcSharpe(swapStrat),
+        kospiRet: ((kospiEnd / baseKospi) - 1) * 100,
+        kospiSharpe: calcSharpe(kospiSeries),
+        startDateLabel: dates[firstIdx] || '',
+        endDateLabel: dates[lastIdx] || '',
+      },
+    };
+  }, [currentModel, selectedSwapModel, displaySwapTarget, period, simData]);
 
   const handleApplyModelSwap = async () => {
     if (!selectedSwapModel) return;
@@ -413,7 +514,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
     // 2. 선택된 기간에 따른 시작일 계산
     let startDate = '1900-01-01';
-    const today = new Date();
+    const latestDateStr = simData.dates[simData.dates.length - 1];
+    const today = latestDateStr ? new Date(latestDateStr + 'T00:00:00') : new Date();
     
     if (period === 'YTD(26.01~)') {
       startDate = '2026-01-02';
@@ -491,7 +593,8 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
     }
 
     let startDate = '1900-01-01';
-    const today = new Date();
+    const latestDateStr = simData.dates[simData.dates.length - 1];
+    const today = latestDateStr ? new Date(latestDateStr + 'T00:00:00') : new Date();
     
     if (period === 'YTD(26.01~)') {
       startDate = '2026-01-02';
@@ -1236,13 +1339,14 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                     {/* 4. Strategy Return Comparison Chart */}
                     {compareChartData.length > 0 && (
                       <div className="bg-gray-800/80 rounded-xl p-4 border border-gray-700 space-y-2">
-                        <div className="flex justify-between items-center">
+                        <div className="flex flex-wrap justify-between items-center gap-2">
                           <h4 className="text-sm font-bold text-gray-200">
-                            📈 모델간 누적 수익률 추이 비교 (Base = 100)
+                            📈 모델간 누적 수익률 추이 & KOSPI 비교 ({period} · Base = 100)
                           </h4>
-                          <div className="flex gap-4 text-xs font-bold">
+                          <div className="flex flex-wrap gap-3 text-xs font-bold">
                             <span className="text-indigo-400">■ 현재: {currentModel.model}</span>
                             <span className="text-amber-400">■ 교체: {selectedSwapModel.model}</span>
+                            <span className="text-emerald-400">■ 벤치마크: KOSPI 지수</span>
                           </div>
                         </div>
                         <div className="h-[240px] w-full text-xs">
@@ -1251,9 +1355,16 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                               <XAxis dataKey="date" stroke="#9ca3af" minTickGap={40} />
                               <YAxis domain={['auto', 'auto']} stroke="#9ca3af" />
-                              <Tooltip contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }} />
-                              <Line type="monotone" dataKey={currentModel.model} stroke="#818cf8" strokeWidth={2.5} dot={false} />
-                              <Line type="monotone" dataKey={selectedSwapModel.model} stroke="#fbbf24" strokeWidth={2.5} dot={false} />
+                              <Tooltip
+                                contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }}
+                                formatter={(val: any, name: any) => [
+                                  `${Number(val).toFixed(2)} (${Number(val) >= 100 ? '+' : ''}${(Number(val) - 100).toFixed(2)}%)`,
+                                  name,
+                                ]}
+                              />
+                              <Line type="monotone" dataKey={currentModel.model} name={`[현재] ${currentModel.model}`} stroke="#818cf8" strokeWidth={2.5} dot={false} />
+                              <Line type="monotone" dataKey={selectedSwapModel.model} name={`[교체] ${selectedSwapModel.model}`} stroke="#fbbf24" strokeWidth={2.5} dot={false} />
+                              <Line type="monotone" dataKey="KOSPI" name="[벤치마크] KOSPI 지수" stroke="#10b981" strokeWidth={2} strokeDasharray="5 5" dot={false} />
                             </LineChart>
                           </ResponsiveContainer>
                         </div>
@@ -1765,19 +1876,38 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
       {/* 📊 모델 교체 전 vs 교체 후 수익률 동시 비교 차트 섹션 (Main Comparison Chart) */}
       <div className="bg-gradient-to-r from-gray-900 via-indigo-950/60 to-gray-900 p-4 sm:p-5 rounded-xl border border-indigo-500/50 shadow-xl space-y-4">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 pb-3 border-b border-gray-800">
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 pb-3 border-b border-gray-800">
           <div>
-            <h3 className="text-lg sm:text-xl font-extrabold text-white flex items-center gap-2">
-              📊 모델 교체 전 vs 교체 후 수익률 동시 비교 차트
+            <h3 className="text-lg sm:text-xl font-extrabold text-white flex flex-wrap items-center gap-2">
+              <span>📊 모델 교체 전 vs 교체 후 & KOSPI 수익률 동시 비교 차트</span>
+              <span className="text-xs font-mono bg-blue-950/80 border border-blue-500/40 text-blue-300 px-2.5 py-0.5 rounded-full">
+                조회 기간: {period} ({comparePeriodStats.startDateLabel} ~ {comparePeriodStats.endDateLabel})
+              </span>
             </h3>
             <p className="text-xs text-gray-400 mt-1">
-              현재 적용 모델({currentModel?.model || '현재'})과 비교/교체 모델({displaySwapTarget?.model || '비교 대상'})의 누적 수익률 추이를 Base 100 기준 동일 선상에서 겹쳐서 비교합니다.
+              상단 기간 설정({period})에 맞춰 현재 모델({currentModel?.model || '현재'}), 비교/교체 모델({displaySwapTarget?.model || '비교 대상'}), 그리고 <strong className="text-emerald-300">KOSPI 지수(^KS11)</strong>의 누적 수익률을 시작점 Base 100 기준으로 동시에 비교합니다.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
+            {/* 상단 기간 선택과 100% 연동되는 기간 버튼 그룹 */}
+            <div className="flex gap-1 bg-gray-950/90 p-1 rounded-lg border border-gray-700/80">
+              {periodOptions.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setPeriod(p)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                    period === p
+                      ? 'bg-blue-600 text-white shadow'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                  }`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => setShowModelSwap(true)}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow border border-indigo-400/40 flex items-center gap-1"
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow border border-indigo-400/40 flex items-center gap-1 cursor-pointer whitespace-nowrap"
             >
               🔄 모델 변경 & 성과 선택
             </button>
@@ -1786,33 +1916,47 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
 
         {compareChartData.length > 0 && currentModel && displaySwapTarget ? (
           <div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs font-mono">
               <div className="bg-indigo-900/40 p-2.5 rounded-lg border border-indigo-500/40">
-                <span className="text-indigo-300 font-bold block text-[11px]">📌 현재 적용: {currentModel.model}</span>
+                <span className="text-indigo-300 font-bold block text-[11px]">📌 현재 적용: {currentModel.model} ({period})</span>
                 <span className="text-gray-400 text-[10px]">1/5/20일: {currentModel.weights.w1}/{currentModel.weights.w5}/{currentModel.weights.w20}%</span>
-                <div className="font-extrabold text-sm text-indigo-200 mt-0.5">총수익: {currentModel.total_ret.toFixed(2)}% | Sharpe: {currentModel.sharpe.toFixed(2)}</div>
+                <div className="font-extrabold text-sm text-indigo-200 mt-0.5">
+                  수익: {comparePeriodStats.currRet >= 0 ? '+' : ''}{comparePeriodStats.currRet.toFixed(2)}% | Sharpe: {comparePeriodStats.currSharpe.toFixed(2)}
+                </div>
               </div>
               <div className="bg-amber-900/40 p-2.5 rounded-lg border border-amber-500/40">
-                <span className="text-amber-300 font-bold block text-[11px]">🔄 비교/교체: {displaySwapTarget.model}</span>
+                <span className="text-amber-300 font-bold block text-[11px]">🔄 비교/교체: {displaySwapTarget.model} ({period})</span>
                 <span className="text-gray-400 text-[10px]">1/5/20일: {displaySwapTarget.weights.w1}/{displaySwapTarget.weights.w5}/{displaySwapTarget.weights.w20}%</span>
-                <div className="font-extrabold text-sm text-amber-200 mt-0.5">총수익: {displaySwapTarget.total_ret.toFixed(2)}% | Sharpe: {displaySwapTarget.sharpe.toFixed(2)}</div>
+                <div className="font-extrabold text-sm text-amber-200 mt-0.5">
+                  수익: {comparePeriodStats.swapRet >= 0 ? '+' : ''}{comparePeriodStats.swapRet.toFixed(2)}% | Sharpe: {comparePeriodStats.swapSharpe.toFixed(2)}
+                </div>
+              </div>
+              <div className="bg-emerald-950/50 p-2.5 rounded-lg border border-emerald-500/40">
+                <span className="text-emerald-300 font-bold block text-[11px]">🇰🇷 벤치마크: KOSPI 지수 ({period})</span>
+                <span className="text-gray-400 text-[10px]">
+                  현재모델 대비 초과수익: {(comparePeriodStats.currRet - comparePeriodStats.kospiRet) >= 0 ? '+' : ''}
+                  {(comparePeriodStats.currRet - comparePeriodStats.kospiRet).toFixed(2)}%p
+                </span>
+                <div className="font-extrabold text-sm text-emerald-200 mt-0.5">
+                  수익: {comparePeriodStats.kospiRet >= 0 ? '+' : ''}{comparePeriodStats.kospiRet.toFixed(2)}% | Sharpe: {comparePeriodStats.kospiSharpe.toFixed(2)}
+                </div>
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
-                <span className="text-gray-400 text-[10px]">수익률 격차 (Diff)</span>
+                <span className="text-gray-400 text-[10px]">모델간 수익률 격차 ({period})</span>
                 {(() => {
-                  const diff = displaySwapTarget.total_ret - currentModel.total_ret;
+                  const diff = comparePeriodStats.swapRet - comparePeriodStats.currRet;
                   return (
                     <div className={`font-bold text-sm ${diff >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                       {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%p
                     </div>
                   );
                 })()}
-                <span className="text-[10px] text-gray-500">교체 시 예상 변동</span>
+                <span className="text-[10px] text-gray-500">교체 시 구간 수익 변동</span>
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
-                <span className="text-gray-400 text-[10px]">샤프지수 격차 (Diff)</span>
+                <span className="text-gray-400 text-[10px]">샤프지수 격차 ({period})</span>
                 {(() => {
-                  const diff = displaySwapTarget.sharpe - currentModel.sharpe;
+                  const diff = comparePeriodStats.swapSharpe - comparePeriodStats.currSharpe;
                   return (
                     <div className={`font-bold text-sm ${diff >= 0 ? 'text-purple-400' : 'text-red-400'}`}>
                       {diff >= 0 ? '+' : ''}{diff.toFixed(2)}
@@ -1823,13 +1967,19 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
               </div>
             </div>
 
-            <div className="h-[280px] w-full text-xs bg-gray-900/90 p-2 rounded-xl border border-gray-800">
+            <div className="h-[300px] w-full text-xs bg-gray-900/90 p-2 rounded-xl border border-gray-800">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={compareChartData} margin={{ top: 15, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis dataKey="date" stroke="#9ca3af" minTickGap={35} />
                   <YAxis domain={['auto', 'auto']} stroke="#9ca3af" />
-                  <Tooltip contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '8px' }}
+                    formatter={(val: any, name: any) => [
+                      `${Number(val).toFixed(2)} (${Number(val) >= 100 ? '+' : ''}${(Number(val) - 100).toFixed(2)}%)`,
+                      name,
+                    ]}
+                  />
                   <Legend />
                   <Line 
                     type="monotone" 
@@ -1845,6 +1995,15 @@ export default function ETFStrategyView({ etfWeights, setEtfWeights }: { etfWeig
                     name={`[교체 후/비교] ${displaySwapTarget.model}`} 
                     stroke="#fbbf24" 
                     strokeWidth={3} 
+                    dot={false} 
+                  />
+                  <Line 
+                    type="monotone" 
+                    dataKey="KOSPI" 
+                    name="[벤치마크] KOSPI 지수" 
+                    stroke="#10b981" 
+                    strokeWidth={2.5} 
+                    strokeDasharray="5 5"
                     dot={false} 
                   />
                 </LineChart>
