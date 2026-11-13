@@ -18,6 +18,7 @@ yf_executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
 import sqlite3
 import pandas as pd
 import tempfile
@@ -106,9 +107,18 @@ def start_scheduler():
     scheduler.add_job(auto_trader.job_1520_sell_order, CronTrigger(hour=15, minute=20, day_of_week='mon-fri', timezone='Asia/Seoul'))
     scheduler.add_job(auto_trader.job_1531_ledger_record, CronTrigger(hour=15, minute=31, day_of_week='mon-fri', timezone='Asia/Seoul'))
     
-    # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시)
+    # ETF 데이터 주기적 업데이트 (매일 아침 8시, 저녁 6시, 미국장 마감 직후)
     scheduler.add_job(update_etf_data, CronTrigger(hour=8, minute=0, timezone='Asia/Seoul'))
     scheduler.add_job(update_etf_data, CronTrigger(hour=18, minute=0, timezone='Asia/Seoul'))
+    try:
+        from kis_etf_us_trader import ensure_us_etf_auto_trader_worker, run_scheduled_us_market_close_etf_rotation
+        scheduler.add_job(
+            run_scheduled_us_market_close_etf_rotation,
+            CronTrigger(hour=15, minute=55, day_of_week='mon-fri', timezone='America/New_York')
+        )
+        ensure_us_etf_auto_trader_worker()
+    except Exception as etf_sched_err:
+        print(f"US ETF Auto-Trader scheduler notice: {etf_sched_err}")
     
     # 경쟁업체 차트 주기적 업데이트 (매일 아침 7시 30분)
     import subprocess
@@ -370,10 +380,106 @@ def get_stocks():
 # --- ETF / ETN Endpoints ---
 
 @app.get("/api/etf/strategy")
-async def get_etf_strategy(criteria: str = "momentum", top_n: int = 1, w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
+async def get_etf_strategy(
+    criteria: str = "momentum",
+    top_n: int = 1,
+    w1: float = 0.5,
+    w5: float = 0.3,
+    w20: float = 0.2,
+    force_refresh: bool = False,
+):
     from etf_strategy import get_etf_strategy_results
-    results = get_etf_strategy_results(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+    results = get_etf_strategy_results(
+        criteria=criteria,
+        top_n=top_n,
+        w1=w1,
+        w5=w5,
+        w20=w20,
+        force_refresh=force_refresh,
+    )
     return results
+
+
+@app.post("/api/etf/refresh-prices")
+async def api_refresh_etf_live_prices():
+    from etf_strategy import sync_live_etf_prices
+    res = await asyncio.to_thread(sync_live_etf_prices, True)
+    return {"success": True, "data": res}
+
+
+class KISEtfUsConfigRequest(BaseModel):
+    mode: Optional[str] = None
+    cano: Optional[str] = None
+    acnt_prdt_cd: Optional[str] = None
+    order_qty: Optional[int] = None
+    ord_dvsn: Optional[str] = None
+    auto_trade_enabled: Optional[bool] = None
+    criteria: Optional[str] = None
+    top_n: Optional[int] = None
+    weights: Optional[Dict[str, float]] = None
+
+
+class KISEtfUsOrderRequest(BaseModel):
+    action: str = "AUTO_ROTATE"  # AUTO_ROTATE | LIQUIDATE_ALL | MANUAL_ORDER
+    manual_ticker: Optional[str] = None
+    manual_side: Optional[str] = None
+    manual_qty: Optional[int] = None
+    criteria: Optional[str] = None
+    top_n: Optional[int] = None
+    w1: Optional[float] = None
+    w5: Optional[float] = None
+    w20: Optional[float] = None
+    force_rebalance: bool = False
+    reason: Optional[str] = None
+
+
+@app.get("/api/etf/kis-account")
+async def api_get_etf_kis_account(
+    criteria: Optional[str] = None,
+    top_n: Optional[int] = None,
+    w1: Optional[float] = None,
+    w5: Optional[float] = None,
+    w20: Optional[float] = None,
+):
+    from kis_etf_us_trader import inquire_kis_etf_us_account
+    data = await asyncio.to_thread(
+        inquire_kis_etf_us_account,
+        criteria,
+        top_n,
+        w1,
+        w5,
+        w20,
+    )
+    return {"success": True, "data": data}
+
+
+@app.post("/api/etf/kis-config")
+async def api_update_etf_kis_config(req: KISEtfUsConfigRequest):
+    from kis_etf_us_trader import inquire_kis_etf_us_account, update_kis_etf_us_config
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    await asyncio.to_thread(update_kis_etf_us_config, updates)
+    data = await asyncio.to_thread(inquire_kis_etf_us_account)
+    return {"success": True, "data": data}
+
+
+@app.post("/api/etf/kis-order")
+async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest):
+    from kis_etf_us_trader import execute_etf_us_rebalance_or_order
+    res = await asyncio.to_thread(
+        execute_etf_us_rebalance_or_order,
+        req.action,
+        req.manual_ticker,
+        req.manual_side,
+        req.manual_qty,
+        req.criteria,
+        req.top_n,
+        req.w1,
+        req.w5,
+        req.w20,
+        req.force_rebalance,
+        req.reason or "ETF 투자전략 미국장 종가체결 주문",
+    )
+    return res
 
 @app.get("/api/etf/simulation")
 async def get_etf_sim(criteria: str = "momentum", top_n: int = 1, w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
@@ -1208,6 +1314,7 @@ def api_stock_news(ticker: str, name: str = "", market: str = "KR"):
 
 
 from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
 import threading as _threading_mod
 
 _sell_all_lock = _threading_mod.Lock()

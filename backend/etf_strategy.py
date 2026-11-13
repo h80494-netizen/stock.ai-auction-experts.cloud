@@ -122,9 +122,124 @@ def update_etf_data():
         with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
             f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-def check_and_update_etf_data():
+_LIVE_QUOTE_LOCK = None
+_LAST_LIVE_SYNC_TS = 0.0
+_LAST_LIVE_SYNC_KST = ""
+
+
+def sync_live_etf_prices(force: bool = False) -> dict:
+    """
+    11개 글로벌/미국 ETF(EWY, EWJ, SPY, QQQ, FXI, INDA, EWZ, EWA, EZU, USO, GLD)의
+    실시간 현재가/최근 종가(USD)를 고속 수집하여 etf_daily_prices DB에 즉시 반영합니다.
+    - 45초 캐시 적용 (force=True 시 즉시 강제 조회)
+    """
+    global _LIVE_QUOTE_LOCK, _LAST_LIVE_SYNC_TS, _LAST_LIVE_SYNC_KST
+    import threading
+    if _LIVE_QUOTE_LOCK is None:
+        _LIVE_QUOTE_LOCK = threading.Lock()
+
+    now_ts = time.time()
+    if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 45.0:
+        return {"synced": False, "cached": True, "updated_at_kst": _LAST_LIVE_SYNC_KST}
+
+    with _LIVE_QUOTE_LOCK:
+        now_ts = time.time()
+        if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 45.0:
+            return {"synced": False, "cached": True, "updated_at_kst": _LAST_LIVE_SYNC_KST}
+
+        init_db()
+        tickers = list(ETF_TARGETS.keys())
+        updated_prices = {}
+        latest_us_date = None
+
+        try:
+            # 1) 최근 5일 일봉 빠른 일괄 다운로드 (약 0.8~1.2초 소요)
+            recent_df = yf.download(tickers, period="5d", interval="1d", progress=False)
+            if not recent_df.empty:
+                close_df = recent_df["Close"].copy() if isinstance(recent_df.columns, pd.MultiIndex) else recent_df.copy()
+                close_df = close_df.ffill()
+                if not close_df.empty:
+                    records_5d = []
+                    for dt_idx, row in close_df.iterrows():
+                        d_str = dt_idx.strftime("%Y-%m-%d") if hasattr(dt_idx, "strftime") else str(dt_idx)[:10]
+                        latest_us_date = d_str
+                        for tk in tickers:
+                            if tk in row and not pd.isna(row[tk]):
+                                pv = float(row[tk])
+                                if pv > 0 and math.isfinite(pv):
+                                    records_5d.append((tk, d_str, round(pv, 4)))
+                                    updated_prices[tk] = round(pv, 2)
+                    if records_5d:
+                        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+                        c = conn.cursor()
+                        c.executemany(
+                            "INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) VALUES (?, ?, ?)",
+                            records_5d,
+                        )
+                        conn.commit()
+                        conn.close()
+        except Exception as e:
+            print(f"[ETF Live Sync] 5d download notice: {e}")
+
+        # 2) fast_info 실시간 체결가(장중/프리/애프터마켓 최신가) 보강
+        if not latest_us_date:
+            try:
+                from zoneinfo import ZoneInfo
+                latest_us_date = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            except Exception:
+                latest_us_date = (datetime.utcnow() - timedelta(hours=5)).strftime("%Y-%m-%d")
+
+        live_records = []
+        try:
+            yf_objs = yf.Tickers(" ".join(tickers))
+            for tk in tickers:
+                try:
+                    t_obj = yf_objs.tickers.get(tk) if hasattr(yf_objs, "tickers") else yf.Ticker(tk)
+                    lp = getattr(t_obj, "fast_info", {}).get("lastPrice")
+                    if lp and math.isfinite(float(lp)) and float(lp) > 0:
+                        f_lp = round(float(lp), 4)
+                        updated_prices[tk] = round(f_lp, 2)
+                        live_records.append((tk, latest_us_date, f_lp))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if live_records:
+            try:
+                conn = sqlite3.connect(DB_PATH, timeout=20.0)
+                c = conn.cursor()
+                c.executemany(
+                    "INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) VALUES (?, ?, ?)",
+                    live_records,
+                )
+                conn.commit()
+                conn.close()
+            except Exception as db_e:
+                print(f"[ETF Live Sync] DB write notice: {db_e}")
+
+        kst_now_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+        _LAST_LIVE_SYNC_TS = time.time()
+        _LAST_LIVE_SYNC_KST = kst_now_str
+        try:
+            with open(os.path.join(DATA_DIR, "last_update.txt"), "w") as f:
+                f.write(kst_now_str)
+            get_cached_etf_pivot.cache_clear()
+        except Exception:
+            pass
+
+        return {
+            "synced": True,
+            "cached": False,
+            "latest_us_date": latest_us_date,
+            "updated_at_kst": kst_now_str,
+            "prices": updated_prices,
+        }
+
+
+def check_and_update_etf_data(force_live: bool = False):
     last_update_file = os.path.join(DATA_DIR, 'last_update.txt')
-    needs_update = True
+    needs_full_history = False
     
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -134,27 +249,14 @@ def check_and_update_etf_data():
     conn.close()
     
     count_val = row[0] if row else 0
-    max_db_date = row[1] if row and row[1] else ""
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    if os.path.exists(last_update_file):
-        with open(last_update_file, 'r') as f:
-            last_time_str = f.read().strip()
-            try:
-                last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
-                if (datetime.now() - last_time).total_seconds() < 2 * 3600 and max_db_date >= today_str:
-                    needs_update = False
-            except:
-                pass
-                
-    if needs_update:
-        if count_val > 0:
-            # DB has existing data: trigger update in a background thread so API call is fast & non-blocking
-            import threading
-            threading.Thread(target=update_etf_data, daemon=True).start()
-        else:
-            # DB is empty: must fetch initial data synchronously
-            update_etf_data()
+    if count_val < 200:
+        needs_full_history = True
+
+    if needs_full_history:
+        update_etf_data()
+    else:
+        # 실시간/최근 5일 ETF 현재가를 45초 주기로 즉시 동기화
+        sync_live_etf_prices(force=force_live)
 
 def sanitize_val(val, default=0.0):
     if val is None:
@@ -167,7 +269,7 @@ def sanitize_val(val, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2):
+def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, force_refresh=False):
     try:
         top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
@@ -178,7 +280,7 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
         w5 = w5 / 100.0
         w20 = w20 / 100.0
 
-    check_and_update_etf_data()
+    check_and_update_etf_data(force_live=bool(force_refresh))
     init_db()
     conn = sqlite3.connect(DB_PATH)
     
@@ -240,7 +342,8 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
             "momentum_score": momentum_score,
             "sharpe_ratio": sharpe_ratio,
             "final_score": final_score,
-            "last_updated": dates[-1] if dates else ""
+            "last_updated": dates[-1] if dates else "",
+            "quote_updated_at": _LAST_LIVE_SYNC_KST or (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
         })
         
     # Sort by final_score descending

@@ -1595,7 +1595,7 @@ export default function FuturesSimulationView({
     const standbyMon: any[] = mrm?.standby_models_monitor || [];
     return (
       <div className="bg-slate-900/95 border border-rose-500/40 rounded-xl p-4 space-y-4 shadow-lg">
-        {activeSubTab === "STEP4_MDD" && renderRiskPolicyClarificationPanel()}
+        {step === 4 && renderRiskPolicyClarificationPanel()}
         {/* 상단 컨트롤: 교체 방식(정기 3M/6M vs 특정모델 MDD 갱신) 설정 */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
           <div className="space-y-1">
