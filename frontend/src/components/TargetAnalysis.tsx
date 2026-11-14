@@ -532,7 +532,7 @@ export default function TargetAnalysis({ stocks = [], globalStocks = [], onNavig
               </button>
             </div>
             <div className="flex-1 bg-[#111] border border-gray-800 rounded p-3 flex flex-col min-h-0">
-              <h3 className="text-sm font-bold text-gray-200 mb-2">주가(우측 축) vs 목표가(좌측 전용 축) 추이 — Two-Scale 다이나믹 확대 뷰</h3>
+              <h3 className="text-sm font-bold text-gray-200 mb-2">주가(좌측 축) vs 목표가 5일 이동평균선(우측 전용 축) — 신규 목표가 발표 전까지 이전값 유지 데이터 기반 5일 이평선</h3>
               <div className="h-[230px] xl:h-[260px] shrink-0 relative">
                 {chartData.length > 0 ? (
                   <div className="w-full h-full absolute inset-0">

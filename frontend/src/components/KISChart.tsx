@@ -148,58 +148,44 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
     const firstEventVal = eventIndices.length > 0 ? eventValueByIdx[eventIndices[0]].value : null;
     const startTargetVal = priorTargetVal ?? firstEventVal ?? fallbackMean;
 
-    // 4. 시간별 목표가 추이 산출 (발표 당일 지연 없이 즉시 목표가에 일치시키고 구간 간 시간비례 연결)
+    // 4. 새로운 목표값이 나올 때까지 이전 목표값을 계속 유지(Forward-Fill)하는 일별 시계열 생성 후 5일 이동평균선(MA5) 산출
+    let runningHeldTarget: number | null = startTargetVal;
+    const heldSeries: (number | null)[] = sortedData.map((_, idx) => {
+      const ev = eventValueByIdx[idx];
+      if (ev && ev.value > 0) {
+        runningHeldTarget = ev.value;
+      }
+      return runningHeldTarget;
+    });
+
+    const MA_WINDOW = 5;
     return sortedData.map((row, idx) => {
       const ev = eventValueByIdx[idx];
       const isTargetDay = Boolean(ev);
       const dailyTargetVal = ev ? ev.value : null;
       const dailyTargetText = ev ? ev.text : null;
+      const heldTargetVal = heldSeries[idx];
 
-      let timeAlignedTarget: number | null = startTargetVal;
-
-      if (eventIndices.length > 0) {
-        if (idx <= eventIndices[0]) {
-          if (priorTargetVal !== null && eventIndices[0] > 0) {
-            const ratio = idx / eventIndices[0];
-            timeAlignedTarget = roundSmart(
-              priorTargetVal + (eventValueByIdx[eventIndices[0]].value - priorTargetVal) * ratio
-            );
-          } else {
-            timeAlignedTarget = eventValueByIdx[eventIndices[0]].value;
-          }
-        } else if (idx >= eventIndices[eventIndices.length - 1]) {
-          const lastEvIdx = eventIndices[eventIndices.length - 1];
-          timeAlignedTarget = eventValueByIdx[lastEvIdx].value;
-        } else {
-          // 직전 발표일(prevEvIdx)과 직후 발표일(nextEvIdx) 사이 시간별 선형 연결
-          let prevEvIdx = eventIndices[0];
-          let nextEvIdx = eventIndices[eventIndices.length - 1];
-          for (let k = 0; k < eventIndices.length - 1; k++) {
-            if (idx >= eventIndices[k] && idx <= eventIndices[k + 1]) {
-              prevEvIdx = eventIndices[k];
-              nextEvIdx = eventIndices[k + 1];
-              break;
-            }
-          }
-          const prevV = eventValueByIdx[prevEvIdx].value;
-          const nextV = eventValueByIdx[nextEvIdx].value;
-          const span = Math.max(1, nextEvIdx - prevEvIdx);
-          const ratio = (idx - prevEvIdx) / span;
-          timeAlignedTarget = roundSmart(prevV + (nextV - prevV) * ratio);
+      // 최근 5일(idx-4 ~ idx) 유지 목표가의 이동평균(MA5) 계산
+      const windowSlice: number[] = [];
+      for (let w = Math.max(0, idx - (MA_WINDOW - 1)); w <= idx; w++) {
+        const v = heldSeries[w];
+        if (v !== null && v !== undefined && !isNaN(v) && v > 0) {
+          windowSlice.push(v);
         }
       }
-
-      // 발표 당일에는 오차 없이 정확히 발표 목표가와 100% 일치 보장
-      if (isTargetDay && dailyTargetVal !== null) {
-        timeAlignedTarget = dailyTargetVal;
-      }
+      const ma5Target =
+        windowSlice.length > 0
+          ? roundSmart(windowSlice.reduce((acc, v) => acc + v, 0) / windowSlice.length)
+          : heldTargetVal;
 
       return {
         ...row,
         targetDaily: isTargetDay ? dailyTargetVal : null,
         targetDailyText: isTargetDay ? dailyTargetText : null,
-        targetPriceMA5: timeAlignedTarget,
-        targetPrice: timeAlignedTarget
+        targetHeld: heldTargetVal,
+        targetPriceMA5: ma5Target,
+        targetPrice: ma5Target
       };
     });
   }, [data, fundamentals]);
@@ -228,8 +214,14 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
           )}
           {dataPoint.targetPriceMA5 !== undefined && dataPoint.targetPriceMA5 !== null && (
             <p className="text-yellow-400 flex justify-between py-0.5 gap-4">
-              <span>시간별 목표가 추이 (우축):</span>
+              <span>목표가 5일 이평선 (우축):</span>
               <strong className="font-mono">{formatVal(dataPoint.targetPriceMA5)}</strong>
+            </p>
+          )}
+          {dataPoint.targetHeld !== undefined && dataPoint.targetHeld !== null && (
+            <p className="text-amber-200/90 flex justify-between py-0.5 gap-4 text-[11px]">
+              <span>유지 목표가 (직전값 유지):</span>
+              <strong className="font-mono">{formatVal(dataPoint.targetHeld)}</strong>
             </p>
           )}
           {gapPct !== null && (
@@ -320,7 +312,7 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
               <span className="w-2.5 h-0.5 bg-blue-500 inline-block"></span> 종가 (좌축)
             </span>
             <span className="flex items-center gap-1 text-yellow-300">
-              <span className="w-2.5 h-0.5 bg-yellow-400 inline-block"></span> 시간별 목표가 추이 (우축)
+              <span className="w-2.5 h-0.5 bg-yellow-400 inline-block"></span> 목표가 5일 이동평균선 (우축)
             </span>
             <span className="flex items-center gap-1 text-orange-400">
               <span className="w-2 h-2 rounded-full bg-orange-500 inline-block"></span> 증권사 목표가
@@ -392,12 +384,12 @@ export default function KISChart({ data, symbol, fundamentals, currentPrice, cha
             isAnimationActive={false}
           />
 
-          {/* 시간별 목표가 추이 라인 (우측 Y축) */}
+          {/* 목표가 5일 이동평균선 라인 (우측 Y축: 새 목표가 발표 전까지 이전값 유지 후 5일 이동평균) */}
           <Line
             yAxisId="right"
-            type="linear"
+            type="monotone"
             dataKey="targetPriceMA5"
-            name="시간별 목표가 추이"
+            name="목표가 5일 이동평균선"
             stroke="#ffeb3b"
             strokeWidth={2.8}
             dot={false}
