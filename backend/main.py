@@ -430,6 +430,7 @@ class KISEtfUsConfigRequest(BaseModel):
     mode: Optional[str] = None
     cano: Optional[str] = None
     acnt_prdt_cd: Optional[str] = None
+    order_budget_krw: Optional[int] = None
     order_qty: Optional[int] = None
     ord_dvsn: Optional[str] = None
     auto_trade_enabled: Optional[bool] = None
@@ -445,6 +446,7 @@ class KISEtfUsOrderRequest(BaseModel):
     manual_side: Optional[str] = None
     manual_qty: Optional[int] = None
     order_qty: Optional[int] = None
+    order_budget_krw: Optional[int] = None
     criteria: Optional[str] = None
     top_n: Optional[int] = None
     w1: Optional[float] = None
@@ -463,6 +465,7 @@ async def api_get_etf_kis_account(
     w5: Optional[float] = None,
     w20: Optional[float] = None,
     user_id: Optional[str] = None,
+    order_budget_krw: Optional[int] = None,
 ):
     from kis_etf_us_trader import inquire_kis_etf_us_account
     uid = _resolve_uid(user_id, request)
@@ -474,6 +477,7 @@ async def api_get_etf_kis_account(
         w5,
         w20,
         uid,
+        order_budget_krw,
     )
     return {"success": True, "data": data}
 
@@ -484,7 +488,7 @@ async def api_update_etf_kis_config(req: KISEtfUsConfigRequest, request: Request
     uid = _resolve_uid(req.user_id, request)
     updates = {k: v for k, v in req.dict().items() if v is not None and k != "user_id"}
     await asyncio.to_thread(update_kis_etf_us_config, updates, uid)
-    data = await asyncio.to_thread(inquire_kis_etf_us_account, None, None, None, None, None, uid)
+    data = await asyncio.to_thread(inquire_kis_etf_us_account, None, None, None, None, None, uid, req.order_budget_krw)
     return {"success": True, "data": data}
 
 
@@ -507,6 +511,7 @@ async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest, request: Request)
         req.force_rebalance,
         req.reason or "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
         uid,
+        req.order_budget_krw,
     )
     return res
 

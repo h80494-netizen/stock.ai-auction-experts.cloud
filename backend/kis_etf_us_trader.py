@@ -50,8 +50,76 @@ US_ETF_EXCHANGE_MAP: Dict[str, Dict[str, str]] = {
     "GLD": {"order_excg": "AMEX", "quote_excd": "AMS", "fallback_excg": "NYSE"},
 }
 
+DEFAULT_ORDER_BUDGET_KRW = 50000000  # 디폴트 총 주문 한도 금액: 5,000만 원 (절대 초과 금지)
+
 _SHARED_US_KIS_CLIENTS: Dict[str, KISApiClient] = {}
 _SHARED_LOCK = threading.Lock()
+_FX_CACHE: Dict[str, Any] = {"rate": 1400.0, "ts": 0.0}
+
+
+def get_live_usd_krw_rate() -> float:
+    """실시간 원/달러(USD/KRW) 환율을 조회합니다 (10분 캐시, 기본 폴백 1,400원)."""
+    now = time.time()
+    if _FX_CACHE["rate"] > 500 and (now - _FX_CACHE["ts"]) < 600:
+        return float(_FX_CACHE["rate"])
+    rate = 0.0
+    try:
+        t_obj = yf.Ticker("KRW=X")
+        fast_p = getattr(t_obj, "fast_info", {}).get("lastPrice")
+        if fast_p and not math.isnan(float(fast_p)) and 800 < float(fast_p) < 2500:
+            rate = float(fast_p)
+        else:
+            hist = t_obj.history(period="5d")
+            if not hist.empty and "Close" in hist.columns:
+                valid = hist["Close"].dropna()
+                if not valid.empty and 800 < float(valid.iloc[-1]) < 2500:
+                    rate = float(valid.iloc[-1])
+    except Exception:
+        pass
+    if rate > 800:
+        _FX_CACHE["rate"] = round(rate, 2)
+        _FX_CACHE["ts"] = now
+    return float(_FX_CACHE["rate"])
+
+
+def calc_etf_qty_within_budget_krw(
+    budget_krw: int,
+    price_usd: float,
+    usd_krw_rate: Optional[float] = None,
+    num_targets: int = 1,
+) -> Dict[str, Any]:
+    """
+    총 주문 한도 금액(budget_krw, 디폴트 5천만 원)을 절대 넘지 않도록
+    선택된 ETF 개수(num_targets)로 나눈 배정 한도를 각 ETF 현재가(원화 환산)로 나누어(내림 floor) 주문 수량을 계산합니다.
+    """
+    fx = float(usd_krw_rate) if (usd_krw_rate and usd_krw_rate > 500) else get_live_usd_krw_rate()
+    n = max(1, int(num_targets or 1))
+    total_budget_krw = max(100000, int(budget_krw or DEFAULT_ORDER_BUDGET_KRW))
+    alloc_krw = total_budget_krw // n
+    alloc_usd = round(alloc_krw / fx, 2)
+    p_usd = max(0.01, float(price_usd or 0.0))
+    p_krw = p_usd * fx
+
+    # 한도 금액(alloc_krw)을 절대 초과하지 않도록 내림(math.floor) 처리
+    qty = max(0, int(math.floor(alloc_krw / p_krw))) if p_krw > 0 else 0
+    est_usd = round(qty * p_usd, 2)
+    est_krw = int(round(qty * p_krw))
+    if est_krw > alloc_krw and qty > 0:
+        qty -= 1
+        est_usd = round(qty * p_usd, 2)
+        est_krw = int(round(qty * p_krw))
+
+    return {
+        "order_qty": qty,
+        "usd_krw_rate": round(fx, 2),
+        "total_budget_krw": total_budget_krw,
+        "allocated_budget_krw": alloc_krw,
+        "allocated_budget_usd": alloc_usd,
+        "price_usd": round(p_usd, 2),
+        "price_krw": int(round(p_krw)),
+        "est_order_amount_usd": est_usd,
+        "est_order_amount_krw": est_krw,
+    }
 
 
 def _init_etf_kis_tables() -> None:
@@ -235,6 +303,7 @@ def get_kis_etf_us_config(user_id: str = "admin") -> Dict[str, Any]:
         "mode": str(user_acc.get("account_mode") or "PAPER").upper(),
         "cano": default_cano,
         "acnt_prdt_cd": default_prdt,
+        "order_budget_krw": int(user_acc.get("etf_order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW),
         "order_qty": int(user_acc.get("etf_order_qty") or 100),
         "ord_dvsn": "33",
         "auto_trade_enabled": bool(user_acc.get("etf_auto_trade", True)) if is_connected else False,
@@ -245,6 +314,7 @@ def get_kis_etf_us_config(user_id: str = "admin") -> Dict[str, Any]:
         "weights": {"w1": 0.5, "w5": 0.3, "w20": 0.2},
         "last_auto_traded_us_date": "",
         "default_100_migrated": True,
+        "default_50m_krw_migrated": True,
     }
 
     need_save_migration = False
@@ -253,11 +323,9 @@ def get_kis_etf_us_config(user_id: str = "admin") -> Dict[str, Any]:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                if uid == "admin" and not saved.get("default_100_migrated"):
-                    if int(saved.get("order_qty") or 1) == 1:
-                        saved["order_qty"] = 100
-                    saved["default_100_migrated"] = True
-                    saved["reservation_active"] = True
+                if not saved.get("default_50m_krw_migrated"):
+                    saved["order_budget_krw"] = int(saved.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW)
+                    saved["default_50m_krw_migrated"] = True
                     need_save_migration = True
                 default_cfg.update(saved)
         except Exception as e:
@@ -290,18 +358,40 @@ def get_kis_etf_us_config(user_id: str = "admin") -> Dict[str, Any]:
         default_cfg["broker_name"] = broker_name
         default_cfg["account_nickname"] = account_nickname
 
+    try:
+        default_cfg["order_budget_krw"] = max(
+            100000,
+            min(10000000000, int(float(default_cfg.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW))),
+        )
+    except Exception:
+        default_cfg["order_budget_krw"] = DEFAULT_ORDER_BUDGET_KRW
+
     if need_save_migration and uid == "admin":
         try:
             _init_etf_kis_tables()
+            fx_now = get_live_usd_krw_rate()
             conn = sqlite3.connect(DB_PATH, timeout=30.0)
             c = conn.cursor()
-            c.execute("UPDATE etf_us_kis_holdings SET qty = 100 WHERE user_id = 'admin' AND qty = 1")
+            c.execute("SELECT ticker, qty, curr_price_usd, avg_buy_price_usd FROM etf_us_kis_holdings WHERE user_id = 'admin'")
+            h_rows = c.fetchall()
+            n_held = max(1, len(h_rows))
+            for tkr, h_qty, cur_p, avg_p in h_rows:
+                if int(h_qty or 0) in (1, 100):
+                    ref_p = float(cur_p or avg_p or get_us_etf_closing_or_live_price(tkr))
+                    q_info = calc_etf_qty_within_budget_krw(
+                        default_cfg["order_budget_krw"], ref_p, fx_now, n_held
+                    )
+                    if q_info["order_qty"] > 0:
+                        c.execute(
+                            "UPDATE etf_us_kis_holdings SET qty = ? WHERE user_id = 'admin' AND ticker = ?",
+                            (q_info["order_qty"], tkr),
+                        )
             conn.commit()
             conn.close()
             with open(cfg_path, "w", encoding="utf-8") as f:
                 json.dump(default_cfg, f, ensure_ascii=False, indent=2)
         except Exception as mig_err:
-            print(f"[KIS_ETF_US] 100주 디폴트 마이그레이션 참고: {mig_err}")
+            print(f"[KIS_ETF_US] 5천만원 디폴트 마이그레이션 참고: {mig_err}")
 
     try:
         default_cfg["order_qty"] = max(1, min(100000, int(default_cfg.get("order_qty") or 100)))
@@ -347,6 +437,8 @@ def update_kis_etf_us_config(updates: Dict[str, Any], user_id: str = "admin") ->
         cfg["cano"] = str(updates["cano"]).strip()[:14]
     if "acnt_prdt_cd" in updates and str(updates["acnt_prdt_cd"]).strip():
         cfg["acnt_prdt_cd"] = str(updates["acnt_prdt_cd"]).strip()[:4]
+    if "order_budget_krw" in updates and updates["order_budget_krw"] is not None:
+        cfg["order_budget_krw"] = max(100000, min(10000000000, int(float(updates["order_budget_krw"]))))
     if "order_qty" in updates and updates["order_qty"] is not None:
         cfg["order_qty"] = max(1, min(100000, int(updates["order_qty"])))
     if "ord_dvsn" in updates and str(updates["ord_dvsn"]) in ("33", "34", "00"):
@@ -373,10 +465,12 @@ def update_kis_etf_us_config(updates: Dict[str, Any], user_id: str = "admin") ->
     if "last_auto_traded_us_date" in updates:
         cfg["last_auto_traded_us_date"] = str(updates["last_auto_traded_us_date"])
     cfg["default_100_migrated"] = True
+    cfg["default_50m_krw_migrated"] = True
 
     # DB(user_trading_accounts)에도 동기화
     try:
         db_sync: Dict[str, Any] = {
+            "etf_order_budget_krw": cfg["order_budget_krw"],
             "etf_order_qty": cfg["order_qty"],
             "etf_auto_trade": cfg["auto_trade_enabled"],
             "account_mode": cfg["mode"],
@@ -399,6 +493,7 @@ def update_kis_etf_us_config(updates: Dict[str, Any], user_id: str = "admin") ->
         "mode",
         "cano",
         "acnt_prdt_cd",
+        "order_budget_krw",
         "order_qty",
         "ord_dvsn",
         "auto_trade_enabled",
@@ -409,6 +504,7 @@ def update_kis_etf_us_config(updates: Dict[str, Any], user_id: str = "admin") ->
         "weights",
         "last_auto_traded_us_date",
         "default_100_migrated",
+        "default_50m_krw_migrated",
     ]
     to_save = {k: cfg[k] for k in save_keys if k in cfg}
     with open(cfg_path, "w", encoding="utf-8") as f:
@@ -505,8 +601,12 @@ def get_current_etf_signal(
     w5: Optional[float] = None,
     w20: Optional[float] = None,
     user_id: str = "admin",
+    order_budget_krw: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """현재 ETF 투자전략 설정 기준 추천 타겟 ETF(들)와 스코어 정보를 반환합니다."""
+    """
+    현재 ETF 투자전략 설정 기준 추천 타겟 ETF(들)와 스코어 정보 및
+    총 주문 한도 금액(디폴트 5천만 원) 이내에서 각 ETF 가격으로 나눈 자동 산출 주문 수량을 반환합니다.
+    """
     uid = _normalize_uid(user_id)
     cfg = get_kis_etf_us_config(user_id=uid)
     use_criteria = criteria or cfg.get("criteria", "sharpe")
@@ -515,6 +615,12 @@ def get_current_etf_signal(
     use_w1 = w1 if w1 is not None else float(w_cfg.get("w1", 0.5))
     use_w5 = w5 if w5 is not None else float(w_cfg.get("w5", 0.3))
     use_w20 = w20 if w20 is not None else float(w_cfg.get("w20", 0.2))
+    budget_krw = int(
+        order_budget_krw
+        if (order_budget_krw is not None and int(order_budget_krw) > 0)
+        else (cfg.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW)
+    )
+    usd_krw_rate = get_live_usd_krw_rate()
 
     ranked = get_etf_strategy_results(
         criteria=use_criteria,
@@ -523,34 +629,68 @@ def get_current_etf_signal(
         w5=use_w5,
         w20=use_w20,
     )
+    valid_items = [it for it in ranked[:use_top_n] if float(it.get("final_score", 0.0)) > 0.0]
+    n_selected = max(1, len(valid_items))
+
     target_tickers: List[str] = []
     target_details: List[Dict[str, Any]] = []
-    for item in ranked[:use_top_n]:
-        if float(item.get("final_score", 0.0)) > 0.0:
-            tkr = item["ticker"]
-            target_tickers.append(tkr)
-            ex_info = US_ETF_EXCHANGE_MAP.get(tkr, {"order_excg": "AMEX"})
-            target_details.append(
-                {
-                    "ticker": tkr,
-                    "name": item.get("name", tkr),
-                    "exchange_cd": ex_info["order_excg"],
-                    "current_price_usd": round(float(item.get("current_price", 0.0)), 2),
-                    "final_score": round(float(item.get("final_score", 0.0)), 3),
-                    "momentum_score": round(float(item.get("momentum_score", 0.0)), 3),
-                    "sharpe_ratio": round(float(item.get("sharpe_ratio", 0.0)), 3),
-                    "order_qty": int(cfg["order_qty"]),
-                }
-            )
+    total_est_usd = 0.0
+    total_est_krw = 0
+
+    for item in valid_items:
+        tkr = item["ticker"]
+        target_tickers.append(tkr)
+        ex_info = US_ETF_EXCHANGE_MAP.get(tkr, {"order_excg": "AMEX"})
+        cur_p_usd = round(float(item.get("current_price", 0.0)), 2)
+        if cur_p_usd <= 0:
+            cur_p_usd = get_us_etf_closing_or_live_price(tkr)
+
+        q_calc = calc_etf_qty_within_budget_krw(
+            budget_krw=budget_krw,
+            price_usd=cur_p_usd,
+            usd_krw_rate=usd_krw_rate,
+            num_targets=n_selected,
+        )
+        total_est_usd = round(total_est_usd + q_calc["est_order_amount_usd"], 2)
+        total_est_krw += q_calc["est_order_amount_krw"]
+
+        target_details.append(
+            {
+                "ticker": tkr,
+                "name": item.get("name", tkr),
+                "exchange_cd": ex_info["order_excg"],
+                "current_price_usd": cur_p_usd,
+                "current_price_krw": q_calc["price_krw"],
+                "final_score": round(float(item.get("final_score", 0.0)), 3),
+                "momentum_score": round(float(item.get("momentum_score", 0.0)), 3),
+                "sharpe_ratio": round(float(item.get("sharpe_ratio", 0.0)), 3),
+                "order_qty": q_calc["order_qty"],
+                "allocated_budget_krw": q_calc["allocated_budget_krw"],
+                "allocated_budget_usd": q_calc["allocated_budget_usd"],
+                "est_order_amount_usd": q_calc["est_order_amount_usd"],
+                "est_order_amount_krw": q_calc["est_order_amount_krw"],
+                "usd_krw_rate": usd_krw_rate,
+            }
+        )
 
     is_cash_defense = len(target_tickers) == 0
+    target_with_qty_str = (
+        ", ".join([f"{d['ticker']}({d['order_qty']}주)" for d in target_details])
+        if target_details
+        else "CASH (현금 방어)"
+    )
     return {
         "criteria": use_criteria,
         "top_n": use_top_n,
         "weights": {"w1": use_w1, "w5": use_w5, "w20": use_w20},
+        "order_budget_krw": budget_krw,
+        "usd_krw_rate": usd_krw_rate,
+        "total_est_order_usd": total_est_usd,
+        "total_est_order_krw": total_est_krw,
         "is_cash_defense": is_cash_defense,
         "target_tickers": target_tickers,
         "target_display": ", ".join(target_tickers) if target_tickers else "CASH (현금 방어)",
+        "target_with_qty_display": target_with_qty_str,
         "target_details": target_details,
         "last_updated": ranked[0].get("last_updated", "") if ranked else "",
     }
@@ -563,20 +703,38 @@ def inquire_kis_etf_us_account(
     w5: Optional[float] = None,
     w20: Optional[float] = None,
     user_id: str = "admin",
+    order_budget_krw: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     회원별(user_id) 증권사 해외주식 계좌 잔고 및 내장 원장 보유 현황, 당일 장마감 교체 시그널 여부를 통합 조회합니다.
-    - 일반회원(user_id != 'admin')이 아직 본인 계좌를 연결하지 않은 경우(is_connected == False):
-      관리자의 한투 모의계좌(44790516-01) 및 보유/주문 내역을 일절 노출하지 않고 빈 상태를 반환합니다.
+    - 주문 수량은 총 주문 한도 금액(디폴트 5,000만 원)을 넘지 않도록 선택된 각 ETF의 현재가로 나눈 수량(내림)으로 산출됩니다.
     """
     _init_etf_kis_tables()
     uid = _normalize_uid(user_id)
     cfg = get_kis_etf_us_config(user_id=uid)
     is_mock = cfg["is_mock"]
     sess = get_us_market_session_info()
-    signal = get_current_etf_signal(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid)
-    default_qty = int(cfg["order_qty"])
+    budget_krw = int(
+        order_budget_krw
+        if (order_budget_krw is not None and int(order_budget_krw) > 0)
+        else (cfg.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW)
+    )
+    signal = get_current_etf_signal(
+        criteria=criteria,
+        top_n=top_n,
+        w1=w1,
+        w5=w5,
+        w20=w20,
+        user_id=uid,
+        order_budget_krw=budget_krw,
+    )
+    usd_krw_rate = float(signal.get("usd_krw_rate") or get_live_usd_krw_rate())
+    cfg["usd_krw_rate"] = usd_krw_rate
+    cfg["order_budget_krw"] = budget_krw
     target_disp = signal["target_display"]
+    target_qty_disp = signal.get("target_with_qty_display") or target_disp
+    first_target_qty = int(signal["target_details"][0]["order_qty"]) if signal.get("target_details") else int(cfg["order_qty"])
+    budget_man_str = f"{budget_krw // 10000:,}만원" if budget_krw % 10000 == 0 else f"{budget_krw:,}원"
 
     # 일반회원이 아직 본인 증권사 계좌를 등록/연결하지 않은 경우 -> 관리자 계좌 및 잔고 절대 비노출
     if uid != "admin" and not cfg.get("is_connected", False):
@@ -585,12 +743,13 @@ def inquire_kis_etf_us_account(
             "market_session": sess,
             "reservation_summary": {
                 "active": False,
-                "reserved_qty": default_qty,
+                "reserved_budget_krw": budget_krw,
+                "reserved_qty": first_target_qty,
                 "reserved_at_kst": "계좌 미연결",
                 "cutoff_time_et": "15:50 ET (미국장 마감 10분 전 최종 신호 확정)",
                 "cutoff_time_kst": sess.get("auto_close_order_time_kst", "05:50 KST (15:50 ET)"),
                 "current_holding_display": "계좌 미연결",
-                "preview_target_display": f"{target_disp} ({default_qty}주)",
+                "preview_target_display": f"{target_qty_disp} (총 {budget_man_str} 한도 내)",
                 "execution_rule": "본인 증권사 계좌를 연결하면 미국장 마감 10분 전(15:50 ET) 최종 신호로 개별 자동매매가 가동됩니다.",
             },
             "broker_connected": False,
@@ -612,7 +771,7 @@ def inquire_kis_etf_us_account(
                 "tr_id_mock": "개별 증권사 계좌 연동 대기",
                 "tr_id_live": "개별 증권사 실전/모의계좌 독립 운용",
                 "closing_system": "미국 정규장 마감 10분 전(15:50 ET) 최종 신호 확정 → 종가체결 자동매매",
-                "default_qty": f"{default_qty}주 (디폴트 100주 · 직접 입력 가능)",
+                "default_qty": f"총 주문 한도 {budget_man_str} 이내 ETF 가격별 수량 자동 산출 ({target_qty_disp})",
             },
         }
 
@@ -738,9 +897,10 @@ def inquire_kis_etf_us_account(
 
     for tgt in signal["target_details"]:
         tkr = tgt["ticker"]
+        tgt_qty = int(tgt.get("order_qty") or first_target_qty)
         existing = next((h for h in effective_holdings if h["ticker"] == tkr), None)
         existing_qty = int(existing["qty"]) if existing else 0
-        diff_qty = default_qty - existing_qty
+        diff_qty = tgt_qty - existing_qty
         if diff_qty > 0:
             buy_plan.append(
                 {
@@ -749,11 +909,14 @@ def inquire_kis_etf_us_account(
                     "name": tgt["name"],
                     "exchange_cd": tgt["exchange_cd"],
                     "qty": diff_qty,
+                    "target_qty": tgt_qty,
                     "est_price_usd": tgt["current_price_usd"],
+                    "est_amount_krw": tgt.get("est_order_amount_krw", 0),
+                    "allocated_budget_krw": tgt.get("allocated_budget_krw", budget_krw),
                     "reason": (
-                        f"신규 1위 진입 ({tkr} {diff_qty}주 종가매수)"
+                        f"신규 진입 ({tkr} {diff_qty}주 · 배정 한도 {tgt.get('allocated_budget_krw', budget_krw):,}원 내 종가매수)"
                         if existing_qty == 0 and not held_tickers
-                        else f"리밸런싱 교체 매수 ({tkr} {diff_qty}주 종가매수)"
+                        else f"리밸런싱 교체 매수 ({tkr} {diff_qty}주 · 배정 한도 {tgt.get('allocated_budget_krw', budget_krw):,}원 내 종가매수)"
                     ),
                 }
             )
@@ -765,16 +928,24 @@ def inquire_kis_etf_us_account(
                     "name": tgt["name"],
                     "exchange_cd": tgt["exchange_cd"],
                     "qty": abs(diff_qty),
+                    "target_qty": tgt_qty,
                     "est_price_usd": tgt["current_price_usd"],
-                    "reason": f"목표 수량({default_qty}주) 맞춤 일부 매도",
+                    "reason": f"목표 한도 금액({budget_man_str}) 기준 수량({tgt_qty}주) 맞춤 일부 매도",
                 }
             )
 
     rotation_needed = len(sell_plan) > 0 or len(buy_plan) > 0
     if not held_tickers and target_tickers:
-        signal_status_label = f"신규 진입 대기 (현재 미보유 → {signal['target_display']} {default_qty}주 종가매수 권장)"
+        signal_status_label = f"신규 진입 대기 (현재 미보유 → 총 {budget_man_str} 한도 내 {target_qty_disp} 종가매수 권장)"
     elif rotation_needed:
-        signal_status_label = f"⚡ 교체 시그널 발생! (보유: {', '.join(held_tickers)} ➔ 목표: {signal['target_display']} {default_qty}주)"
+        # 동일 종목 보유 중이나 실시간 가격/환율 미세 변동으로 수량만 차이 나는 경우 안내 명확화
+        if set(held_tickers) == set(target_tickers):
+            signal_status_label = f"✅ 추천 타겟 일치 ({', '.join(held_tickers)}) — {budget_man_str} 한도 기준 산출수량: {target_qty_disp}"
+            rotation_needed = False
+            sell_plan = [s for s in sell_plan if s["ticker"] not in target_tickers]
+            buy_plan = [b for b in buy_plan if b["ticker"] not in held_tickers]
+        else:
+            signal_status_label = f"⚡ 교체 시그널 발생! (보유: {', '.join(held_tickers)} ➔ 목표: {target_qty_disp} · 총 {budget_man_str} 한도)"
     else:
         signal_status_label = f"✅ 포지션 일치·유지중 (보유: {', '.join(held_tickers) if held_tickers else 'CASH'} / 추가 매매 불필요)"
 
@@ -784,15 +955,16 @@ def inquire_kis_etf_us_account(
 
     reservation_summary = {
         "active": bool(cfg.get("auto_trade_enabled", True)),
-        "reserved_qty": default_qty,
+        "reserved_budget_krw": budget_krw,
+        "reserved_qty": first_target_qty,
         "reserved_at_kst": cfg.get("reserved_at_kst") or "상시 자동예약 가동중",
         "cutoff_time_et": "15:50 ET (미국장 마감 10분 전 최종 신호 확정)",
         "cutoff_time_kst": sess.get("auto_close_order_time_kst", "05:50 KST (15:50 ET)"),
         "current_holding_display": held_disp,
-        "preview_target_display": f"{target_disp} ({default_qty}주)" if not signal["is_cash_defense"] else "CASH (현금방어)",
+        "preview_target_display": f"{target_qty_disp} (총 {budget_man_str} 한도 내)" if not signal["is_cash_defense"] else "CASH (현금방어)",
         "execution_rule": (
             f"미국장 마감 10분 전(15:50 ET)까지 집계된 최종 신호로 "
-            f"[기존 보유 ETF({held_disp}) 전량 매도 + 신규 추천 1위 ETF({target_disp}) {default_qty}주 동시 종가매수] 자동 집행"
+            f"[기존 보유 ETF({held_disp}) 전량 매도 + 총 {budget_man_str} 한도 이내 신규 추천 ETF({target_qty_disp}) 동시 종가매수] 자동 집행"
         ),
     }
 
@@ -819,7 +991,7 @@ def inquire_kis_etf_us_account(
             "tr_id_mock": "VTTT1002U (미국 모의매수) / VTTT1001U (미국 모의매도)",
             "tr_id_live": "TTTT1002U (미국 실전매수) / TTTT1006U (미국 실전매도)",
             "closing_system": "미국 정규장 마감 10분 전(15:50 ET / 한국시간 04:50·05:50) 최종 신호 확정 → MOC 종가체결(33 / 모의지정가 00)",
-            "default_qty": f"{default_qty}주 (디폴트 100주 · 직접 입력 가능)",
+            "default_qty": f"총 주문 한도 {budget_man_str} (디폴트 5,000만 원) 이내 ETF 가격별 수량 자동 산출 ({target_qty_disp})",
         },
     }
 
@@ -1053,9 +1225,11 @@ def execute_etf_us_rebalance_or_order(
     force_rebalance: bool = False,
     reason: str = "ETF 투자전략 미국장 마감 10분 전(15:50 ET) 예약 자동주문",
     user_id: str = "admin",
+    order_budget_krw: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     회원별(user_id) ETF 투자전략의 미국장 마감 10분 전(15:50 ET) 최종 신호 기준 예약/종가체결 주문을 실행합니다.
+    - 총 주문 한도 금액(order_budget_krw, 디폴트 5,000만 원)을 넘지 않도록 선택된 각 ETF 가격으로 나눈 수량(내림)으로 주문을 실행합니다.
     """
     _init_etf_kis_tables()
     uid = _normalize_uid(user_id)
@@ -1072,21 +1246,39 @@ def execute_etf_us_rebalance_or_order(
             ),
         }
 
+    cfg_updates_init: Dict[str, Any] = {}
+    if order_budget_krw is not None and int(order_budget_krw) >= 100000:
+        cfg_updates_init["order_budget_krw"] = int(order_budget_krw)
     effective_input_qty = order_qty if order_qty is not None else manual_qty
     if effective_input_qty is not None and int(effective_input_qty) > 0:
-        update_kis_etf_us_config({"order_qty": int(effective_input_qty)}, user_id=uid)
+        cfg_updates_init["order_qty"] = int(effective_input_qty)
+    if cfg_updates_init:
+        update_kis_etf_us_config(cfg_updates_init, user_id=uid)
 
     cfg = get_kis_etf_us_config(user_id=uid)
-    default_qty = int(cfg["order_qty"])
+    budget_krw = int(cfg.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW)
+    budget_man_str = f"{budget_krw // 10000:,}만원" if budget_krw % 10000 == 0 else f"{budget_krw:,}원"
     ord_dvsn = str(cfg.get("ord_dvsn", "33"))
     broker_label = cfg.get("broker_name") or "한국투자증권"
 
     status_before = inquire_kis_etf_us_account(
-        criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+        criteria=criteria,
+        top_n=top_n,
+        w1=w1,
+        w5=w5,
+        w20=w20,
+        user_id=uid,
+        order_budget_krw=budget_krw,
     )
     prev_tickers = status_before.get("held_tickers", [])
     prev_str = ", ".join(prev_tickers) if prev_tickers else "CASH"
     target_str = status_before["signal"]["target_display"]
+    target_with_qty_str = status_before["signal"].get("target_with_qty_display") or target_str
+    first_target_qty = (
+        int(status_before["signal"]["target_details"][0]["order_qty"])
+        if status_before["signal"].get("target_details")
+        else int(cfg["order_qty"])
+    )
 
     # 1) 미국장 마감 10분 전(15:50 ET) 예약 자동주문 등록 모드
     if action == "RESERVE_US_CLOSE":
@@ -1097,7 +1289,8 @@ def execute_etf_us_rebalance_or_order(
         hhmm_et = et_now.hour * 100 + et_now.minute
 
         cfg_updates: Dict[str, Any] = {
-            "order_qty": default_qty,
+            "order_budget_krw": budget_krw,
+            "order_qty": first_target_qty,
             "auto_trade_enabled": True,
             "reservation_active": True,
             "reserved_at_kst": now_kst_str,
@@ -1113,14 +1306,14 @@ def execute_etf_us_rebalance_or_order(
         if et_now.weekday() < 5 and 1550 <= hhmm_et <= 1600:
             return execute_etf_us_rebalance_or_order(
                 action="AUTO_ROTATE",
-                order_qty=default_qty,
+                order_budget_krw=budget_krw,
                 criteria=criteria,
                 top_n=top_n,
                 w1=w1,
                 w5=w5,
                 w20=w20,
                 force_rebalance=force_rebalance,
-                reason=f"미국장 마감 10분 전({et_now.strftime('%H:%M ET')}) 최종 신호 확정 즉시 집행 ({default_qty}주)",
+                reason=f"미국장 마감 10분 전({et_now.strftime('%H:%M ET')}) 최종 신호 확정 즉시 집행 (총 {budget_man_str} 한도 내 {target_with_qty_str})",
                 user_id=uid,
             )
 
@@ -1133,7 +1326,7 @@ def execute_etf_us_rebalance_or_order(
         reserve_order_no = f"RSV1550-{now_kst.strftime('%H%M%S')}"
         reserve_msg = (
             f"[{broker_label}({cfg['account_display']}) 예약 자동주문 등록 완료] 미국장 마감 10분 전(15:50 ET / {status_before['market_session']['auto_close_order_time_kst']}) "
-            f"최종 신호 확정 시 [기존 보유({prev_str}) 전량 매도 + 신규 1위 ETF(현재기준 {target_str}) {default_qty}주 종가매수] 자동 실행"
+            f"최종 신호 확정 시 [기존 보유({prev_str}) 전량 매도 + 총 {budget_man_str} 한도 내 신규 추천 ETF({target_with_qty_str}) 종가매수] 자동 실행"
         )
         c.execute(
             """
@@ -1153,23 +1346,23 @@ def execute_etf_us_rebalance_or_order(
                 target_str,
                 US_ETF_EXCHANGE_MAP.get(target_str, {}).get("order_excg", "AMEX"),
                 "RESERVE(장마감예약)",
-                default_qty,
+                first_target_qty,
                 ord_dvsn,
                 "15:50 ET 최종신호 MOC예약",
                 est_price,
                 prev_str,
-                f"{target_str}({default_qty}주)",
+                f"{target_with_qty_str}({budget_man_str}한도)",
                 "RESERVED_1550_ET",
                 reserve_order_no,
                 reserve_msg,
-                reason or f"미국장 마감 10분 전(15:50 ET) 최종 신호 기준 {default_qty}주 교체 자동주문 예약",
+                reason or f"미국장 마감 10분 전(15:50 ET) 최종 신호 기준 총 {budget_man_str} 한도 내({target_with_qty_str}) 교체 자동주문 예약",
             ),
         )
         conn.commit()
         conn.close()
 
         status_after_rsv = inquire_kis_etf_us_account(
-            criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+            criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid, order_budget_krw=budget_krw
         )
         return {
             "success": True,
@@ -1183,7 +1376,13 @@ def execute_etf_us_rebalance_or_order(
     executed_orders: List[Dict[str, Any]] = []
 
     if action == "MANUAL_ORDER" and manual_ticker:
-        use_qty = max(1, int(manual_qty if manual_qty is not None else default_qty))
+        if manual_qty is not None and int(manual_qty) > 0:
+            use_qty = int(manual_qty)
+        else:
+            p_usd = get_us_etf_closing_or_live_price(manual_ticker)
+            n_sel = max(1, len(status_before["signal"].get("target_details") or [1]))
+            q_info = calc_etf_qty_within_budget_krw(budget_krw, p_usd, None, n_sel)
+            use_qty = max(1, int(q_info["order_qty"]))
         use_side = (manual_side or "BUY").upper()
         res = _submit_single_kis_us_order(
             ticker=manual_ticker,
@@ -1191,8 +1390,8 @@ def execute_etf_us_rebalance_or_order(
             qty=use_qty,
             ord_dvsn=ord_dvsn,
             prev_tickers_str=prev_str,
-            target_tickers_str=manual_ticker if use_side == "BUY" else "CASH",
-            reason=reason or f"수동 지정 {manual_ticker} {use_qty}주 종가체결 {use_side}",
+            target_tickers_str=f"{manual_ticker}({use_qty}주)" if use_side == "BUY" else "CASH",
+            reason=reason or f"총 {budget_man_str} 한도 내 {manual_ticker} {use_qty}주 종가체결 {use_side}",
             user_id=uid,
         )
         if not res.get("success"):
@@ -1227,11 +1426,45 @@ def execute_etf_us_rebalance_or_order(
         sell_plan = status_before.get("sell_plan", [])
         buy_plan = status_before.get("buy_plan", [])
 
-        if not sell_plan and not buy_plan and not force_rebalance:
+        # force_rebalance == True 일 때, 만약 기존 종목과 타겟이 다르거나 수량을 5,000만 원 한도 수량으로 맞추는 경우
+        if force_rebalance and not sell_plan and not buy_plan:
+            # 현재 보유 종목이 타겟과 같더라도 총 주문 한도 금액(budget_krw) 기준 목표 수량(target_qty)으로 강제 맞춤
+            for tgt in status_before["signal"].get("target_details", []):
+                tkr = tgt["ticker"]
+                tgt_qty = int(tgt.get("order_qty") or 1)
+                existing = next((h for h in status_before.get("holdings", []) if h["ticker"] == tkr), None)
+                existing_qty = int(existing["qty"]) if existing else 0
+                diff_q = tgt_qty - existing_qty
+                if diff_q > 0:
+                    buy_plan.append(
+                        {
+                            "side": "BUY",
+                            "ticker": tkr,
+                            "name": tgt["name"],
+                            "exchange_cd": tgt["exchange_cd"],
+                            "qty": diff_q,
+                            "est_price_usd": tgt["current_price_usd"],
+                            "reason": f"총 {budget_man_str} 한도 기준 수량({tgt_qty}주) 맞춤 추가 종가매수 ({diff_q}주)",
+                        }
+                    )
+                elif diff_q < 0:
+                    sell_plan.append(
+                        {
+                            "side": "SELL",
+                            "ticker": tkr,
+                            "name": tgt["name"],
+                            "exchange_cd": tgt["exchange_cd"],
+                            "qty": abs(diff_q),
+                            "est_price_usd": tgt["current_price_usd"],
+                            "reason": f"총 {budget_man_str} 한도 기준 수량({tgt_qty}주) 맞춤 일부 종가매도 ({abs(diff_q)}주)",
+                        }
+                    )
+
+        if not sell_plan and not buy_plan:
             return {
                 "success": True,
                 "skipped": True,
-                "message": f"현재 보유 포지션({status_before.get('HeldDisplay', prev_str)})이 추천 타겟({target_str}, {default_qty}주)과 이미 일치하여 추가 매매 없이 보유를 유지합니다. (다가오는 미국장 마감 10분 전 15:50 ET에 최종 신호 재점검)",
+                "message": f"현재 보유 포지션({status_before.get('HeldDisplay', prev_str)})이 총 {budget_man_str} 한도 기준 추천 타겟({target_with_qty_str})과 이미 일치하여 추가 매매 없이 보유를 유지합니다. (다가오는 미국장 마감 10분 전 15:50 ET에 최종 신호 재점검)",
                 "executed_orders": [],
                 "account_status": status_before,
             }
@@ -1243,7 +1476,7 @@ def execute_etf_us_rebalance_or_order(
                 qty=int(s_item["qty"]),
                 ord_dvsn=ord_dvsn,
                 prev_tickers_str=prev_str,
-                target_tickers_str=target_str,
+                target_tickers_str=target_with_qty_str,
                 reason=s_item.get("reason") or reason,
                 user_id=uid,
             )
@@ -1256,7 +1489,7 @@ def execute_etf_us_rebalance_or_order(
                 qty=int(b_item["qty"]),
                 ord_dvsn=ord_dvsn,
                 prev_tickers_str=prev_str,
-                target_tickers_str=target_str,
+                target_tickers_str=target_with_qty_str,
                 reason=b_item.get("reason") or reason,
                 user_id=uid,
             )
@@ -1266,7 +1499,7 @@ def execute_etf_us_rebalance_or_order(
     update_kis_etf_us_config({"last_auto_traded_us_date": us_today}, user_id=uid)
 
     status_after = inquire_kis_etf_us_account(
-        criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid
+        criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20, user_id=uid, order_budget_krw=budget_krw
     )
     summary_text = (
         " / ".join([f"{o['side']} {o['ticker']} {o['qty']}주(@${o['exec_price_usd']:.2f})" for o in executed_orders])
@@ -1276,7 +1509,7 @@ def execute_etf_us_rebalance_or_order(
     return {
         "success": True,
         "skipped": False,
-        "message": f"{broker_label}({cfg['account_display']}) 미국장 종가체결 주문 완료: {summary_text}",
+        "message": f"{broker_label}({cfg['account_display']}) 미국장 종가체결 주문 완료 (총 {budget_man_str} 한도 이내): {summary_text}",
         "executed_orders": executed_orders,
         "account_status": status_after,
     }
@@ -1346,10 +1579,11 @@ def run_scheduled_us_market_close_etf_rotation(user_id: str = "admin") -> Dict[s
     except Exception as e:
         print(f"[KIS_ETF_US] 미국장 마감 10분 전(15:50 ET) ETF 가격 갱신 참고: {e}")
 
+    budget_krw = int(cfg.get("order_budget_krw") or DEFAULT_ORDER_BUDGET_KRW)
     return execute_etf_us_rebalance_or_order(
         action="AUTO_ROTATE",
-        order_qty=int(cfg.get("order_qty", 100)),
-        reason=f"미국장 마감 10분 전({et_now.strftime('%Y-%m-%d %H:%M ET')}) 최종 신호 확정 예약 자동주문 집행 ({cfg['order_qty']}주)",
+        order_budget_krw=budget_krw,
+        reason=f"미국장 마감 10분 전({et_now.strftime('%Y-%m-%d %H:%M ET')}) 최종 신호 확정 예약 자동주문 집행 (총 {budget_krw:,}원 한도 내)",
         user_id=uid,
     )
 

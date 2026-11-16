@@ -151,12 +151,17 @@ def init_db():
             app_secret TEXT DEFAULT '',
             max_total_capital REAL DEFAULT 100000000,
             max_per_stock_capital REAL DEFAULT 5000000,
+            etf_order_budget_krw REAL DEFAULT 50000000,
             etf_order_qty INTEGER DEFAULT 100,
             etf_auto_trade INTEGER DEFAULT 1,
             is_connected INTEGER DEFAULT 0,
             updated_at TEXT
         )
     ''')
+    try:
+        c.execute("ALTER TABLE user_trading_accounts ADD COLUMN etf_order_budget_krw REAL DEFAULT 50000000")
+    except Exception:
+        pass
 
     # 보유 잔고 테이블 (회원별 user_id 분리)
     c.execute('''
@@ -1244,9 +1249,9 @@ def get_user_trading_account(user_id: str, include_secrets: bool = False) -> dic
                 INSERT OR REPLACE INTO user_trading_accounts (
                     user_id, user_name, broker_code, broker_name, account_mode,
                     account_no, acnt_prdt_cd, app_key, app_secret,
-                    max_total_capital, max_per_stock_capital, etf_order_qty, etf_auto_trade,
+                    max_total_capital, max_per_stock_capital, etf_order_budget_krw, etf_order_qty, etf_auto_trade,
                     is_connected, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "admin",
@@ -1260,6 +1265,7 @@ def get_user_trading_account(user_id: str, include_secrets: bool = False) -> dic
                     app_s,
                     100000000.0,
                     5000000.0,
+                    50000000.0,
                     100,
                     1,
                     1,
@@ -1291,6 +1297,7 @@ def get_user_trading_account(user_id: str, include_secrets: bool = False) -> dic
                 "app_key_masked": "",
                 "max_total_capital": 100000000.0,
                 "max_per_stock_capital": 5000000.0,
+                "etf_order_budget_krw": 50000000,
                 "etf_order_qty": 100,
                 "etf_auto_trade": True,
                 "is_connected": False,
@@ -1319,6 +1326,7 @@ def get_user_trading_account(user_id: str, include_secrets: bool = False) -> dic
         "app_key_masked": (app_k[:4] + "••••" + app_k[-4:]) if len(app_k) >= 8 else ("••••" if app_k else ""),
         "max_total_capital": float(d.get("max_total_capital") or 100000000.0),
         "max_per_stock_capital": float(d.get("max_per_stock_capital") or 5000000.0),
+        "etf_order_budget_krw": int(float(d.get("etf_order_budget_krw") or 50000000)),
         "etf_order_qty": int(d.get("etf_order_qty") or 100),
         "etf_auto_trade": bool(d.get("etf_auto_trade", 1)),
         "is_connected": is_conn,
@@ -1355,6 +1363,7 @@ def save_user_trading_account(user_id: str, payload: dict) -> dict:
 
     max_cap = float(payload.get("max_total_capital") or current.get("max_total_capital") or 100000000.0)
     max_per = float(payload.get("max_per_stock_capital") or round(max_cap / 20.0, 0) or 5000000.0)
+    etf_budget_krw = max(100000, min(10000000000, int(float(payload.get("etf_order_budget_krw") or current.get("etf_order_budget_krw") or 50000000))))
     etf_qty = max(1, min(100000, int(payload.get("etf_order_qty") or current.get("etf_order_qty") or 100)))
     etf_auto = 1 if bool(payload.get("etf_auto_trade", current.get("etf_auto_trade", True))) else 0
 
@@ -1377,9 +1386,9 @@ def save_user_trading_account(user_id: str, payload: dict) -> dict:
         INSERT OR REPLACE INTO user_trading_accounts (
             user_id, user_name, broker_code, broker_name, account_mode,
             account_no, acnt_prdt_cd, app_key, app_secret,
-            max_total_capital, max_per_stock_capital, etf_order_qty, etf_auto_trade,
+            max_total_capital, max_per_stock_capital, etf_order_budget_krw, etf_order_qty, etf_auto_trade,
             is_connected, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             uid,
@@ -1393,6 +1402,7 @@ def save_user_trading_account(user_id: str, payload: dict) -> dict:
             app_s,
             max_cap,
             max_per,
+            float(etf_budget_krw),
             etf_qty,
             etf_auto,
             is_conn,

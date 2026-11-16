@@ -70,6 +70,7 @@ export default function UserTradingAccountModal({
   const [appSecret, setAppSecret] = useState('');
   const [maxTotalCapital, setMaxTotalCapital] = useState(100000000);
   const [maxPerStockCapital, setMaxPerStockCapital] = useState(5000000);
+  const [etfOrderBudgetKrw, setEtfOrderBudgetKrw] = useState(50000000);
   const [etfOrderQty, setEtfOrderQty] = useState(100);
   const [etfAutoTrade, setEtfAutoTrade] = useState(true);
 
@@ -85,8 +86,8 @@ export default function UserTradingAccountModal({
       if (js.supported_brokers && Array.isArray(js.supported_brokers) && js.supported_brokers.length > 0) {
         setBrokers(js.supported_brokers);
       }
-      if (js.data) {
-        const d: UserTradingAccountInfo = js.data;
+      const d = js.data || js.account;
+      if (d) {
         setAccountInfo(d);
         setBrokerCode(d.broker_code || 'KIS');
         setAccountNickname(d.account_nickname || `${userName} 전용 계좌`);
@@ -95,6 +96,7 @@ export default function UserTradingAccountModal({
         setAcntPrdtCd(d.acnt_prdt_cd || '01');
         setMaxTotalCapital(Number(d.max_total_capital || 100000000));
         setMaxPerStockCapital(Number(d.max_per_stock_capital || 5000000));
+        setEtfOrderBudgetKrw(Number(d.etf_order_budget_krw || 50000000));
         setEtfOrderQty(Number(d.etf_order_qty || 100));
         setEtfAutoTrade(Boolean(d.etf_auto_trade ?? true));
       }
@@ -134,6 +136,7 @@ export default function UserTradingAccountModal({
         acnt_prdt_cd: (acntPrdtCd.trim() || '01').slice(0, 2),
         max_total_capital: Number(maxTotalCapital) || 100000000,
         max_per_stock_capital: Number(maxPerStockCapital) || 5000000,
+        etf_order_budget_krw: Math.max(100000, Number(etfOrderBudgetKrw) || 50000000),
         etf_order_qty: Math.max(1, Number(etfOrderQty) || 100),
         etf_auto_trade: etfAutoTrade,
       };
@@ -414,16 +417,16 @@ export default function UserTradingAccountModal({
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-gray-300 mb-1">
-                  미국 ETF 기본 주문수량 (주)
+                <label className="block text-[11px] font-bold text-emerald-300 mb-1">
+                  미국 ETF 총 주문 한도 금액 (원 · 디폴트 5천만)
                 </label>
                 <input
                   type="number"
-                  min={1}
-                  max={100000}
-                  value={etfOrderQty}
-                  onChange={(e) => setEtfOrderQty(Number(e.target.value))}
-                  className="w-full bg-[#0d121d] border border-gray-700 rounded-lg px-3 py-2 text-xs text-white font-mono outline-none"
+                  step={1000000}
+                  min={1000000}
+                  value={etfOrderBudgetKrw}
+                  onChange={(e) => setEtfOrderBudgetKrw(Number(e.target.value))}
+                  className="w-full bg-[#0d121d] border border-emerald-600/60 rounded-lg px-3 py-2 text-xs text-emerald-300 font-mono font-bold outline-none"
                 />
               </div>
             </div>
