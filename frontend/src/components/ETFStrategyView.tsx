@@ -1011,68 +1011,94 @@ export default function ETFStrategyView({
             </p>
           </div>
           <div className="mt-2 md:mt-0 w-full md:w-auto flex flex-wrap items-center gap-2">
-            {/* 주문 주수 직접 입력창 (디폴트 100주) */}
-            <div className="flex items-center gap-1.5 bg-slate-950/90 border border-emerald-400/60 px-3 py-1.5 rounded-xl shadow-lg">
-              <span className="text-xs font-extrabold text-emerald-300 whitespace-nowrap">주문 주수:</span>
-              <input
-                type="number"
-                min={1}
-                max={100000}
-                value={kisOrderQty}
-                onChange={(e) => {
-                  const val = Math.max(1, parseInt(e.target.value, 10) || 1);
-                  setKisOrderQty(val);
-                }}
-                onBlur={() => handleSaveKisEtfConfig({ order_qty: kisOrderQty })}
-                className="w-20 bg-slate-900 border border-emerald-500/50 rounded px-2 py-1 text-center font-mono font-extrabold text-white text-sm outline-none focus:border-emerald-300"
-              />
-              <span className="text-xs font-bold text-emerald-200">주 (디폴트 100주)</span>
-            </div>
+            {(() => {
+              const targetSummaryList = activeTargetItems.map((it: any) => {
+                const qc = calcEtfOrderFromBudget(it.current_price);
+                return { ticker: it.ticker, qty: qc.qty, estKrw: qc.estKrw };
+              });
+              const totalConvertedQty = targetSummaryList.reduce((acc, x) => acc + x.qty, 0);
+              const convertedTargetLabel =
+                targetSummaryList.length > 0
+                  ? targetSummaryList.map((x) => `${x.ticker}(${x.qty.toLocaleString()}주)`).join(', ')
+                  : 'CASH';
+              const shortQtyLabel =
+                targetSummaryList.length === 1
+                  ? `${targetSummaryList[0].qty.toLocaleString()}주`
+                  : targetSummaryList.length > 1
+                  ? `총 ${totalConvertedQty.toLocaleString()}주`
+                  : 'CASH';
 
-            {/* 미국장 마감 10분 전(15:50 ET) 최종신호 예약 자동주문 등록 버튼 */}
-            <button
-              type="button"
-              disabled={kisLoading}
-              onClick={() => handleExecuteKisEtfOrder('RESERVE_US_CLOSE', { qty: kisOrderQty })}
-              className="w-full sm:w-auto bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold shadow-xl transition-all flex items-center justify-center gap-1.5 border border-emerald-400/50 active:scale-95 cursor-pointer"
-            >
-              <span>📅</span>
-              <span>
-                {kisLoading
-                  ? '예약/주문 처리중...'
-                  : `미국장 마감 10분전(15:50 ET) 교체 자동주문 예약 (${kisOrderQty}주)`}
-              </span>
-              <span className="bg-black/40 px-2 py-0.5 text-[11px] rounded text-emerald-200 border border-emerald-400/30 font-mono">
-                보유: {kisAccount?.HeldDisplay || 'CASH'} → 타겟: {kisAccount?.signal?.target_display || topETF?.ticker}({kisOrderQty}주)
-              </span>
-            </button>
+              return (
+                <>
+                  {/* 주문 금액 직접 입력창 (디폴트 5,000만 원 · 가격대비 환산 주수 자동 계산) */}
+                  <div className="flex flex-wrap items-center gap-1.5 bg-slate-950/90 border border-emerald-400/60 px-3 py-1.5 rounded-xl shadow-lg">
+                    <span className="text-xs font-extrabold text-emerald-300 whitespace-nowrap">주문 금액:</span>
+                    <input
+                      type="text"
+                      value={kisOrderBudgetKrw.toLocaleString()}
+                      onChange={(e) => {
+                        const raw = Number(e.target.value.replace(/[^0-9]/g, ''));
+                        setKisOrderBudgetKrw(Math.max(0, raw));
+                      }}
+                      onBlur={() => {
+                        const validBudget = Math.max(100000, kisOrderBudgetKrw || 50000000);
+                        setKisOrderBudgetKrw(validBudget);
+                        handleSaveKisEtfConfig({ order_budget_krw: validBudget });
+                      }}
+                      className="w-32 bg-slate-900 border border-emerald-500/50 rounded px-2.5 py-1 text-right font-mono font-extrabold text-white text-sm outline-none focus:border-emerald-300"
+                    />
+                    <span className="text-xs font-bold text-emerald-200 whitespace-nowrap">
+                      원 (디폴트 5천만원 · 환산 <strong className="text-yellow-300 font-mono">{shortQtyLabel}</strong>)
+                    </span>
+                  </div>
 
-            {/* 현재 시그널로 즉시 모의체결 실행 버튼 */}
-            <button
-              type="button"
-              disabled={kisLoading}
-              onClick={() => handleExecuteKisEtfOrder('AUTO_ROTATE', { qty: kisOrderQty, force: true })}
-              className="px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg bg-amber-600/90 hover:bg-amber-500 text-white border border-amber-400/50 transition-all cursor-pointer"
-            >
-              ⚡ 즉시 모의체결 ({kisOrderQty}주)
-            </button>
+                  {/* 미국장 마감 10분 전(15:50 ET) 최종신호 예약 자동주문 등록 버튼 */}
+                  <button
+                    type="button"
+                    disabled={kisLoading}
+                    onClick={() => handleExecuteKisEtfOrder('RESERVE_US_CLOSE', { budgetKrw: kisOrderBudgetKrw })}
+                    className="w-full sm:w-auto bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-extrabold shadow-xl transition-all flex flex-wrap items-center justify-center gap-1.5 border border-emerald-400/50 active:scale-95 cursor-pointer"
+                  >
+                    <span>📅</span>
+                    <span>
+                      {kisLoading
+                        ? '예약/주문 처리중...'
+                        : `미국장 마감 10분전(15:50 ET) 교체 자동주문 예약 (${formatKrwMan(kisOrderBudgetKrw)} · ${shortQtyLabel})`}
+                    </span>
+                    <span className="bg-black/40 px-2 py-0.5 text-[11px] rounded text-emerald-200 border border-emerald-400/30 font-mono">
+                      보유: {kisAccount?.HeldDisplay || 'CASH'} → 타겟: {convertedTargetLabel}
+                    </span>
+                  </button>
 
-            {/* 예약 자동매매 ON/OFF 토글 */}
-            <button
-              type="button"
-              onClick={() => {
-                const nextVal = !kisAutoTrade;
-                setKisAutoTrade(nextVal);
-                handleSaveKisEtfConfig({ auto_trade_enabled: nextVal, order_qty: kisOrderQty });
-              }}
-              className={`px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg border transition-all cursor-pointer ${
-                kisAutoTrade
-                  ? 'bg-emerald-950/90 border-emerald-400 text-emerald-300'
-                  : 'bg-gray-900 border-gray-600 text-gray-400'
-              }`}
-            >
-              🤖 장마감 10분전 자동예약: {kisAutoTrade ? `ON (${kisOrderQty}주)` : 'OFF'}
-            </button>
+                  {/* 현재 시그널로 즉시 모의체결 실행 버튼 */}
+                  <button
+                    type="button"
+                    disabled={kisLoading}
+                    onClick={() => handleExecuteKisEtfOrder('AUTO_ROTATE', { budgetKrw: kisOrderBudgetKrw, force: true })}
+                    className="px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg bg-amber-600/90 hover:bg-amber-500 text-white border border-amber-400/50 transition-all cursor-pointer"
+                  >
+                    ⚡ 즉시 모의체결 ({formatKrwMan(kisOrderBudgetKrw)} · {shortQtyLabel})
+                  </button>
+
+                  {/* 예약 자동매매 ON/OFF 토글 */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextVal = !kisAutoTrade;
+                      setKisAutoTrade(nextVal);
+                      handleSaveKisEtfConfig({ auto_trade_enabled: nextVal, order_budget_krw: kisOrderBudgetKrw });
+                    }}
+                    className={`px-3.5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg border transition-all cursor-pointer ${
+                      kisAutoTrade
+                        ? 'bg-emerald-950/90 border-emerald-400 text-emerald-300'
+                        : 'bg-gray-900 border-gray-600 text-gray-400'
+                    }`}
+                  >
+                    🤖 장마감 10분전 자동예약: {kisAutoTrade ? `ON (${formatKrwMan(kisOrderBudgetKrw)} · ${shortQtyLabel})` : 'OFF'}
+                  </button>
+                </>
+              );
+            })()}
 
             <button 
               onClick={() => setShowModelSwap(true)}
