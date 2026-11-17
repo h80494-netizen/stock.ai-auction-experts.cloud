@@ -713,8 +713,8 @@ export default function OrderWindow({
   const isMarketOpenForStats = forceEnable || (now.getHours() > 9) || (now.getHours() === 9 && now.getMinutes() >= 5);
   
   return (
-    <div className="flex h-auto lg:h-[calc(100vh-120px)] w-full bg-black text-gray-200 overflow-y-auto lg:overflow-hidden">
-      <div className="w-full flex flex-col p-2 sm:p-3 h-auto lg:h-full">
+    <div className="flex h-[calc(100vh-115px)] w-full bg-black text-gray-200 overflow-y-auto">
+      <div className="w-full flex flex-col p-2 sm:p-3 pb-10 h-max min-h-full">
         {/* 🏦 회원별 독립 트레이딩 계좌 & 프라이버시 상태 바 */}
         <div className="mb-2 px-3 py-2 rounded-lg bg-[#0d121d] border border-emerald-500/40 flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
@@ -890,7 +890,7 @@ export default function OrderWindow({
         </div>
         
         {/* Table Container with Scrollbar */}
-        <div className="flex-1 min-h-[260px] max-h-[420px] lg:max-h-none border border-gray-800 rounded-lg bg-[#0a0a0a] overflow-x-auto overflow-y-auto">
+        <div className="shrink-0 max-h-[230px] xl:max-h-[270px] border border-gray-800 rounded-lg bg-[#0a0a0a] overflow-x-auto overflow-y-scroll">
           <table className="w-full min-w-[780px] text-xs text-left relative whitespace-nowrap">
             <thead className="bg-gray-900 text-gray-400 border-b border-gray-800 sticky top-0 shadow-md z-10">
               <tr>
@@ -998,13 +998,13 @@ export default function OrderWindow({
           </table>
         </div>
 
-        {/* Holdings / PnL Table (Always Visible) */}
-        <div className="mt-3 flex-none border border-gray-800 rounded-lg bg-[#111]">
-          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-300 flex justify-between items-center text-xs sm:text-sm">
+        {/* Holdings / PnL Table (Always Visible with Clear Scrollbar) */}
+        <div className="mt-3 shrink-0 border border-gray-700 rounded-lg bg-[#111] shadow-lg">
+          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-200 flex justify-between items-center text-xs sm:text-sm">
             <span>📋 보유 잔고 및 실시간 손익 (종가시 최종수익)</span>
-            <span className="text-xs text-gray-400 font-normal">보유 종목: {holdings.length}개</span>
+            <span className="text-xs text-emerald-400 font-bold">보유 종목: {holdings.length}개 (위아래 스크롤 가능)</span>
           </div>
-          <div className="max-h-[260px] overflow-x-auto overflow-y-auto">
+          <div className="min-h-[220px] max-h-[360px] overflow-x-auto overflow-y-scroll">
             <table className="w-full min-w-[680px] text-xs text-left whitespace-nowrap">
               <thead className="bg-[#1a1a1a] text-gray-400 border-b border-gray-800 sticky top-0 z-10">
                 <tr>
