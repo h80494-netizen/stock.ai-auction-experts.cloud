@@ -211,22 +211,13 @@ def job_1531_ledger_record():
             'pnl': item_pnl
         })
         
-    # 손익 계산 및 장부 기록 (100% 보유수량 15:30 최종 종가 매도 확정)
-    if total_buy > 0:
-        metrics = calculate_settlement_metrics(total_buy, total_sell)
-        fees = metrics["fees"]
-        tax = metrics["tax"]
-        net_pnl = metrics["net_pnl"]
-        return_rate = metrics["return_rate"]
-        
-        # 1) 일자별 요약 원장 기록 (trade_ledger)
-        db.add_ledger_record(today_str, total_buy, total_sell, fees, tax, net_pnl, return_rate)
-        # 2) 종목별 상세 매매원장 기록 (trading_ledger) - 15:30 종가 매도 확정
+    # 손익 계산 및 장부 기록 (장중 개별 매도 확정분 + 15:30 최종 종가 매도 확정분 통합 합산)
+    if sell_items:
         db.record_trading_sell_all(today_str, sell_items)
-        # 3) 일별 실현손익 기록 (pnl_history) 동기화
-        db.add_realized_pnl(today_str, net_pnl)
-        
-        print(f"15:30 최종 종가 기준 100% 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
+        summary_after = db.sync_daily_realized_ledger(today_str, user_id="admin")
+        net_pnl = float(summary_after.get("net_pnl", 0.0))
+        return_rate = float(summary_after.get("return_rate", 0.0))
+        print(f"15:30 최종 종가 기준(장중 개별매도 포함) 100% 일괄 매도 정산 완료. 당일 실현 손익: {net_pnl:,.0f}원 ({return_rate:.2f}%)")
         
     # 15:30 장마감 청산 및 원장 이관 완료 후 보유 잔고(holdings) 비우기
     db.clear_holdings()

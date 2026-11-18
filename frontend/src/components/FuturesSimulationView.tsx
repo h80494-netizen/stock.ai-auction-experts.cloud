@@ -769,6 +769,59 @@ export default function FuturesSimulationView({
     }
   };
 
+  const handleEmergencyLiquidateFutures = async () => {
+    const curNet = Number(
+      kisAccountData?.effective_net_contracts ??
+        lockStatus?.prev_contracts ??
+        simData?.last_trading_summary?.target_contracts ??
+        0
+    );
+    const posDesc =
+      curNet > 0
+        ? `매수(Long) +${curNet}계약 → 전량 시장가 매도청산(0계약)`
+        : curNet < 0
+        ? `매도(Short) ${curNet}계약 → 전량 시장가 환매수청산(0계약)`
+        : `보유 계약 확인 및 0계약(FLAT) 즉시 확정`;
+
+    if (
+      !window.confirm(
+        `🚨 [선물 비상 일괄청산 (Kill-Switch) 실행 확인]\n\n현재 포지션: ${posDesc}\n\n인터넷 차단이나 시스템 장애 대비 보유 중인 모든 선물 매수/매도 포지션을 즉시 시장가로 전량 반대매매하여 0계약(FLAT)으로 청산하고 자동주문을 중지하시겠습니까?`
+      )
+    ) {
+      return;
+    }
+
+    setKisOrderLoading(true);
+    try {
+      const res = await callApi("/emergency-liquidate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fallback_current_contracts: curNet,
+          disable_auto_order: true,
+          reason: `🚨 [비상 일괄청산] 선물 매수·매도 포지션(${curNet}계약) 전량 즉시 시장가 청산 (0계약 FLAT)`,
+        }),
+      });
+      if (res?.success && res.data) {
+        if (res.data.account_status) setKisAccountData(res.data.account_status);
+        setKisAutoExecInput(false);
+        setBannerMsg(res.data.message || "🚨 선물 전 포지션 비상 시장가 일괄청산(0계약 FLAT)이 완료되었습니다.");
+        alert(res.data.message || "🚨 선물 전 포지션 비상 시장가 일괄청산(0계약 FLAT)이 완료되었습니다.");
+      } else {
+        throw new Error(res?.message || "비상청산 응답 오류");
+      }
+    } catch (e) {
+      if (typeof window !== "undefined") {
+        localStorage.setItem("emergency_pending_futures_liquidate", String(curNet));
+      }
+      alert(
+        "⚠️ 네트워크/시스템 연결 장애가 감지되어 로컬 비상청산 큐에 즉시 등록되었습니다.\n연결 복구 즉시 0계약(FLAT) 시장가 청산이 자동 전송되며, 인터넷이 완전히 차단된 경우 한국투자증권 파생상품 비상주문 데스크(☎️ 1544-5000)로 전화하여 즉시 반대매매 청산하실 수 있습니다."
+      );
+    } finally {
+      setKisOrderLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchSimulation();
     fetchLedgerOnly();
@@ -2030,6 +2083,48 @@ export default function FuturesSimulationView({
               {pointValueKrw === 50000 ? "약 4,075만원" : "약 2억 375만원"}
             </strong>{" "}
             | 수익률 = 손익(원) ÷ 1억원
+          </div>
+        </div>
+
+        {/* 🚨 비상 일괄청산 (Kill-Switch) & 인터넷 차단·시스템 장애 안전망 바 */}
+        <div className="bg-gradient-to-r from-rose-950/90 via-red-950/80 to-slate-950 border-2 border-rose-500/70 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs shadow-xl">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2.5 py-1 rounded-full bg-rose-600 text-white font-extrabold text-[11px] shadow animate-pulse">
+              🚨 선물 비상 일괄청산 (Kill-Switch)
+            </span>
+            <span className="text-rose-100 font-semibold text-[11px] sm:text-xs">
+              현재 계좌 포지션:{" "}
+              <strong className="text-yellow-300 font-mono">
+                {(() => {
+                  const netC = Number(
+                    kisAccountData?.effective_net_contracts ??
+                      lockStatus?.prev_contracts ??
+                      simData?.last_trading_summary?.target_contracts ??
+                      0
+                  );
+                  return netC > 0 ? `매수(Long) +${netC}계약` : netC < 0 ? `매도(Short) ${netC}계약` : "0계약 (FLAT)";
+                })()}
+              </strong>{" "}
+              · 인터넷 차단이나 시스템 장애 시 보유 선물 매수(Long)·매도(Short) 포지션을 한 번에 시장가로 반대매매하여 <strong>0계약(FLAT)</strong>으로 즉시 청산합니다.
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={kisOrderLoading}
+              onClick={handleEmergencyLiquidateFutures}
+              className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 border border-rose-300 text-white font-extrabold shadow-lg cursor-pointer flex items-center gap-1.5"
+            >
+              <span>🚨</span>
+              <span>
+                {kisOrderLoading
+                  ? "비상청산 실행중..."
+                  : "선물 매수·매도 전량 즉시 시장가 청산 (0계약 FLAT)"}
+              </span>
+            </button>
+            <span className="px-2 py-1 rounded bg-slate-900/90 border border-rose-500/40 text-rose-200 font-mono text-[11px]">
+              ☎️ 인터넷 단절 시 한투 비상주문: 1544-5000
+            </span>
           </div>
         </div>
 

@@ -478,20 +478,30 @@ export default function OrderWindow({
     return pnlHistory.find((h: any) => h.date === todayStr) || null;
   }, [pnlHistory, todayStr]);
 
+  // 금일 장중 개별 매도 확정된 종목 리스트 (예: 리브스메드 등 — 보유 19종목과 함께 총 20종목이 모두 표시되고 매매원장 손익에 반영되도록 관리)
+  const todayIntradaySoldRows = useMemo(() => {
+    const heldSet = new Set(holdings.map((h) => (h.ticker.split(':').pop() || h.ticker).trim()));
+    return detailedLedger.filter((r: any) => {
+      const rTk = String(r.ticker || '').split(':').pop()?.trim() || '';
+      return r.trade_date === todayStr && r.status === 'SELL' && !heldSet.has(rTk);
+    });
+  }, [detailedLedger, todayStr, holdings]);
+
   const isLiquidatedToday = useMemo(() => {
     const todayRows = detailedLedger.filter((r: any) => r.trade_date === todayStr);
     const hasSold = todayRows.some((r: any) => r.status === 'SELL');
     const hasActiveBuy = todayRows.some((r: any) => r.status === 'BUY');
-    return holdings.length === 0 && (Boolean(todaySettledLedger) || (hasSold && !hasActiveBuy));
-  }, [holdings.length, todaySettledLedger, detailedLedger, todayStr]);
+    return holdings.length === 0 && hasSold && !hasActiveBuy;
+  }, [holdings.length, detailedLedger, todayStr]);
 
-  // Compute portfolio totals
+  // Compute portfolio totals (현재 보유 종목 평가액 + 금일 장중 매도확정 종목 실현금액 및 차익 통합 합산)
   const portfolioSummary = useMemo(() => {
     let totalBuyAmount = 0;
     let totalCurrentAmount = 0;
     let totalPnL = 0;
-    
-    if (holdings.length > 0) {
+    let realizedIntradayPnL = 0;
+
+    if (holdings.length > 0 || todayIntradaySoldRows.length > 0) {
       holdings.forEach(h => {
         const cleanTicker = h.ticker.split(':').pop() || h.ticker;
         const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
@@ -505,14 +515,24 @@ export default function OrderWindow({
         totalCurrentAmount += currentAmount;
         totalPnL += pnl;
       });
+      todayIntradaySoldRows.forEach((sr: any) => {
+        const bp = Number(sr.buy_price) || 0;
+        const sp = Number(sr.sell_price) || bp;
+        const q = Number(sr.qty) || 0;
+        const sPnl = sr.pnl !== undefined && sr.pnl !== null ? Number(sr.pnl) : (sp - bp) * q;
+        totalBuyAmount += bp * q;
+        totalCurrentAmount += sp * q;
+        totalPnL += sPnl;
+        realizedIntradayPnL += sPnl;
+      });
     } else if (todaySettledLedger) {
       totalBuyAmount = Number(todaySettledLedger.total_buy) || 0;
       totalCurrentAmount = Number(todaySettledLedger.total_sell) || 0;
       totalPnL = Number(todaySettledLedger.net_pnl) || 0;
     }
 
-    return { totalBuyAmount, totalCurrentAmount, totalPnL };
-  }, [holdings, stocks, livePrices, todaySettledLedger]);
+    return { totalBuyAmount, totalCurrentAmount, totalPnL, realizedIntradayPnL };
+  }, [holdings, todayIntradaySoldRows, stocks, livePrices, todaySettledLedger]);
 
   const handleBuyAll = async () => {
     if (orderStocks.length === 0) return;
@@ -610,24 +630,82 @@ export default function OrderWindow({
     }
   };
 
-  const handleSellSingle = async (ticker: string, qty: number) => {
+  const handleSellSingle = async (ticker: string, qty: number, currentPriceHint?: number, stockNameHint?: string) => {
     try {
       const cleanTicker = ticker.split(':').pop() || ticker;
-      const res = await fetch(`/api/kis/order/${cleanTicker}?qty=${qty}&type=sell&user_id=${encodeURIComponent(effectiveUserId)}`, {
-        method: 'POST',
-        headers: { 'x-user-id': effectiveUserId },
-      });
+      const heldItem = holdings.find((h) => (h.ticker.split(':').pop() || h.ticker) === cleanTicker);
+      const liveP =
+        currentPriceHint ||
+        livePrices[ticker] ||
+        livePrices[cleanTicker] ||
+        livePrices[`KRX:${cleanTicker}`] ||
+        (heldItem as any)?.currentPrice ||
+        heldItem?.buyPrice ||
+        0;
+      const stockName = stockNameHint || heldItem?.name || cleanTicker;
+
+      const res = await fetch(
+        `/api/kis/order/${cleanTicker}?qty=${qty}&type=sell&price=${liveP}&name=${encodeURIComponent(stockName)}&user_id=${encodeURIComponent(effectiveUserId)}`,
+        {
+          method: 'POST',
+          headers: { 'x-user-id': effectiveUserId },
+        }
+      );
       if (!res.ok) throw new Error(res.statusText || 'API Error');
       const data = await res.json();
       if (data.success) {
         await fetchHoldings();
-        alert(`${ticker} 매도 완료 (UI 반영)`);
+        await fetchLedger();
+        const pnlVal = Number(data.pnl || 0);
+        const pnlSign = pnlVal >= 0 ? '+' : '';
+        alert(
+          `✅ [${data.name || stockName}(${cleanTicker}) 장중 매도 체결 및 매매원장 반영 완료]\n\n• 매도수량: ${(data.executed_qty || qty).toLocaleString()}주\n• 체결단가: ${(data.executed_price || liveP).toLocaleString()}원\n• 실현손익: ${pnlSign}${pnlVal.toLocaleString()}원 (매매원장에 즉시 추가됨)`
+        );
       } else {
-        alert(`${ticker} 매도 주문 실패: ${data.error || '알 수 없는 오류'}`);
+        alert(`${cleanTicker} 매도 주문 실패: ${data.error || '알 수 없는 오류'}`);
       }
     } catch (e) {
       console.error(e);
       alert("매도 처리 중 오류가 발생했습니다.");
+    }
+  };
+
+  const handleEmergencySellAllMarket = async () => {
+    if (holdings.length === 0) {
+      alert("현재 보유 중인 미청산 종목이 없습니다 (0종목).");
+      return;
+    }
+    if (
+      !window.confirm(
+        `🚨 [비상 전종목 즉시 시장가 일괄청산 (Kill-Switch) 확인]\n\n현재 보유 중인 ${holdings.length}개 종목 전체를 15:20까지 기다리지 않고 지금 즉시 시장가로 전량 매도 청산하여 매매원장에 확정 기록하시겠습니까?\n\n(현재 예상 총손익: ${portfolioSummary.totalPnL >= 0 ? '+' : ''}${Math.floor(portfolioSummary.totalPnL).toLocaleString()}원)`
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/kis/sell-all?mode=market&user_id=${encodeURIComponent(effectiveUserId)}`, {
+        method: 'POST',
+        headers: { 'x-user-id': effectiveUserId },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.success) {
+        setReservedSellToday(false);
+        await fetchHoldings();
+        await fetchLedger();
+        alert(
+          `🚨 [비상 전종목 즉시 시장가 일괄청산 완료]\n\n보유 종목 전체가 시장가로 즉시 청산되어 매매원장에 확정 기록되었습니다.\n• 금일 확정 순손익: ${(data.net_pnl || 0) >= 0 ? '+' : ''}${Math.floor(Number(data.net_pnl || 0)).toLocaleString()}원`
+        );
+      } else {
+        alert(`비상 일괄매도 실패: ${data.error || '알 수 없는 오류'}`);
+      }
+    } catch (e) {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(`emergency_pending_kr_sell_all_${effectiveUserId}`, 'true');
+      }
+      alert(
+        "⚠️ 인터넷/네트워크 연결 장애가 감지되어 로컬 비상청산 큐에 등록되었습니다.\n인터넷 복구 즉시 전종목 시장가 일괄청산이 자동 실행되며, 아울러 AWS 클라우드 서버의 15:20 동시호가 자동청산 데몬이 PC 연결과 무관하게 작동합니다.\n초긴급 시 한국투자증권 주문전용(☎️ 1544-5000)으로 즉시 전화 청산이 가능합니다."
+      );
     }
   };
 
@@ -742,6 +820,36 @@ export default function OrderWindow({
               🏦 {effectiveUserId !== 'admin' && !userAccount?.is_connected ? '내 증권사 계좌 연결하기' : '내 증권사 계좌 설정/변경'}
             </button>
           )}
+        </div>
+
+        {/* 🚨 비상 전종목 즉시 시장가 일괄청산 (Kill-Switch) & 인터넷 차단·시스템 장애 대비 안전망 바 */}
+        <div className="mb-2.5 px-3 py-2 rounded-lg bg-gradient-to-r from-rose-950/90 via-red-950/80 to-slate-950 border-2 border-rose-500/70 flex flex-wrap items-center justify-between gap-2 text-xs shadow-lg">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white font-extrabold text-[11px] shadow animate-pulse">
+              🚨 비상 일괄청산 (Kill-Switch)
+            </span>
+            <span className="text-rose-100 font-semibold text-[11px] sm:text-xs">
+              금일 매수: <strong>총 {holdings.length + todayIntradaySoldRows.length}종목</strong> (보유 <strong className="text-yellow-300">{holdings.length}개</strong>
+              {todayIntradaySoldRows.length > 0 && (
+                <> · 장중 매도확정 <strong className="text-emerald-300">{todayIntradaySoldRows.length}개({todayIntradaySoldRows.map((r: any) => r.name || r.ticker).join(', ')})</strong></>
+              )}
+              ) · 인터넷 차단 시에도 AWS 서버가 15:20 동시호가 자동청산을 단독 수행합니다.
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={holdings.length === 0}
+              onClick={handleEmergencySellAllMarket}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 border border-rose-300 text-white font-extrabold shadow cursor-pointer flex items-center gap-1"
+            >
+              <span>🚨</span>
+              <span>비상 전종목 장중 즉시 시장가 일괄청산 ({holdings.length}종목 → 0종목)</span>
+            </button>
+            <span className="px-2 py-1 rounded bg-slate-900/90 border border-rose-500/40 text-rose-200 font-mono text-[11px]">
+              ☎️ 장애 시 한투 비상주문: 1544-5000
+            </span>
+          </div>
         </div>
         
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 mb-2.5 px-1">
@@ -868,7 +976,9 @@ export default function OrderWindow({
                   className="bg-emerald-900/90 hover:bg-emerald-700 border border-emerald-500 text-white font-bold py-2 px-2.5 rounded-lg text-xs transition-colors whitespace-nowrap flex flex-col items-center justify-center min-w-[82px]"
                >
                  <span className="text-xs sm:text-sm">📋 보유리스트</span>
-                 <span className="text-[10px] sm:text-[11px] text-emerald-300 font-normal">({holdings.length}종목)</span>
+                 <span className="text-[10px] sm:text-[11px] text-emerald-300 font-normal">
+                   ({holdings.length + todayIntradaySoldRows.length}종목{todayIntradaySoldRows.length > 0 ? `·매도${todayIntradaySoldRows.length}` : ''})
+                 </span>
                </button>
                <button 
                   onClick={handleSellAll}
@@ -978,8 +1088,8 @@ export default function OrderWindow({
                           {alreadyBoughtToday ? '매수불가' : '매수'}
                         </button>
                         <button 
-                          onClick={() => handleSellSingle(stock.ticker, qty)}
-                          className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-blue-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors"
+                          onClick={() => handleSellSingle(stock.ticker, qty, liveP || stock.price || priceForOrder || 0, stock.name)}
+                          className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-blue-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors cursor-pointer"
                         >
                           매도
                         </button>
@@ -998,11 +1108,15 @@ export default function OrderWindow({
           </table>
         </div>
 
-        {/* Holdings / PnL Table (Always Visible with Clear Scrollbar) */}
+        {/* Holdings / PnL Table (Always Visible with Clear Scrollbar — 보유 종목 + 금일 장중 매도확정 종목 모두 표시) */}
         <div className="mt-3 shrink-0 border border-gray-700 rounded-lg bg-[#111] shadow-lg">
-          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-200 flex justify-between items-center text-xs sm:text-sm">
-            <span>📋 보유 잔고 및 실시간 손익 (종가시 최종수익)</span>
-            <span className="text-xs text-emerald-400 font-bold">보유 종목: {holdings.length}개 (위아래 스크롤 가능)</span>
+          <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-200 flex flex-wrap justify-between items-center gap-2 text-xs sm:text-sm">
+            <span>📋 보유 잔고 및 실시간 손익 (장중 매도확정 종목 포함 · 종가시 최종수익)</span>
+            <span className="text-xs text-emerald-400 font-bold">
+              금일 매수 총 {holdings.length + todayIntradaySoldRows.length}종목 (현재 보유: {holdings.length}개
+              {todayIntradaySoldRows.length > 0 ? ` · 장중 매도확정: ${todayIntradaySoldRows.length}개 [원장반영 완료]` : ''}
+              )
+            </span>
           </div>
           <div className="min-h-[220px] max-h-[360px] overflow-x-auto overflow-y-scroll">
             <table className="w-full min-w-[680px] text-xs text-left whitespace-nowrap">
@@ -1011,89 +1125,140 @@ export default function OrderWindow({
                   <th className="px-2.5 py-2 font-medium sticky left-0 bg-[#1a1a1a] z-20">종목명</th>
                   <th className="px-2.5 py-2 font-medium text-right text-yellow-400">9시5분 비중</th>
                   <th className="px-2.5 py-2 font-medium text-right text-orange-400">실시간 비중</th>
-                  <th className="px-2.5 py-2 font-medium text-right">보유수량</th>
+                  <th className="px-2.5 py-2 font-medium text-right">보유/매도수량</th>
                   <th className="px-2.5 py-2 font-medium text-right">매입단가</th>
-                  <th className="px-2.5 py-2 font-medium text-right">현재가</th>
-                  <th className="px-2.5 py-2 font-medium text-right text-orange-400">순이익</th>
-                  <th className="px-2.5 py-2 font-medium text-right text-green-400">종가시 최종수익(예상)</th>
-                  <th className="px-2.5 py-2 font-medium text-center">동작</th>
+                  <th className="px-2.5 py-2 font-medium text-right">현재가/매도가</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-orange-400">순이익(확정포함)</th>
+                  <th className="px-2.5 py-2 font-medium text-right text-green-400">종가시 최종수익(예상/확정)</th>
+                  <th className="px-2.5 py-2 font-medium text-center">동작/상태</th>
                 </tr>
               </thead>
               <tbody>
-                {holdings.length > 0 ? (
-                  holdings.map((h, i) => {
-                    const cleanTicker = h.ticker.split(':').pop() || h.ticker;
-                    const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`)
-                      || computedStocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
-                    
-                    const livePrice = livePrices[h.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`];
-                    const currentPrice = (livePrice && livePrice > 0) ? livePrice : (currentStock?.price || (h as any).currentPrice || h.buyPrice);
-                    
-                    const netProfit = (currentPrice - h.buyPrice) * h.qty;
-                    const finalProfit = netProfit;
+                {holdings.length > 0 || todayIntradaySoldRows.length > 0 ? (
+                  <>
+                    {todayIntradaySoldRows.map((sr: any, sIdx: number) => {
+                      const cleanTicker = String(sr.ticker || '').split(':').pop() || '';
+                      const bp = Number(sr.buy_price) || 0;
+                      const sp = Number(sr.sell_price) || bp;
+                      const q = Number(sr.qty) || 0;
+                      const realizedPnl = sr.pnl !== undefined && sr.pnl !== null ? Number(sr.pnl) : (sp - bp) * q;
+                      const pnlColor = realizedPnl > 0 ? 'text-red-400' : realizedPnl < 0 ? 'text-blue-400' : 'text-gray-400';
+                      const foreignMatch = foreignOrderStocks.find(
+                        (fs) => fs.clean_ticker === cleanTicker || (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
+                      const frozenMatch = frozenStocks.find(
+                        (fs) => fs.clean_ticker === cleanTicker || (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
+                      const ratio0905 = foreignMatch?.ratio0905 ?? frozenMatch?.ratio0905;
+                      const liveRatio = foreignMatch?.currentRatio ?? foreignMatch?.foreign_ratio ?? 0;
 
-                    const pnlColor = netProfit > 0 ? 'text-red-400' : (netProfit < 0 ? 'text-blue-400' : 'text-gray-400');
-                    
-                    const frozenMatch = frozenStocks.find(fs => 
-                      fs.clean_ticker === cleanTicker || 
-                      fs.ticker === h.ticker || 
-                      fs.ticker === `KRX:${cleanTicker}` ||
-                      (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
-                    );
-                    const foreignMatch = foreignOrderStocks.find(fs => 
-                      fs.clean_ticker === cleanTicker || 
-                      fs.ticker === h.ticker || 
-                      fs.ticker === `KRX:${cleanTicker}` ||
-                      (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
-                    );
+                      return (
+                        <tr key={`sold-${cleanTicker}-${sIdx}`} className="border-b border-emerald-800/60 bg-emerald-950/25">
+                          <td className="px-2.5 py-2.5 font-bold sticky left-0 z-10 bg-[#0d1f17] text-emerald-200 flex items-center gap-1.5">
+                            <span>{sr.name || cleanTicker}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-600/40 border border-emerald-400/60 text-[10px] text-emerald-200 font-extrabold">
+                              ✅ 장중 매도확정 (매매원장 반영)
+                            </span>
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
+                            {ratio0905 !== undefined ? Number(ratio0905).toFixed(2) : '-'}%
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-orange-400">
+                            {Number(liveRatio).toFixed(2)}%
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono text-emerald-300 font-bold">{q.toLocaleString()} (매도완료)</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(bp).toLocaleString()}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-emerald-300">
+                            {Math.floor(sp).toLocaleString()} (체결가)
+                          </td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-extrabold ${pnlColor}`}>
+                            {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원
+                          </td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-extrabold ${pnlColor}`}>
+                            {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원 (확정)
+                          </td>
+                          <td className="px-2.5 py-2 text-center">
+                            <span className="px-2 py-1 rounded bg-emerald-900/60 border border-emerald-500/50 text-emerald-300 font-bold text-[11px]">
+                              원장기록 완료
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {holdings.map((h, i) => {
+                      const cleanTicker = h.ticker.split(':').pop() || h.ticker;
+                      const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`)
+                        || computedStocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
+                      
+                      const livePrice = livePrices[h.ticker] || livePrices[cleanTicker] || livePrices[`KRX:${cleanTicker}`];
+                      const currentPrice = (livePrice && livePrice > 0) ? livePrice : (currentStock?.price || (h as any).currentPrice || h.buyPrice);
+                      
+                      const netProfit = (currentPrice - h.buyPrice) * h.qty;
+                      const finalProfit = netProfit;
 
-                    // 9시 5분 비중 (09:05 당시 고정 스냅샷 수치)
-                    let ratio0905: number | undefined = foreignMatch?.ratio0905 !== undefined 
-                      ? foreignMatch.ratio0905 
-                      : (frozenMatch?.ratio0905 !== undefined 
-                        ? frozenMatch.ratio0905 
-                        : ((h as any).ratio0905 !== undefined ? (h as any).ratio0905 : undefined));
+                      const pnlColor = netProfit > 0 ? 'text-red-400' : (netProfit < 0 ? 'text-blue-400' : 'text-gray-400');
+                      
+                      const frozenMatch = frozenStocks.find(fs => 
+                        fs.clean_ticker === cleanTicker || 
+                        fs.ticker === h.ticker || 
+                        fs.ticker === `KRX:${cleanTicker}` ||
+                        (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
+                      const foreignMatch = foreignOrderStocks.find(fs => 
+                        fs.clean_ticker === cleanTicker || 
+                        fs.ticker === h.ticker || 
+                        fs.ticker === `KRX:${cleanTicker}` ||
+                        (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
 
-                    // 실시간 비중 (장중 실시간 외국계 창구 순매수량 / 총거래량 수치)
-                    let liveRatio: number = foreignMatch?.currentRatio !== undefined
-                      ? foreignMatch.currentRatio
-                      : (foreignMatch?.foreign_ratio !== undefined 
-                        ? foreignMatch.foreign_ratio 
-                        : (foreignMatch?.foreignRatio !== undefined 
-                          ? foreignMatch.foreignRatio 
-                          : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
-                            : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0))));
-                    
-                    const hRowBg = i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]';
-                    return (
-                      <tr key={h.ticker} className={`border-b border-gray-800 ${hRowBg}`}>
-                        <td className={`px-2.5 py-2.5 font-bold sticky left-0 z-10 ${hRowBg} text-white`}>{h.name}</td>
-                        <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
-                          {ratio0905 !== undefined ? ratio0905.toFixed(2) : '-'}%
-                        </td>
-                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${liveRatio >= 5 ? 'text-orange-400' : 'text-gray-500'}`}>
-                          {liveRatio.toFixed(2)}%
-                        </td>
-                        <td className="px-2.5 py-2.5 text-right font-mono">{h.qty.toLocaleString()}</td>
-                        <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(h.buyPrice).toLocaleString()}</td>
-                        <td className="px-2.5 py-2.5 text-right font-mono">{currentPrice.toLocaleString()}</td>
-                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
-                          {netProfit > 0 ? '+' : ''}{Math.floor(netProfit).toLocaleString()} 원
-                        </td>
-                        <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
-                          {finalProfit > 0 ? '+' : ''}{Math.floor(finalProfit).toLocaleString()} 원
-                        </td>
-                        <td className="px-2.5 py-2 text-center">
-                          <button 
-                            onClick={() => handleSellSingle(h.ticker, h.qty)}
-                            className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-blue-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors"
-                          >
-                            전량매도
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })
+                      // 9시 5분 비중 (09:05 당시 고정 스냅샷 수치)
+                      let ratio0905: number | undefined = foreignMatch?.ratio0905 !== undefined 
+                        ? foreignMatch.ratio0905 
+                        : (frozenMatch?.ratio0905 !== undefined 
+                          ? frozenMatch.ratio0905 
+                          : ((h as any).ratio0905 !== undefined ? (h as any).ratio0905 : undefined));
+
+                      // 실시간 비중 (장중 실시간 외국계 창구 순매수량 / 총거래량 수치)
+                      let liveRatio: number = foreignMatch?.currentRatio !== undefined
+                        ? foreignMatch.currentRatio
+                        : (foreignMatch?.foreign_ratio !== undefined 
+                          ? foreignMatch.foreign_ratio 
+                          : (foreignMatch?.foreignRatio !== undefined 
+                            ? foreignMatch.foreignRatio 
+                            : ((h as any).foreign_ratio !== undefined ? (h as any).foreign_ratio 
+                              : (currentStock ? (currentStock.foreignRatio || currentStock.foreign_ratio || 0) : 0))));
+                      
+                      const hRowBg = i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]';
+                      return (
+                        <tr key={h.ticker} className={`border-b border-gray-800 ${hRowBg}`}>
+                          <td className={`px-2.5 py-2.5 font-bold sticky left-0 z-10 ${hRowBg} text-white`}>{h.name}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
+                            {ratio0905 !== undefined ? ratio0905.toFixed(2) : '-'}%
+                          </td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${liveRatio >= 5 ? 'text-orange-400' : 'text-gray-500'}`}>
+                            {liveRatio.toFixed(2)}%
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono">{h.qty.toLocaleString()}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(h.buyPrice).toLocaleString()}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono">{currentPrice.toLocaleString()}</td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
+                            {netProfit > 0 ? '+' : ''}{Math.floor(netProfit).toLocaleString()} 원
+                          </td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
+                            {finalProfit > 0 ? '+' : ''}{Math.floor(finalProfit).toLocaleString()} 원
+                          </td>
+                          <td className="px-2.5 py-2 text-center">
+                            <button 
+                              onClick={() => handleSellSingle(h.ticker, h.qty, currentPrice, h.name)}
+                              className="bg-gray-800 border border-gray-600 hover:bg-gray-700 hover:border-blue-500 text-gray-200 font-bold py-1 px-2 rounded text-xs transition-colors cursor-pointer"
+                            >
+                              전량매도
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </>
                 ) : (
                   <tr>
                     <td colSpan={9} className="px-3 py-6 text-center font-bold whitespace-normal">
@@ -1123,8 +1288,10 @@ export default function OrderWindow({
                   <h3 className="text-xl font-bold text-emerald-400 flex items-center gap-2">
                     <span>📋</span> 매수확정 종목 보유리스트 및 실시간 평가손익
                   </h3>
-                  <span className="text-xs text-gray-400 bg-gray-800 border border-gray-700 px-2 py-0.5 rounded">
-                    총 {holdings.length}개 종목 보유 중
+                  <span className="text-xs text-gray-300 bg-gray-800 border border-gray-700 px-2 py-0.5 rounded font-bold">
+                    {todayIntradaySoldRows.length > 0
+                      ? `금일 매수 총 ${holdings.length + todayIntradaySoldRows.length}종목 (현재 보유: ${holdings.length}개 · 장중 매도확정: ${todayIntradaySoldRows.length}개)`
+                      : `총 ${holdings.length}개 종목 보유 중`}
                   </span>
                 </div>
                 <button 
@@ -1173,7 +1340,7 @@ export default function OrderWindow({
               </div>
 
               <div className="p-4 overflow-y-auto flex-1">
-                {holdings.length === 0 ? (
+                {(holdings.length === 0 && todayIntradaySoldRows.length === 0) ? (
                   <div className="py-12 text-center text-gray-500 font-bold text-base">
                     현재 매수확정된 보유 종목이 없습니다.
                   </div>
@@ -1185,16 +1352,57 @@ export default function OrderWindow({
                           <th className="px-3 py-3 font-semibold">종목코드</th>
                           <th className="px-3 py-3 font-semibold">종목명</th>
                           <th className="px-3 py-3 font-semibold text-right text-gray-300">매입가격</th>
-                          <th className="px-3 py-3 font-semibold text-right text-white">현재가</th>
-                          <th className="px-3 py-3 font-semibold text-right text-orange-400">평가손익</th>
+                          <th className="px-3 py-3 font-semibold text-right text-white">현재가 / 매도가</th>
+                          <th className="px-3 py-3 font-semibold text-right text-orange-400">평가 / 실현손익</th>
                           <th className="px-3 py-3 font-semibold text-right text-yellow-400">외국계 9시5분 비중</th>
                           <th className="px-3 py-3 font-semibold text-right text-orange-400">외국계 현재 비중</th>
-                          <th className="px-3 py-3 font-semibold text-right text-blue-300">보유수량</th>
-                          <th className="px-3 py-3 font-semibold text-right text-emerald-400">평가금액</th>
+                          <th className="px-3 py-3 font-semibold text-right text-blue-300">보유/매도수량</th>
+                          <th className="px-3 py-3 font-semibold text-right text-emerald-400">평가/매도금액</th>
                           <th className="px-3 py-3 font-semibold text-center">동작</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-800/60">
+                        {todayIntradaySoldRows.map((row) => {
+                          const cleanTicker = String(row.ticker || '').split(':').pop() || '';
+                          const buyP = Number(row.buy_price) || 0;
+                          const sellP = Number(row.sell_price) || buyP;
+                          const qty = Number(row.qty) || 0;
+                          const grossPnl = row.pnl !== undefined && row.pnl !== null ? Number(row.pnl) : (sellP - buyP) * qty;
+                          const profitRatio = buyP > 0 ? ((sellP - buyP) / buyP) * 100 : 0;
+                          const pnlColor = grossPnl > 0 ? 'text-red-400' : (grossPnl < 0 ? 'text-blue-400' : 'text-gray-400');
+                          const market = cleanTicker.startsWith('0') ? 'KOSPI' : 'KOSDAQ';
+                          return (
+                            <tr key={`modal-sold-${row.id || cleanTicker}`} className="bg-emerald-950/20 hover:bg-emerald-950/30">
+                              <td className="px-3 py-3 font-mono text-emerald-300">{cleanTicker}</td>
+                              <td className="px-3 py-3 font-bold">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[10px] font-mono px-1 py-0.5 rounded border ${
+                                    market === 'KOSDAQ' ? 'bg-purple-950/70 border-purple-800 text-purple-300' : 'bg-blue-950/70 border-blue-800 text-blue-300'
+                                  }`}>{market}</span>
+                                  <span className="text-emerald-200">{row.name}</span>
+                                  <span className="text-[10px] bg-emerald-900/70 border border-emerald-600 text-emerald-300 px-1.5 py-0.5 rounded font-bold">
+                                    장중 매도확정
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-right font-mono text-gray-300">{Math.floor(buyP).toLocaleString()} 원</td>
+                              <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">{Math.floor(sellP).toLocaleString()} 원 (매도가)</td>
+                              <td className={`px-3 py-3 text-right font-mono font-bold ${pnlColor}`}>
+                                <div>{grossPnl > 0 ? '+' : ''}{Math.floor(grossPnl).toLocaleString()} 원</div>
+                                <div className="text-[10px] font-normal">({profitRatio > 0 ? '+' : ''}{profitRatio.toFixed(2)}% 확정)</div>
+                              </td>
+                              <td className="px-3 py-3 text-right font-mono text-gray-400">-</td>
+                              <td className="px-3 py-3 text-right font-mono text-gray-400">-</td>
+                              <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">{qty.toLocaleString()} 주 (매도완료)</td>
+                              <td className="px-3 py-3 text-right font-mono font-bold text-emerald-400">{Math.floor(sellP * qty).toLocaleString()} 원</td>
+                              <td className="px-3 py-2 text-center">
+                                <span className="inline-block bg-emerald-950/80 border border-emerald-600 text-emerald-300 font-bold py-1 px-2 rounded text-[11px]">
+                                  ✅ 매매원장 반영됨
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
                         {holdings.map((h, i) => {
                           const cleanTicker = h.ticker.split(':').pop() || h.ticker;
                           
@@ -1290,8 +1498,8 @@ export default function OrderWindow({
                               </td>
                               <td className="px-3 py-2 text-center">
                                 <button 
-                                  onClick={() => handleSellSingle(h.ticker, h.qty)}
-                                  className="bg-blue-950 hover:bg-blue-800 border border-blue-600 text-blue-200 font-bold py-1 px-2.5 rounded text-xs transition-colors"
+                                  onClick={() => handleSellSingle(h.ticker, h.qty, currentPrice, h.name)}
+                                  className="bg-blue-950 hover:bg-blue-800 border border-blue-600 text-blue-200 font-bold py-1 px-2.5 rounded text-xs transition-colors cursor-pointer"
                                 >
                                   전량매도
                                 </button>

@@ -543,3 +543,87 @@ def execute_kis_futures_order(
         "broker_msg": broker_msg,
     }
 
+
+def emergency_liquidate_kis_futures(
+    fallback_current_contracts: int = 0,
+    disable_auto_order: bool = True,
+    reason: str = "🚨 [비상 일괄청산] 인터넷 차단/시스템 장애 대비 보유 선물 매수·매도 포지션 전량 즉시 시장가 청산 (0계약 FLAT)",
+) -> Dict[str, Any]:
+    """
+    [비상조치 Kill-Switch] 현재 보유 중인 모든 선물 매수(Long, +N계약) 또는 매도(Short, -N계약) 포지션을
+    즉시 시장가(02) 반대매매로 전량 청산(target_contracts = 0)하고, 필요 시 자동주문 예약을 중지합니다.
+    """
+    _init_futures_order_tables()
+    if disable_auto_order:
+        update_kis_futures_trading_config({"auto_execute_at_1535": False})
+
+    bal = inquire_kis_futures_balance()
+    effective_cur = int(bal.get("effective_net_contracts") or 0)
+    if effective_cur == 0 and fallback_current_contracts != 0:
+        effective_cur = int(fallback_current_contracts)
+
+    if effective_cur == 0:
+        now_kst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+        now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+        today_str = now_kst.strftime("%Y-%m-%d")
+        t_cfg = get_kis_futures_trading_config()
+        rt = fetch_kis_realtime_futures_and_index()
+        exec_price = float(rt.get("fut_close") or 0.0)
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO futures_order_execution_log (
+                executed_at_kst, trading_date, mode, account_no, fut_code, side, qty,
+                ord_dvsn, exec_price, prev_contracts, target_contracts,
+                broker_status, broker_order_no, broker_msg, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_str,
+                today_str,
+                t_cfg["mode"],
+                t_cfg["account_display"],
+                t_cfg["active_fut_code"],
+                "EMERGENCY_FLAT(무포지션확인)",
+                0,
+                "02",
+                exec_price,
+                0,
+                0,
+                "EMERGENCY_FLAT_CONFIRMED",
+                f"EMG-{now_kst.strftime('%H%M%S')}",
+                "보유 선물 계약 없음 (0계약 FLAT 상태 즉시 확정 및 자동주문 중지 완료)",
+                reason,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return {
+            "success": True,
+            "liquidated": False,
+            "prev_contracts": 0,
+            "target_contracts": 0,
+            "message": "현재 보유 중인 선물 포지션이 없습니다(0계약 FLAT). 15:35 자동주문 예약을 안전하게 중지했습니다.",
+            "account_status": inquire_kis_futures_balance(),
+        }
+
+    delta_to_zero = -effective_cur
+    order_res = execute_kis_futures_order(
+        order_delta_contracts=delta_to_zero,
+        prev_contracts=effective_cur,
+        target_contracts=0,
+        ord_dvsn="02",  # 시장가 최우선 즉시 청산
+        reason=reason,
+    )
+    pos_type_str = f"매수(Long) +{effective_cur}계약 전량 매도청산" if effective_cur > 0 else f"매도(Short) {effective_cur}계약 전량 환매수청산"
+    return {
+        "success": bool(order_res.get("success", True)),
+        "liquidated": True,
+        "prev_contracts": effective_cur,
+        "target_contracts": 0,
+        "order_result": order_res,
+        "message": f"🚨 [비상 전량청산 완료] 기존 {pos_type_str} → 현재 0계약(FLAT)으로 즉시 청산 완료되었습니다!",
+        "account_status": inquire_kis_futures_balance(),
+    }
+

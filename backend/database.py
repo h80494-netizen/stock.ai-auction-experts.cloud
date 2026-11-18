@@ -833,28 +833,209 @@ def update_holding(ticker: str, name: str, qty: int, price: float, user_id: str 
     uid = _norm_uid(user_id)
     cfg = get_trading_config()
     max_per_stock = float(cfg["max_per_stock_capital"])
+    pure_t = str(ticker).split(":")[-1].strip()
+    krx_t = f"KRX:{pure_t}"
 
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT * FROM holdings WHERE user_id = ? AND ticker = ?', (uid, ticker))
+    c.execute(
+        'SELECT * FROM holdings WHERE user_id = ? AND (ticker = ? OR ticker = ? OR ticker = ?)',
+        (uid, ticker, pure_t, krx_t),
+    )
     row = c.fetchone()
     if row:
+        matched_t = row['ticker']
         if qty > 0:
             # 최초 매수 이후 동일 종목 추가 매수(수량 누적) 원천 차단
             conn.close()
             return
-        new_qty = row['qty'] + qty
+        new_qty = int(row['qty'] or 0) + qty
         if new_qty <= 0:
-            c.execute('DELETE FROM holdings WHERE user_id = ? AND ticker = ?', (uid, ticker))
+            c.execute(
+                'DELETE FROM holdings WHERE user_id = ? AND (ticker = ? OR ticker = ? OR ticker = ?)',
+                (uid, matched_t, pure_t, krx_t),
+            )
         else:
-            c.execute('UPDATE holdings SET qty = ?, buy_price = ? WHERE user_id = ? AND ticker = ?', (new_qty, row['buy_price'], uid, ticker))
+            c.execute(
+                'UPDATE holdings SET qty = ?, buy_price = ? WHERE user_id = ? AND ticker = ?',
+                (new_qty, row['buy_price'], uid, matched_t),
+            )
     else:
         if qty > 0 and price > 0:
             capped_qty = min(qty, int(max_per_stock // price))
             if capped_qty > 0:
-                c.execute('INSERT INTO holdings (user_id, ticker, name, buy_price, qty) VALUES (?, ?, ?, ?, ?)', (uid, ticker, name, price, capped_qty))
+                c.execute(
+                    'INSERT INTO holdings (user_id, ticker, name, buy_price, qty) VALUES (?, ?, ?, ?, ?)',
+                    (uid, pure_t, name, price, capped_qty),
+                )
     conn.commit()
     conn.close()
+
+
+def sell_single_holding(ticker: str, qty: int, sell_price: float = 0.0, name: str = "", user_id: str = "admin") -> dict:
+    """
+    장중 개별 보유 종목을 즉시 매도 처리하고, holdings 차감/삭제 및 trading_ledger 상태('SELL') 갱신을 원자적으로 수행합니다.
+    (get_holdings() 호출 시 이미 매도된 종목이 다시 복원되는 현상을 완벽히 방지합니다.)
+    """
+    from datetime import datetime, timedelta
+    from trading_config import calculate_settlement_metrics
+
+    uid = _norm_uid(user_id)
+    pure_t = str(ticker).split(":")[-1].strip()
+    krx_t = f"KRX:{pure_t}"
+    today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
+
+    # 1. holdings 테이블에서 해당 종목 조회
+    c.execute(
+        "SELECT ticker, name, buy_price, qty FROM holdings WHERE user_id = ? AND (ticker = ? OR ticker = ? OR ticker = ?)",
+        (uid, ticker, pure_t, krx_t),
+    )
+    h_row = c.fetchone()
+
+    # 2. trading_ledger에서 당일 매수 레코드 조회
+    c.execute(
+        "SELECT id, ticker, name, buy_price, qty, status FROM trading_ledger WHERE user_id = ? AND trade_date = ? AND (ticker = ? OR ticker = ? OR ticker = ?) ORDER BY id ASC",
+        (uid, today_str, ticker, pure_t, krx_t),
+    )
+    l_rows = c.fetchall()
+
+    held_qty = int(h_row["qty"]) if h_row and h_row["qty"] else (int(l_rows[0]["qty"]) if l_rows and l_rows[0]["qty"] else max(1, int(qty or 1)))
+    buy_price = float(h_row["buy_price"]) if h_row and h_row["buy_price"] else (float(l_rows[0]["buy_price"]) if l_rows and l_rows[0]["buy_price"] else float(sell_price or 0.0))
+    stock_name = (h_row["name"] if h_row and h_row["name"] else (l_rows[0]["name"] if l_rows and l_rows[0]["name"] else (name or pure_t)))
+
+    exec_sell_price = float(sell_price) if (sell_price and float(sell_price) > 0) else buy_price
+    sell_qty = min(held_qty, max(1, int(qty))) if qty and int(qty) > 0 else held_qty
+    remaining_qty = max(0, held_qty - sell_qty)
+    item_pnl = round((exec_sell_price - buy_price) * sell_qty, 0)
+
+    # 3. holdings 업데이트 또는 삭제
+    if remaining_qty <= 0:
+        c.execute(
+            "DELETE FROM holdings WHERE user_id = ? AND (ticker = ? OR ticker = ? OR ticker = ?)",
+            (uid, ticker, pure_t, krx_t),
+        )
+    else:
+        c.execute(
+            "UPDATE holdings SET qty = ? WHERE user_id = ? AND (ticker = ? OR ticker = ? OR ticker = ?)",
+            (remaining_qty, uid, ticker, pure_t, krx_t),
+        )
+
+    # 4. trading_ledger 업데이트 (전량 매도 시 status='SELL', 부분 매도 시 잔여 BUY + 매도분 SELL 분리 기록)
+    if l_rows:
+        primary_id = l_rows[0]["id"]
+        if remaining_qty <= 0:
+            c.execute(
+                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL' WHERE id = ?",
+                (stock_name, buy_price, exec_sell_price, sell_qty, item_pnl, primary_id),
+            )
+        else:
+            c.execute(
+                "UPDATE trading_ledger SET qty = ? WHERE id = ?",
+                (remaining_qty, primary_id),
+            )
+            c.execute(
+                """
+                INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL')
+                """,
+                (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl),
+            )
+    else:
+        c.execute(
+            """
+            INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL')
+            """,
+            (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl),
+        )
+
+    conn.commit()
+    conn.close()
+
+    # 5. 장중 개별 종목 매도 즉시 일자별 매매원장(trade_ledger) 및 실현손익(pnl_history)에 차익 누적 반영
+    ledger_summary = sync_daily_realized_ledger(today_str, user_id=uid)
+
+    return {
+        "ticker": pure_t,
+        "name": stock_name,
+        "sold_qty": sell_qty,
+        "remaining_qty": remaining_qty,
+        "buy_price": buy_price,
+        "sell_price": exec_sell_price,
+        "pnl": item_pnl,
+        "daily_realized_net_pnl": ledger_summary.get("net_pnl", item_pnl),
+        "daily_realized_return_rate": ledger_summary.get("return_rate", 0.0),
+    }
+
+
+def sync_daily_realized_ledger(trade_date: str, user_id: str = "admin") -> dict:
+    """
+    당일(trade_date) trading_ledger에서 매도 확정(status='SELL')된 모든 종목(장중 개별매도 + 장마감 일괄매도)을 합산하여
+    일자별 요약 매매원장(trade_ledger) 및 실현손익(pnl_history)에 즉시 반영합니다.
+    """
+    from trading_config import get_trading_config, calculate_settlement_metrics
+
+    uid = _norm_uid(user_id)
+    cfg = get_trading_config()
+    max_total = float(cfg["max_total_capital"])
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
+    c.execute(
+        "SELECT buy_price, sell_price, qty, pnl FROM trading_ledger WHERE user_id = ? AND trade_date = ? AND status = 'SELL'",
+        (uid, trade_date),
+    )
+    sold_rows = c.fetchall()
+    if not sold_rows:
+        conn.close()
+        return {"total_buy": 0.0, "total_sell": 0.0, "net_pnl": 0.0, "return_rate": 0.0, "sold_count": 0}
+
+    tot_b = sum(float(r["buy_price"] or 0) * int(r["qty"] or 0) for r in sold_rows)
+    tot_s = sum(float(r["sell_price"] or r["buy_price"] or 0) * int(r["qty"] or 0) for r in sold_rows)
+    if tot_b > max_total and tot_b > 0:
+        scale = max_total / tot_b
+        tot_b = round(tot_b * scale, 2)
+        tot_s = round(tot_s * scale, 2)
+
+    metrics = calculate_settlement_metrics(tot_b, tot_s)
+    c.execute(
+        """
+        INSERT INTO trade_ledger (user_id, date, total_buy, total_sell, fees, tax, net_pnl, return_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, date) DO UPDATE SET
+            total_buy = excluded.total_buy,
+            total_sell = excluded.total_sell,
+            fees = excluded.fees,
+            tax = excluded.tax,
+            net_pnl = excluded.net_pnl,
+            return_rate = excluded.return_rate
+        """,
+        (uid, trade_date, tot_b, tot_s, metrics["fees"], metrics["tax"], metrics["net_pnl"], metrics["return_rate"]),
+    )
+    c.execute(
+        """
+        INSERT INTO pnl_history (user_id, date, realized_pnl)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, date) DO UPDATE SET realized_pnl = excluded.realized_pnl
+        """,
+        (uid, trade_date, metrics["net_pnl"]),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "total_buy": tot_b,
+        "total_sell": tot_s,
+        "fees": metrics["fees"],
+        "tax": metrics["tax"],
+        "net_pnl": metrics["net_pnl"],
+        "return_rate": metrics["return_rate"],
+        "sold_count": len(sold_rows),
+    }
 
 
 def get_holdings(user_id: str = "admin"):

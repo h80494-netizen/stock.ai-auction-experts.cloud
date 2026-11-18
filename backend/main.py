@@ -1511,26 +1511,19 @@ def api_kis_sell_all(
                         'pnl': item_pnl
                     })
 
-                if tot_b > max_total and tot_b > 0:
-                    scale = max_total / tot_b
-                    tot_b = round(tot_b * scale, 2)
-                    tot_s = round(tot_s * scale, 2)
-
-                metrics = calculate_settlement_metrics(tot_b, tot_s)
-                fees = metrics["fees"]
-                tax = metrics["tax"]
-                pnl = metrics["net_pnl"]
-                rr = metrics["return_rate"]
-
-                add_ledger_record(today_str, tot_b, tot_s, fees, tax, pnl, rr, user_id=uid)
+                from database import sync_daily_realized_ledger
                 record_trading_sell_all(today_str, items_to_record, user_id=uid)
-                add_realized_pnl(today_str, pnl, user_id=uid)
+                summary_after = sync_daily_realized_ledger(today_str, user_id=uid)
+                pnl = float(summary_after.get("net_pnl", 0.0))
+                rr = float(summary_after.get("return_rate", 0.0))
+                tot_b = float(summary_after.get("total_buy", tot_b))
+                tot_s = float(summary_after.get("total_sell", tot_s))
                 clear_holdings(user_id=uid)
                 if uid == "admin":
                     _reserved_close_sell_date = ""
                 else:
                     _reserved_close_sell_by_user.pop(uid, None)
-                print(f"[일괄매도정산완료:{uid}] 15:30 종가 기준 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
+                print(f"[일괄매도정산완료:{uid}] 15:30 종가 기준(장중개별매도 포함) 총 매수: {tot_b:,.0f}원, 총 매도: {tot_s:,.0f}원, 실현손익: {pnl:,.0f}원")
                 return pnl, rr
 
         if mode == "close":
@@ -2149,6 +2142,8 @@ def post_kis_order(
     from datetime import datetime, timedelta
     from database import (
         update_holding,
+        sell_single_holding,
+        get_holdings,
         get_stock,
         can_execute_initial_buy,
         get_today_buy_total,
@@ -2198,8 +2193,17 @@ def post_kis_order(
         stock = get_stock(pure_ticker) or get_stock(ticker)
         if stock and stock.get("price"):
             actual_price = stock["price"]
-        else:
-            return {"ticker": final_ticker, "success": False, "error": "유효한 현재가를 확인할 수 없습니다."}
+    if actual_price <= 0:
+        # 보유 잔고(holdings)의 매입단가를 폴백으로 사용하여 매도 시 시세 조회 실패로 인한 에러 원천 방지
+        for h_item in get_holdings(user_id=uid):
+            h_pure = str(h_item.get("ticker", "")).split(":")[-1].strip()
+            if h_pure == pure_ticker and float(h_item.get("buyPrice") or 0) > 0:
+                actual_price = float(h_item["buyPrice"])
+                if not name and h_item.get("name"):
+                    name = h_item["name"]
+                break
+    if actual_price <= 0 and type == "buy":
+        return {"ticker": final_ticker, "success": False, "error": "유효한 현재가를 확인할 수 없습니다."}
 
     use_admin_kis = (uid == "admin") and (kis_client is not None)
 
@@ -2250,33 +2254,29 @@ def post_kis_order(
         real_api_success = False
         if use_admin_kis:
             try:
-                real_api_success = kis_client.order_sell(pure_ticker, qty, int(actual_price))
+                # 장중 매도는 시장가(0) 우선 접수 후 지정가 폴백
+                real_api_success = kis_client.order_sell(pure_ticker, qty, 0)
             except Exception as e:
                 print(f"[KIS Order API Notice:{uid}] Live sell call: {e}")
 
-        update_holding(final_ticker, name or final_ticker, -qty, actual_price, user_id=uid)
-        record_trading_sell_all(
-            today_str,
-            [
-                {
-                    'ticker': pure_ticker,
-                    'name': name or pure_ticker,
-                    'qty': qty,
-                    'buy_price': actual_price,
-                    'sell_price': actual_price,
-                    'pnl': 0.0,
-                }
-            ],
+        sell_res = sell_single_holding(
+            ticker=final_ticker,
+            qty=qty,
+            sell_price=actual_price,
+            name=name or final_ticker,
             user_id=uid,
         )
         return {
             "user_id": uid,
             "ticker": final_ticker,
+            "name": sell_res.get("name", name or final_ticker),
             "success": True,
             "real_api_success": real_api_success,
             "type": type,
-            "executed_price": actual_price,
-            "executed_qty": qty,
+            "executed_price": sell_res.get("sell_price", actual_price),
+            "executed_qty": sell_res.get("sold_qty", qty),
+            "remaining_qty": sell_res.get("remaining_qty", 0),
+            "pnl": sell_res.get("pnl", 0),
         }
 
 @with_retry(max_retries=3, initial_delay=1.0)

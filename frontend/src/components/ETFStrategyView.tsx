@@ -832,6 +832,51 @@ export default function ETFStrategyView({
   return (
     <div className="p-4 h-full overflow-y-auto space-y-6">
       
+      {/* 🚨 비상 일괄청산 (Kill-Switch) & 인터넷 차단·시스템 장애 대비 안전망 바 */}
+      <div className="bg-gradient-to-r from-rose-950/90 via-red-950/80 to-slate-950 border-2 border-rose-500/70 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs shadow-xl">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="px-2.5 py-1 rounded-full bg-rose-600 text-white font-extrabold text-[11px] shadow animate-pulse">
+            🚨 비상 일괄청산 & 장애보호 안전망
+          </span>
+          <span className="text-rose-100 font-semibold text-[11px] sm:text-xs">
+            현재 보유: <strong className="text-yellow-300 font-mono">{kisAccount?.HeldDisplay || '미보유 (CASH)'}</strong>
+            {' '}· 인터넷 차단이나 시스템 장애 시에도 AWS 클라우드 서버가 단독으로 예약을 관리하며, 우측 버튼으로 <strong>보유 ETF 전량 즉시 청산(CASH 전환) 및 자동예약 즉시 중지</strong>가 가능합니다.
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={kisLoading}
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  '🚨 [비상 전량청산 & 예약중지 확인]\n\n현재 보유 중인 모든 미국 ETF를 즉시 전량 매도 청산(CASH 전환)하고, 장마감 자동매수 예약을 즉시 중지하시겠습니까?\n\n※ 인터넷이 일시 불안정한 경우에도 복구 즉시 최우선으로 청산 명령이 자동 재전송됩니다.'
+                )
+              ) {
+                return;
+              }
+              setKisAutoTrade(false);
+              try {
+                await handleSaveKisEtfConfig({ auto_trade_enabled: false });
+                await handleExecuteKisEtfOrder('LIQUIDATE_ALL');
+              } catch (e) {
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem('emergency_pending_etf_liquidate', 'true');
+                }
+                alert('⚠️ 네트워크 연결 불안정이 감지되어 로컬 비상청산 큐에 등록되었습니다. 인터넷 복구 즉시 자동 전량청산이 실행되며, 긴급 시 한국투자증권 해외주식 데스크(02-3276-5300 / 1544-5000)로 즉시 전화 청산이 가능합니다.');
+              }
+            }}
+            className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 border border-rose-300 text-white font-extrabold shadow-lg cursor-pointer flex items-center gap-1.5"
+          >
+            <span>🚨</span>
+            <span>비상 보유 ETF 전량 즉시청산 & 예약중지 (CASH)</span>
+          </button>
+          <span className="px-2 py-1 rounded bg-slate-900/90 border border-rose-500/40 text-rose-200 font-mono text-[11px]">
+            ☎️ 장애 시 한투 비상주문: 1544-5000 (해외데스크 02-3276-5300)
+          </span>
+        </div>
+      </div>
+
       {/* 알림 토스트 (Model Swap Saved Toast) */}
       {toastMessage && (
         <div className="bg-emerald-900/90 border border-emerald-500 text-emerald-100 px-4 py-3 rounded-xl shadow-2xl flex justify-between items-center animate-bounce">
@@ -2509,7 +2554,6 @@ export default function ETFStrategyView({
               <th className="p-3 border-b border-gray-700 font-medium text-right">20일 수익률</th>
               {criteria === 'sharpe' && <th className="p-3 border-b border-gray-700 font-medium text-right">모멘텀 총점</th>}
               <th className="p-3 border-b border-gray-700 font-medium text-right">{criteria === 'sharpe' ? '샤프 지수' : '모멘텀 총점'}</th>
-              <th className="p-3 border-b border-gray-700 font-medium text-center">한투 모의주문 ({kisOrderQty || 100}주)</th>
             </tr>
           </thead>
           <tbody className="font-mono text-sm">
@@ -2535,21 +2579,6 @@ export default function ETFStrategyView({
                 )}
                 <td className="p-3 text-right font-bold text-blue-300">
                   {etf.final_score.toFixed(2)}
-                </td>
-                <td className="p-3 text-center font-sans">
-                  <button
-                    onClick={() =>
-                      handleExecuteKisEtfOrder('MANUAL_ORDER', {
-                        ticker: etf.ticker,
-                        side: 'BUY',
-                        qty: kisOrderQty || 100,
-                      })
-                    }
-                    disabled={kisLoading}
-                    className="px-2 py-1 bg-emerald-900/70 hover:bg-emerald-700/80 border border-emerald-500/40 rounded text-[11px] font-bold text-emerald-200 transition-colors cursor-pointer"
-                  >
-                    종가매수 ({kisOrderQty || 100}주)
-                  </button>
                 </td>
               </tr>
             ))}

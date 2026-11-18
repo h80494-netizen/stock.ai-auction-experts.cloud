@@ -486,6 +486,35 @@ def api_execute_kis_futures_order(req: KISOrderExecuteRequest) -> Dict[str, Any]
         }
 
 
+class EmergencyFuturesLiquidateRequest(BaseModel):
+    fallback_current_contracts: int = 0
+    disable_auto_order: bool = True
+    reason: Optional[str] = None
+
+
+@router.post("/emergency-liquidate")
+def api_emergency_liquidate_futures(req: EmergencyFuturesLiquidateRequest) -> Dict[str, Any]:
+    """
+    [비상조치 Kill-Switch] 인터넷 차단·시스템 장애 대비 보유 선물 매수(Long) 또는 매도(Short) 포지션을
+    즉시 시장가로 전량 반대매매하여 0계약(FLAT)으로 일괄 청산합니다.
+    """
+    try:
+        from kis_futures_trader import emergency_liquidate_kis_futures
+
+        res = emergency_liquidate_kis_futures(
+            fallback_current_contracts=req.fallback_current_contracts,
+            disable_auto_order=req.disable_auto_order,
+            reason=req.reason or "🚨 [비상 일괄청산] 선물 매수·매도 포지션 전량 즉시 시장가 청산 (0계약 FLAT)",
+        )
+        return {"success": True, "data": res, "message": res.get("message", "비상 청산 완료")}
+    except Exception as e:
+        return {
+            "success": False,
+            "error_code": "EMERGENCY_LIQUIDATE_ERROR",
+            "message": f"선물 비상 일괄청산 실행 중 오류가 발생했습니다: {str(e)}",
+        }
+
+
 @router.post("/lock-1530")
 def api_lock_1530_signals(req: Lock1530Request) -> Dict[str, Any]:
     """
