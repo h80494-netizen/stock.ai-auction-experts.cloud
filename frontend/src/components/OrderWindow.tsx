@@ -478,21 +478,37 @@ export default function OrderWindow({
     return pnlHistory.find((h: any) => h.date === todayStr) || null;
   }, [pnlHistory, todayStr]);
 
-  // 금일 장중 개별 매도 확정된 종목 리스트 (예: 리브스메드 등 — 보유 19종목과 함께 총 20종목이 모두 표시되고 매매원장 손익에 반영되도록 관리)
-  const todayIntradaySoldRows = useMemo(() => {
-    const heldSet = new Set(holdings.map((h) => (h.ticker.split(':').pop() || h.ticker).trim()));
-    return detailedLedger.filter((r: any) => {
-      const rTk = String(r.ticker || '').split(':').pop()?.trim() || '';
-      return r.trade_date === todayStr && r.status === 'SELL' && !heldSet.has(rTk);
-    });
-  }, [detailedLedger, todayStr, holdings]);
-
   const isLiquidatedToday = useMemo(() => {
     const todayRows = detailedLedger.filter((r: any) => r.trade_date === todayStr);
     const hasSold = todayRows.some((r: any) => r.status === 'SELL');
     const hasActiveBuy = todayRows.some((r: any) => r.status === 'BUY');
     return holdings.length === 0 && hasSold && !hasActiveBuy;
   }, [holdings.length, detailedLedger, todayStr]);
+
+  // 금일 장중 개별 매도 확정된 종목 리스트 (예: 리브스메드 등 — sell_type === 'INTRADAY' 또는 장중 개별 매각분)
+  const todayIntradaySoldRows = useMemo(() => {
+    const heldSet = new Set(holdings.map((h) => (h.ticker.split(':').pop() || h.ticker).trim()));
+    return detailedLedger.filter((r: any) => {
+      const rTk = String(r.ticker || '').split(':').pop()?.trim() || '';
+      if (r.trade_date !== todayStr || r.status !== 'SELL') return false;
+      if (r.sell_type === 'INTRADAY') return true;
+      if (!isLiquidatedToday && !heldSet.has(rTk)) return true;
+      return false;
+    });
+  }, [detailedLedger, todayStr, holdings, isLiquidatedToday]);
+
+  // 금일 15:30 장마감 종가 일괄청산 완료된 종목 리스트 (19종목)
+  const todayCloseSoldRows = useMemo(() => {
+    if (!isLiquidatedToday) return [];
+    return detailedLedger.filter((r: any) => {
+      return r.trade_date === todayStr && r.status === 'SELL' && r.sell_type !== 'INTRADAY';
+    });
+  }, [detailedLedger, todayStr, isLiquidatedToday]);
+
+  // 전체 기간 장중 개별 매각(차익실현) 확정 종목 리스트 (매매원장 상단 하이라이트 표기용)
+  const allIntradaySoldRows = useMemo(() => {
+    return detailedLedger.filter((r: any) => r.status === 'SELL' && r.sell_type === 'INTRADAY');
+  }, [detailedLedger]);
 
   // Compute portfolio totals (현재 보유 종목 평가액 + 금일 장중 매도확정 종목 실현금액 및 차익 통합 합산)
   const portfolioSummary = useMemo(() => {
@@ -501,7 +517,19 @@ export default function OrderWindow({
     let totalPnL = 0;
     let realizedIntradayPnL = 0;
 
-    if (holdings.length > 0 || todayIntradaySoldRows.length > 0) {
+    todayIntradaySoldRows.forEach((sr: any) => {
+      const bp = Number(sr.buy_price) || 0;
+      const sp = Number(sr.sell_price) || bp;
+      const q = Number(sr.qty) || 0;
+      const sPnl = sr.pnl !== undefined && sr.pnl !== null ? Number(sr.pnl) : (sp - bp) * q;
+      realizedIntradayPnL += sPnl;
+    });
+
+    if (isLiquidatedToday && todaySettledLedger) {
+      totalBuyAmount = Number(todaySettledLedger.total_buy) || 0;
+      totalCurrentAmount = Number(todaySettledLedger.total_sell) || 0;
+      totalPnL = Number(todaySettledLedger.net_pnl) || 0;
+    } else if (holdings.length > 0 || todayIntradaySoldRows.length > 0) {
       holdings.forEach(h => {
         const cleanTicker = h.ticker.split(':').pop() || h.ticker;
         const currentStock = stocks.find(s => s.ticker === h.ticker || s.ticker === cleanTicker || s.ticker === `KRX:${cleanTicker}`);
@@ -523,7 +551,6 @@ export default function OrderWindow({
         totalBuyAmount += bp * q;
         totalCurrentAmount += sp * q;
         totalPnL += sPnl;
-        realizedIntradayPnL += sPnl;
       });
     } else if (todaySettledLedger) {
       totalBuyAmount = Number(todaySettledLedger.total_buy) || 0;
@@ -532,7 +559,7 @@ export default function OrderWindow({
     }
 
     return { totalBuyAmount, totalCurrentAmount, totalPnL, realizedIntradayPnL };
-  }, [holdings, todayIntradaySoldRows, stocks, livePrices, todaySettledLedger]);
+  }, [holdings, todayIntradaySoldRows, stocks, livePrices, todaySettledLedger, isLiquidatedToday]);
 
   const handleBuyAll = async () => {
     if (orderStocks.length === 0) return;
@@ -968,6 +995,11 @@ export default function OrderWindow({
                  <div className={`text-sm sm:text-2xl font-mono font-extrabold mt-1 ${portfolioSummary.totalPnL > 0 ? 'text-red-400' : (portfolioSummary.totalPnL < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
                    {portfolioSummary.totalPnL > 0 ? '+' : ''}{Math.floor(portfolioSummary.totalPnL).toLocaleString()}<span className="text-[11px] sm:text-xs ml-0.5">원</span>
                  </div>
+                 {todayIntradaySoldRows.length > 0 && (
+                   <div className="text-[10px] text-emerald-400 font-mono font-bold mt-0.5 truncate">
+                     ⚡ 장중매각({todayIntradaySoldRows.map((r: any) => r.name).join(',')}): {portfolioSummary.realizedIntradayPnL >= 0 ? '+' : ''}{Math.floor(portfolioSummary.realizedIntradayPnL).toLocaleString()}원 반영됨
+                   </div>
+                 )}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 w-full xl:w-auto shrink-0">
@@ -977,7 +1009,7 @@ export default function OrderWindow({
                >
                  <span className="text-xs sm:text-sm">📋 보유리스트</span>
                  <span className="text-[10px] sm:text-[11px] text-emerald-300 font-normal">
-                   ({holdings.length + todayIntradaySoldRows.length}종목{todayIntradaySoldRows.length > 0 ? `·매도${todayIntradaySoldRows.length}` : ''})
+                   ({holdings.length + todayIntradaySoldRows.length + todayCloseSoldRows.length}종목{todayIntradaySoldRows.length > 0 ? `·장중매도${todayIntradaySoldRows.length}` : ''})
                  </span>
                </button>
                <button 
@@ -989,7 +1021,7 @@ export default function OrderWindow({
                  <span className="text-[10px] text-blue-300 font-normal">{isLiquidatedToday ? '(매매원장 이관)' : (reservedSellToday ? '(15:30 자동정산)' : '(손익 확정)')}</span>
                </button>
                <button 
-                  onClick={() => setShowLedger(true)}
+                  onClick={() => { fetchLedger(); setShowLedger(true); }}
                   className="bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-bold py-2 px-2.5 rounded-lg text-xs transition-colors whitespace-nowrap flex flex-col items-center justify-center min-w-[82px]"
                >
                  <span className="text-xs sm:text-sm">📊 매매원장</span>
@@ -1113,8 +1145,10 @@ export default function OrderWindow({
           <div className="px-3 py-2 bg-gray-900 border-b border-gray-800 font-bold text-gray-200 flex flex-wrap justify-between items-center gap-2 text-xs sm:text-sm">
             <span>📋 보유 잔고 및 실시간 손익 (장중 매도확정 종목 포함 · 종가시 최종수익)</span>
             <span className="text-xs text-emerald-400 font-bold">
-              금일 매수 총 {holdings.length + todayIntradaySoldRows.length}종목 (현재 보유: {holdings.length}개
-              {todayIntradaySoldRows.length > 0 ? ` · 장중 매도확정: ${todayIntradaySoldRows.length}개 [원장반영 완료]` : ''}
+              금일 매수 총 {holdings.length + todayIntradaySoldRows.length + todayCloseSoldRows.length}종목 (
+              {isLiquidatedToday
+                ? `장중 매각확정: ${todayIntradaySoldRows.length}개 · 15:30 종가청산: ${todayCloseSoldRows.length}개 [전량 원장반영 완료]`
+                : `현재 보유: ${holdings.length}개${todayIntradaySoldRows.length > 0 ? ` · 장중 매도확정: ${todayIntradaySoldRows.length}개 [원장반영 완료]` : ''}`}
               )
             </span>
           </div>
@@ -1134,7 +1168,7 @@ export default function OrderWindow({
                 </tr>
               </thead>
               <tbody>
-                {holdings.length > 0 || todayIntradaySoldRows.length > 0 ? (
+                {holdings.length > 0 || todayIntradaySoldRows.length > 0 || todayCloseSoldRows.length > 0 ? (
                   <>
                     {todayIntradaySoldRows.map((sr: any, sIdx: number) => {
                       const cleanTicker = String(sr.ticker || '').split(':').pop() || '';
@@ -1142,6 +1176,7 @@ export default function OrderWindow({
                       const sp = Number(sr.sell_price) || bp;
                       const q = Number(sr.qty) || 0;
                       const realizedPnl = sr.pnl !== undefined && sr.pnl !== null ? Number(sr.pnl) : (sp - bp) * q;
+                      const netRealizedPnl = realizedPnl - ((bp * q + sp * q) * 0.00015 + (sp * q) * 0.002);
                       const pnlColor = realizedPnl > 0 ? 'text-red-400' : realizedPnl < 0 ? 'text-blue-400' : 'text-gray-400';
                       const foreignMatch = foreignOrderStocks.find(
                         (fs) => fs.clean_ticker === cleanTicker || (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
@@ -1157,7 +1192,7 @@ export default function OrderWindow({
                           <td className="px-2.5 py-2.5 font-bold sticky left-0 z-10 bg-[#0d1f17] text-emerald-200 flex items-center gap-1.5">
                             <span>{sr.name || cleanTicker}</span>
                             <span className="px-1.5 py-0.5 rounded bg-emerald-600/40 border border-emerald-400/60 text-[10px] text-emerald-200 font-extrabold">
-                              ✅ 장중 매도확정 (매매원장 반영)
+                              ⚡ 장중 매도확정 (매매원장 반영)
                             </span>
                           </td>
                           <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
@@ -1166,20 +1201,67 @@ export default function OrderWindow({
                           <td className="px-2.5 py-2.5 text-right font-mono font-bold text-orange-400">
                             {Number(liveRatio).toFixed(2)}%
                           </td>
-                          <td className="px-2.5 py-2.5 text-right font-mono text-emerald-300 font-bold">{q.toLocaleString()} (매도완료)</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono text-emerald-300 font-bold">{q.toLocaleString()} (장중매각)</td>
                           <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(bp).toLocaleString()}</td>
                           <td className="px-2.5 py-2.5 text-right font-mono font-bold text-emerald-300">
-                            {Math.floor(sp).toLocaleString()} (체결가)
+                            {Math.floor(sp).toLocaleString()} (장중체결가)
                           </td>
                           <td className={`px-2.5 py-2.5 text-right font-mono font-extrabold ${pnlColor}`}>
                             {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원
                           </td>
                           <td className={`px-2.5 py-2.5 text-right font-mono font-extrabold ${pnlColor}`}>
-                            {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원 (확정)
+                            {netRealizedPnl > 0 ? '+' : ''}{Math.round(netRealizedPnl).toLocaleString()} 원 (세후확정)
                           </td>
                           <td className="px-2.5 py-2 text-center">
                             <span className="px-2 py-1 rounded bg-emerald-900/60 border border-emerald-500/50 text-emerald-300 font-bold text-[11px]">
                               원장기록 완료
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {todayCloseSoldRows.map((cr: any, cIdx: number) => {
+                      const cleanTicker = String(cr.ticker || '').split(':').pop() || '';
+                      const bp = Number(cr.buy_price) || 0;
+                      const sp = Number(cr.sell_price) || bp;
+                      const q = Number(cr.qty) || 0;
+                      const realizedPnl = cr.pnl !== undefined && cr.pnl !== null ? Number(cr.pnl) : (sp - bp) * q;
+                      const pnlColor = realizedPnl > 0 ? 'text-red-400' : realizedPnl < 0 ? 'text-blue-400' : 'text-gray-400';
+                      const foreignMatch = foreignOrderStocks.find(
+                        (fs) => fs.clean_ticker === cleanTicker || (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
+                      const frozenMatch = frozenStocks.find(
+                        (fs) => fs.clean_ticker === cleanTicker || (fs.ticker && fs.ticker.split(':').pop() === cleanTicker)
+                      );
+                      const ratio0905 = foreignMatch?.ratio0905 ?? frozenMatch?.ratio0905;
+                      const liveRatio = foreignMatch?.currentRatio ?? foreignMatch?.foreign_ratio ?? 0;
+                      const cRowBg = cIdx % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]';
+                      return (
+                        <tr key={`close-sold-${cleanTicker}-${cIdx}`} className={`border-b border-gray-800 ${cRowBg}`}>
+                          <td className={`px-2.5 py-2.5 font-bold sticky left-0 z-10 ${cRowBg} text-gray-200 flex items-center gap-1.5`}>
+                            <span>{cr.name || cleanTicker}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-blue-950/80 border border-blue-700/70 text-[10px] text-blue-300 font-bold">
+                              15:30 종가청산
+                            </span>
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-yellow-400">
+                            {ratio0905 !== undefined ? Number(ratio0905).toFixed(2) : '-'}%
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono font-bold text-gray-400">
+                            {Number(liveRatio).toFixed(2)}%
+                          </td>
+                          <td className="px-2.5 py-2.5 text-right font-mono text-gray-300">{q.toLocaleString()}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono">{Math.floor(bp).toLocaleString()}</td>
+                          <td className="px-2.5 py-2.5 text-right font-mono text-gray-300">{Math.floor(sp).toLocaleString()} (종가)</td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
+                            {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원
+                          </td>
+                          <td className={`px-2.5 py-2.5 text-right font-mono font-bold ${pnlColor}`}>
+                            {realizedPnl > 0 ? '+' : ''}{Math.floor(realizedPnl).toLocaleString()} 원 (확정)
+                          </td>
+                          <td className="px-2.5 py-2 text-center">
+                            <span className="px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 text-[11px]">
+                              종가정산 완료
                             </span>
                           </td>
                         </tr>
@@ -1606,10 +1688,94 @@ export default function OrderWindow({
                   )}
                 </div>
 
+                {/* 장중 개별 매각(차익실현) 전용 하이라이트 원장 섹션 */}
+                {allIntradaySoldRows.length > 0 && (
+                  <div className="bg-emerald-950/20 border border-emerald-700/70 rounded-lg p-3.5 shadow-lg">
+                    <div className="flex flex-wrap justify-between items-center gap-2 mb-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-extrabold text-emerald-300">
+                          ⚡ 장중 개별 매각(차익실현) 매매원장 반영 내역
+                        </span>
+                        <span className="text-[11px] bg-emerald-900/80 border border-emerald-500/60 text-emerald-200 px-2 py-0.5 rounded font-bold">
+                          총 {allIntradaySoldRows.length}건 · 일별 종합 정산 원장에 합산 완료
+                        </span>
+                      </div>
+                      <span className="text-xs font-mono text-emerald-300 font-bold">
+                        장중 매각 세전차익 합계:{' '}
+                        {(() => {
+                          const sumGross = allIntradaySoldRows.reduce((acc, r) => acc + (Number(r.pnl) || 0), 0);
+                          return `${sumGross >= 0 ? '+' : ''}${Math.floor(sumGross).toLocaleString()}원`;
+                        })()}
+                      </span>
+                    </div>
+                    <div className="border border-emerald-800/70 rounded bg-[#07130e] overflow-x-auto">
+                      <table className="w-full text-xs text-left whitespace-nowrap">
+                        <thead className="bg-[#0d231a] text-emerald-300 border-b border-emerald-800/70">
+                          <tr>
+                            <th className="px-3 py-2 font-semibold">거래일자</th>
+                            <th className="px-3 py-2 font-semibold">종목명(코드)</th>
+                            <th className="px-3 py-2 font-semibold text-right">매도수량</th>
+                            <th className="px-3 py-2 font-semibold text-right">매입단가 → 장중매도가</th>
+                            <th className="px-3 py-2 font-semibold text-right">매입총액 → 매도총액</th>
+                            <th className="px-3 py-2 font-semibold text-right">세전 실현차익</th>
+                            <th className="px-3 py-2 font-semibold text-right text-gray-400">수수료·거래세</th>
+                            <th className="px-3 py-2 font-semibold text-right text-emerald-300">세후 실질순이익(수익률)</th>
+                            <th className="px-3 py-2 font-semibold text-center">원장 반영 상태</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {allIntradaySoldRows.map((row: any, idx: number) => {
+                            const bp = Number(row.buy_price) || 0;
+                            const sp = Number(row.sell_price) || bp;
+                            const q = Number(row.qty) || 0;
+                            const buyAmt = bp * q;
+                            const sellAmt = sp * q;
+                            const grossPnl = row.pnl !== undefined && row.pnl !== null ? Number(row.pnl) : sellAmt - buyAmt;
+                            const feeAmt = (buyAmt + sellAmt) * 0.00015;
+                            const taxAmt = sellAmt * 0.002;
+                            const netPnl = grossPnl - feeAmt - taxAmt;
+                            const netRetPct = buyAmt > 0 ? (netPnl / buyAmt) * 100 : 0;
+                            const pnlCls = netPnl > 0 ? 'text-red-400' : netPnl < 0 ? 'text-blue-400' : 'text-gray-300';
+                            return (
+                              <tr key={`intra-highlight-${row.id || idx}`} className="border-b border-emerald-900/50 hover:bg-emerald-900/20">
+                                <td className="px-3 py-2 font-mono font-bold text-emerald-200">{row.trade_date}</td>
+                                <td className="px-3 py-2 font-bold text-white">
+                                  {row.name} <span className="text-[10px] text-emerald-400 font-mono">({row.ticker})</span>
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-emerald-200">{q.toLocaleString()} 주</td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-200">
+                                  {Math.floor(bp).toLocaleString()}원 → <span className="font-bold text-emerald-300">{Math.floor(sp).toLocaleString()}원</span>
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-300">
+                                  {Math.floor(buyAmt).toLocaleString()}원 → <span className="font-bold text-white">{Math.floor(sellAmt).toLocaleString()}원</span>
+                                </td>
+                                <td className={`px-3 py-2 text-right font-mono font-bold ${grossPnl >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                  {grossPnl > 0 ? '+' : ''}{Math.floor(grossPnl).toLocaleString()} 원
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-400">
+                                  -{Math.round(feeAmt + taxAmt).toLocaleString()} 원
+                                </td>
+                                <td className={`px-3 py-2 text-right font-mono font-extrabold ${pnlCls}`}>
+                                  {netPnl > 0 ? '+' : ''}{Math.round(netPnl).toLocaleString()} 원 ({netRetPct > 0 ? '+' : ''}{netRetPct.toFixed(2)}%)
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-900/80 text-emerald-200 border border-emerald-500">
+                                    ✅ {row.trade_date} 원장 합산됨
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-sm font-bold text-gray-300">📊 일별 종합 정산 원장</span>
+                  <span className="text-sm font-bold text-gray-300">📊 일별 종합 정산 원장 (장중 개별매각 + 15:30 종가청산 통합)</span>
                   <span className="text-sm font-mono text-gray-400 font-bold bg-[#0a0a0a] px-3 py-1 rounded border border-gray-800">
-                    Net Total: <span className="text-green-400">{pnlHistory.reduce((sum, item) => sum + (item.net_pnl || 0), 0).toLocaleString()}</span> 원
+                    Net Total: <span className="text-green-400">{Math.round(pnlHistory.reduce((sum, item) => sum + (item.net_pnl || 0), 0)).toLocaleString()}</span> 원
                   </span>
                 </div>
                 {pnlHistory.length === 0 ? (
@@ -1619,7 +1785,7 @@ export default function OrderWindow({
                     <table className="w-full text-xs text-left">
                       <thead className="bg-[#1a1a1a] text-gray-400 border-b border-gray-800">
                         <tr>
-                          <th className="px-3 py-2 font-medium">일자</th>
+                          <th className="px-3 py-2 font-medium">일자 / 구분</th>
                           <th className="px-3 py-2 font-medium text-right">매입총액</th>
                           <th className="px-3 py-2 font-medium text-right">매도총액</th>
                           <th className="px-3 py-2 font-medium text-right text-gray-500">수수료(0.015%)</th>
@@ -1629,21 +1795,91 @@ export default function OrderWindow({
                         </tr>
                       </thead>
                       <tbody>
-                        {pnlHistory.map((item, i) => (
-                          <tr key={item.date} className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
-                            <td className="px-3 py-2 font-mono text-gray-300 font-bold">{item.date}</td>
-                            <td className="px-3 py-2 text-right font-mono text-gray-400">{Math.floor(item.total_buy || 0).toLocaleString()} 원</td>
-                            <td className="px-3 py-2 text-right font-mono text-gray-400">{Math.floor(item.total_sell || 0).toLocaleString()} 원</td>
-                            <td className="px-3 py-2 text-right font-mono text-gray-500">{Math.floor(item.fees || 0).toLocaleString()} 원</td>
-                            <td className="px-3 py-2 text-right font-mono text-gray-500">{Math.floor(item.tax || 0).toLocaleString()} 원</td>
-                            <td className={`px-3 py-2 text-right font-mono font-bold ${(item.net_pnl || 0) > 0 ? 'text-red-400' : ((item.net_pnl || 0) < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
-                              {(item.net_pnl || 0) > 0 ? '+' : ''}{Math.floor(item.net_pnl || 0).toLocaleString()} 원
-                            </td>
-                            <td className={`px-3 py-2 text-right font-mono font-bold ${(item.return_rate || 0) > 0 ? 'text-red-400' : ((item.return_rate || 0) < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
-                              {(item.return_rate || 0) > 0 ? '+' : ''}{(item.return_rate || 0).toFixed(2)}%
-                            </td>
-                          </tr>
-                        ))}
+                        {pnlHistory.map((item, i) => {
+                          const dayIntraRows = detailedLedger.filter(
+                            (r: any) => r.trade_date === item.date && r.status === 'SELL' && r.sell_type === 'INTRADAY'
+                          );
+                          const dayCloseRows = detailedLedger.filter(
+                            (r: any) => r.trade_date === item.date && r.status === 'SELL' && r.sell_type !== 'INTRADAY'
+                          );
+                          const hasIntra = dayIntraRows.length > 0;
+
+                          const intraBuy = dayIntraRows.reduce((s: number, r: any) => s + (Number(r.buy_price) || 0) * (Number(r.qty) || 0), 0);
+                          const intraSell = dayIntraRows.reduce((s: number, r: any) => s + (Number(r.sell_price) || 0) * (Number(r.qty) || 0), 0);
+                          const intraFee = (intraBuy + intraSell) * 0.00015;
+                          const intraTax = intraSell * 0.002;
+                          const intraNet = (intraSell - intraBuy) - intraFee - intraTax;
+                          const intraRet = intraBuy > 0 ? (intraNet / intraBuy) * 100 : 0;
+                          const intraNames = dayIntraRows.map((r: any) => `${r.name}(${r.qty}주)`).join(', ');
+
+                          const closeBuy = Math.max(0, (Number(item.total_buy) || 0) - intraBuy);
+                          const closeSell = Math.max(0, (Number(item.total_sell) || 0) - intraSell);
+                          const closeFee = Math.max(0, (Number(item.fees) || 0) - intraFee);
+                          const closeTax = Math.max(0, (Number(item.tax) || 0) - intraTax);
+                          const closeNet = (Number(item.net_pnl) || 0) - intraNet;
+                          const closeRet = closeBuy > 0 ? (closeNet / closeBuy) * 100 : 0;
+
+                          return (
+                            <React.Fragment key={item.date}>
+                              <tr className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
+                                <td className="px-3 py-2 font-mono text-gray-200 font-bold">
+                                  <span>{item.date}</span>
+                                  {hasIntra && (
+                                    <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-700 text-emerald-300 text-[10px] font-bold">
+                                      총 {dayIntraRows.length + dayCloseRows.length}종목 합산 (장중매각 {dayIntraRows.length}건 포함)
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-300">{Math.floor(item.total_buy || 0).toLocaleString()} 원</td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-300">{Math.floor(item.total_sell || 0).toLocaleString()} 원</td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-500">{Math.floor(item.fees || 0).toLocaleString()} 원</td>
+                                <td className="px-3 py-2 text-right font-mono text-gray-500">{Math.floor(item.tax || 0).toLocaleString()} 원</td>
+                                <td className={`px-3 py-2 text-right font-mono font-bold ${(item.net_pnl || 0) > 0 ? 'text-red-400' : ((item.net_pnl || 0) < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
+                                  {(item.net_pnl || 0) > 0 ? '+' : ''}{Math.round(item.net_pnl || 0).toLocaleString()} 원
+                                </td>
+                                <td className={`px-3 py-2 text-right font-mono font-bold ${(item.return_rate || 0) > 0 ? 'text-red-400' : ((item.return_rate || 0) < 0 ? 'text-blue-400' : 'text-gray-400')}`}>
+                                  {(item.return_rate || 0) > 0 ? '+' : ''}{(item.return_rate || 0).toFixed(2)}%
+                                </td>
+                              </tr>
+                              {hasIntra && (
+                                <>
+                                  <tr className="border-b border-emerald-900/40 bg-emerald-950/25 text-[11px]">
+                                    <td className="pl-6 pr-3 py-1.5 font-bold text-emerald-300">
+                                      ↳ ⚡ 장중 개별매각 확정분: {intraNames}
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right font-mono text-emerald-200">{Math.floor(intraBuy).toLocaleString()} 원</td>
+                                    <td className="px-3 py-1.5 text-right font-mono text-emerald-200">{Math.floor(intraSell).toLocaleString()} 원</td>
+                                    <td className="px-3 py-1.5 text-right font-mono text-gray-400">{Math.round(intraFee).toLocaleString()} 원</td>
+                                    <td className="px-3 py-1.5 text-right font-mono text-gray-400">{Math.round(intraTax).toLocaleString()} 원</td>
+                                    <td className={`px-3 py-1.5 text-right font-mono font-extrabold ${intraNet >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                      {intraNet > 0 ? '+' : ''}{Math.round(intraNet).toLocaleString()} 원 (세전 +{Math.floor(intraSell - intraBuy).toLocaleString()}원)
+                                    </td>
+                                    <td className={`px-3 py-1.5 text-right font-mono font-extrabold ${intraRet >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                      {intraRet > 0 ? '+' : ''}{intraRet.toFixed(2)}%
+                                    </td>
+                                  </tr>
+                                  {dayCloseRows.length > 0 && (
+                                    <tr className="border-b border-gray-800/80 bg-[#12161f] text-[11px]">
+                                      <td className="pl-6 pr-3 py-1.5 font-semibold text-blue-300">
+                                        ↳ 🕒 15:30 장마감 종가 일괄청산분 (외 {dayCloseRows.length}종목)
+                                      </td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-gray-400">{Math.floor(closeBuy).toLocaleString()} 원</td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-gray-400">{Math.floor(closeSell).toLocaleString()} 원</td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-gray-500">{Math.round(closeFee).toLocaleString()} 원</td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-gray-500">{Math.round(closeTax).toLocaleString()} 원</td>
+                                      <td className={`px-3 py-1.5 text-right font-mono font-bold ${closeNet >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                        {closeNet > 0 ? '+' : ''}{Math.round(closeNet).toLocaleString()} 원
+                                      </td>
+                                      <td className={`px-3 py-1.5 text-right font-mono font-bold ${closeRet >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                                        {closeRet > 0 ? '+' : ''}{closeRet.toFixed(2)}%
+                                      </td>
+                                    </tr>
+                                  )}
+                                </>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1652,13 +1888,13 @@ export default function OrderWindow({
                 {/* Per-Stock Detailed Breakdown */}
                 <div className="pt-2">
                   <div className="text-sm font-bold text-gray-300 mb-2 flex items-center justify-between">
-                    <span>📑 종목별 상세 매매 내역</span>
+                    <span>📑 종목별 상세 매매 내역 (장중 개별매각 종목 최상단 표시)</span>
                     <span className="text-xs text-gray-500 font-normal">총 {detailedLedger.length}건 기록됨</span>
                   </div>
                   {detailedLedger.length === 0 ? (
                     <div className="py-6 text-center text-gray-500 text-xs">종목별 상세 매매 내역이 없습니다.</div>
                   ) : (
-                    <div className="border border-gray-800 rounded bg-[#0a0a0a] max-h-[300px] overflow-y-auto">
+                    <div className="border border-gray-800 rounded bg-[#0a0a0a] max-h-[340px] overflow-y-auto">
                       <table className="w-full text-xs text-left">
                         <thead className="bg-[#1a1a1a] text-gray-400 border-b border-gray-800 sticky top-0">
                           <tr>
@@ -1666,7 +1902,7 @@ export default function OrderWindow({
                             <th className="px-3 py-2 font-medium">종목명(코드)</th>
                             <th className="px-3 py-2 font-medium text-right">수량</th>
                             <th className="px-3 py-2 font-medium text-right">매수가</th>
-                            <th className="px-3 py-2 font-medium text-right">15:30 종가(매도)</th>
+                            <th className="px-3 py-2 font-medium text-right">매도가 (장중/15:30종가)</th>
                             <th className="px-3 py-2 font-medium text-right">종목별 실현손익</th>
                             <th className="px-3 py-2 font-medium text-center">정산상태</th>
                           </tr>
@@ -1674,23 +1910,54 @@ export default function OrderWindow({
                         <tbody>
                           {detailedLedger.map((row, i) => {
                             const pnlVal = row.pnl || 0;
+                            const isIntra = row.sell_type === 'INTRADAY';
+                            const bp = Number(row.buy_price) || 0;
+                            const sp = Number(row.sell_price) || bp;
+                            const q = Number(row.qty) || 0;
+                            const netVal = pnlVal - ((bp * q + sp * q) * 0.00015 + (sp * q) * 0.002);
                             const pnlColor = pnlVal > 0 ? 'text-red-400' : (pnlVal < 0 ? 'text-blue-400' : 'text-gray-400');
                             return (
-                              <tr key={row.id || i} className={`border-b border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`}>
-                                <td className="px-3 py-2 font-mono text-gray-400">{row.trade_date}</td>
+                              <tr
+                                key={row.id || i}
+                                className={`border-b ${
+                                  isIntra
+                                    ? 'border-emerald-800/70 bg-emerald-950/30 hover:bg-emerald-950/40'
+                                    : `border-gray-800 ${i % 2 === 0 ? 'bg-[#0f0f0f]' : 'bg-[#0a0a0a]'}`
+                                }`}
+                              >
+                                <td className="px-3 py-2 font-mono text-gray-300">{row.trade_date}</td>
                                 <td className="px-3 py-2 font-bold text-gray-200">
-                                  {row.name} <span className="text-[10px] text-gray-500 font-mono">({row.ticker})</span>
+                                  <span className={isIntra ? 'text-emerald-200 font-extrabold' : 'text-gray-200'}>{row.name}</span>{' '}
+                                  <span className="text-[10px] text-gray-500 font-mono">({row.ticker})</span>
+                                  {isIntra && (
+                                    <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-900/80 border border-emerald-500/70 text-[10px] text-emerald-200 font-bold">
+                                      ⚡ 장중매각
+                                    </span>
+                                  )}
                                 </td>
                                 <td className="px-3 py-2 text-right font-mono text-gray-300">{(row.qty || 0).toLocaleString()} 주</td>
                                 <td className="px-3 py-2 text-right font-mono text-gray-300">{(row.buy_price || 0).toLocaleString()} 원</td>
-                                <td className="px-3 py-2 text-right font-mono text-gray-300">{(row.sell_price || 0).toLocaleString()} 원</td>
+                                <td className={`px-3 py-2 text-right font-mono ${isIntra ? 'text-emerald-300 font-bold' : 'text-gray-300'}`}>
+                                  {(row.sell_price || 0).toLocaleString()} 원 {isIntra ? '(장중체결)' : '(종가)'}
+                                </td>
                                 <td className={`px-3 py-2 text-right font-mono font-bold ${pnlColor}`}>
-                                  {pnlVal > 0 ? '+' : ''}{Math.floor(pnlVal).toLocaleString()} 원
+                                  <div>{pnlVal > 0 ? '+' : ''}{Math.floor(pnlVal).toLocaleString()} 원</div>
+                                  {isIntra && (
+                                    <div className="text-[10px] text-emerald-300 font-normal">
+                                      (세후 {netVal > 0 ? '+' : ''}{Math.round(netVal).toLocaleString()}원)
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-3 py-2 text-center">
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-950 text-green-400 border border-green-800">
-                                    {row.status === 'SELL' ? '종가매도완료' : row.status}
-                                  </span>
+                                  {isIntra ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-900/80 text-emerald-200 border border-emerald-500">
+                                      ⚡ 장중매각확정 (원장반영)
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-950 text-green-400 border border-green-800">
+                                      {row.status === 'SELL' ? '15:30 종가매도완료' : row.status}
+                                    </span>
+                                  )}
                                 </td>
                               </tr>
                             );

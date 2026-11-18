@@ -698,7 +698,7 @@ def _norm_uid(user_id: str = "admin") -> str:
 
 
 def _ensure_trading_ledger_columns(c):
-    for extra_col in ["user_id TEXT DEFAULT 'admin'", "batch_id TEXT", "created_at TEXT"]:
+    for extra_col in ["user_id TEXT DEFAULT 'admin'", "batch_id TEXT", "created_at TEXT", "sell_type TEXT DEFAULT 'CLOSE'", "sold_at TEXT"]:
         try:
             c.execute(f"ALTER TABLE trading_ledger ADD COLUMN {extra_col}")
         except Exception:
@@ -924,13 +924,14 @@ def sell_single_holding(ticker: str, qty: int, sell_price: float = 0.0, name: st
             (remaining_qty, uid, ticker, pure_t, krx_t),
         )
 
-    # 4. trading_ledger 업데이트 (전량 매도 시 status='SELL', 부분 매도 시 잔여 BUY + 매도분 SELL 분리 기록)
+    # 4. trading_ledger 업데이트 (전량 매도 시 status='SELL', sell_type='INTRADAY', 부분 매도 시 잔여 BUY + 매도분 SELL 분리 기록)
+    now_kst_iso = (datetime.utcnow() + timedelta(hours=9)).isoformat(timespec="seconds")
     if l_rows:
         primary_id = l_rows[0]["id"]
         if remaining_qty <= 0:
             c.execute(
-                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL' WHERE id = ?",
-                (stock_name, buy_price, exec_sell_price, sell_qty, item_pnl, primary_id),
+                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL', sell_type = 'INTRADAY', sold_at = ? WHERE id = ?",
+                (stock_name, buy_price, exec_sell_price, sell_qty, item_pnl, now_kst_iso, primary_id),
             )
         else:
             c.execute(
@@ -939,18 +940,18 @@ def sell_single_holding(ticker: str, qty: int, sell_price: float = 0.0, name: st
             )
             c.execute(
                 """
-                INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL')
+                INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status, sell_type, sold_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', 'INTRADAY', ?)
                 """,
-                (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl),
+                (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl, now_kst_iso),
             )
     else:
         c.execute(
             """
-            INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL')
+            INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status, sell_type, sold_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', 'INTRADAY', ?)
             """,
-            (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl),
+            (uid, today_str, pure_t, stock_name, buy_price, exec_sell_price, sell_qty, item_pnl, now_kst_iso),
         )
 
     conn.commit()
@@ -1187,8 +1188,11 @@ def record_trading_buy(trade_date: str, ticker: str, name: str, buy_price: float
 def record_trading_sell_all(trade_date: str, sell_items: list, user_id: str = "admin"):
     """
     일괄 매도시 각 종목의 매도가, 실현손익 및 SELL 상태를 회원별(user_id)로 trading_ledger에 확정 기록합니다.
+    (이미 장중 개별매각 sell_type='INTRADAY'로 확정된 종목은 절대 덮어쓰지 않고 보존합니다.)
     """
+    from datetime import datetime, timedelta
     uid = _norm_uid(user_id)
+    now_kst_iso = (datetime.utcnow() + timedelta(hours=9)).isoformat(timespec="seconds")
     conn = get_db_connection()
     c = conn.cursor()
     _ensure_trading_ledger_columns(c)
@@ -1200,13 +1204,15 @@ def record_trading_sell_all(trade_date: str, sell_items: list, user_id: str = "a
         qty = item['qty']
         name = item.get('name', t)
 
-        c.execute("SELECT id FROM trading_ledger WHERE user_id = ? AND trade_date = ? AND ticker = ? ORDER BY id ASC", (uid, trade_date, t))
+        c.execute("SELECT id, status, sell_type FROM trading_ledger WHERE user_id = ? AND trade_date = ? AND ticker = ? ORDER BY id ASC", (uid, trade_date, t))
         rows = c.fetchall()
         if rows:
+            if rows[0]['status'] == 'SELL' and (rows[0]['sell_type'] or '') == 'INTRADAY':
+                continue
             keep_id = rows[0]['id']
             c.execute(
-                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL' WHERE id = ?",
-                (name, bp, sp, qty, pnl, keep_id),
+                "UPDATE trading_ledger SET name = ?, buy_price = ?, sell_price = ?, qty = ?, pnl = ?, status = 'SELL', sell_type = 'CLOSE', sold_at = COALESCE(sold_at, ?) WHERE id = ?",
+                (name, bp, sp, qty, pnl, now_kst_iso, keep_id),
             )
             if len(rows) > 1:
                 dup_ids = [r['id'] for r in rows[1:]]
@@ -1214,9 +1220,9 @@ def record_trading_sell_all(trade_date: str, sell_items: list, user_id: str = "a
                 c.execute(f"DELETE FROM trading_ledger WHERE id IN ({placeholders})", dup_ids)
         else:
             c.execute('''
-                INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL')
-            ''', (uid, trade_date, t, name, bp, sp, qty, pnl))
+                INSERT INTO trading_ledger (user_id, trade_date, ticker, name, buy_price, sell_price, qty, pnl, status, sell_type, sold_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', 'CLOSE', ?)
+            ''', (uid, trade_date, t, name, bp, sp, qty, pnl, now_kst_iso))
     conn.commit()
     conn.close()
 
@@ -1235,10 +1241,11 @@ def get_detailed_trading_ledger(date_str: str = None, user_id: str = "admin"):
     uid = _norm_uid(user_id)
     conn = get_db_connection()
     c = conn.cursor()
+    _ensure_trading_ledger_columns(c)
     if date_str:
-        c.execute('SELECT * FROM trading_ledger WHERE user_id = ? AND trade_date = ? ORDER BY id DESC', (uid, date_str))
+        c.execute('SELECT * FROM trading_ledger WHERE user_id = ? AND trade_date = ? ORDER BY CASE WHEN sell_type = "INTRADAY" THEN 0 ELSE 1 END, id DESC', (uid, date_str))
     else:
-        c.execute('SELECT * FROM trading_ledger WHERE user_id = ? ORDER BY trade_date DESC, id DESC', (uid,))
+        c.execute('SELECT * FROM trading_ledger WHERE user_id = ? ORDER BY trade_date DESC, CASE WHEN sell_type = "INTRADAY" THEN 0 ELSE 1 END, id DESC', (uid,))
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
