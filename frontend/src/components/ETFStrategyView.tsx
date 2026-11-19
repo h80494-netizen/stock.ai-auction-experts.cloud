@@ -91,6 +91,26 @@ export default function ETFStrategyView({
   const [kisAutoTrade, setKisAutoTrade] = useState<boolean>(effectiveUserId === 'admin');
   const [kisLoading, setKisLoading] = useState<boolean>(false);
   const [priceRefreshing, setPriceRefreshing] = useState<boolean>(false);
+  const [cashThreshold, setCashThreshold] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('etf_cash_threshold_annual');
+      if (saved !== null && !isNaN(Number(saved))) return Number(saved);
+    }
+    return 10;
+  });
+  const [cashThresholdInput, setCashThresholdInput] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('etf_cash_threshold_annual');
+      if (saved !== null && !isNaN(Number(saved))) return String(Number(saved));
+    }
+    return '10';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('etf_cash_threshold_annual', String(cashThreshold));
+    }
+  }, [cashThreshold]);
 
   const activeWeights = etfWeights || localWeights;
   const updateWeights = setEtfWeights || setLocalWeights;
@@ -99,9 +119,11 @@ export default function ETFStrategyView({
     kisAccount?.signal?.usd_krw_rate || kisAccount?.config?.usd_krw_rate || 1400
   );
 
-  // 선택된 ETF 개수(activeCount)와 총 주문 한도 금액(kisOrderBudgetKrw, 디폴트 5천만원)을 넘지 않도록 각 ETF 가격으로 나눈 수량 계산
+  // 선택된 ETF 개수(activeCount)와 총 주문 한도 금액(kisOrderBudgetKrw, 디폴트 5천만원)을 넘지 않도록 각 ETF 가격으로 나눈 수량 계산 (연 cashThreshold% 이하 시 CASH)
   const activeTargetItems = useMemo(() => {
-    return data.slice(0, topN).filter((it: any) => Number(it?.final_score || 0) > 0);
+    return data.slice(0, topN).filter((it: any) =>
+      it?.is_selected !== undefined ? Boolean(it.is_selected) : Number(it?.final_score || 0) > 0
+    );
   }, [data, topN]);
 
   const calcEtfOrderFromBudget = (priceUsd: number, targetCount?: number) => {
@@ -290,7 +312,7 @@ export default function ETFStrategyView({
     try {
       await fetch('/api/etf/refresh-prices', { method: 'POST' });
       const ts = Date.now();
-      const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&force_refresh=true&t=${ts}`;
+      const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&cash_threshold=${cashThreshold}&force_refresh=true&t=${ts}`;
       const [stratRes, simRes] = await Promise.all([
         fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }),
         fetch(`/api/etf/simulation${query}`, { cache: 'no-store' }),
@@ -334,7 +356,7 @@ export default function ETFStrategyView({
 
   useEffect(() => {
     setModelsLoading(true);
-    fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}`)
+    fetch(`/api/etf/simulation-models?criteria=${criteria}&top_n=${topN}&cash_threshold=${cashThreshold}`)
       .then(res => res.json())
       .then(json => {
         if (Array.isArray(json) && json.length > 0) {
@@ -361,7 +383,7 @@ export default function ETFStrategyView({
       })
       .catch(err => console.error('Error fetching simulation models:', err))
       .finally(() => setModelsLoading(false));
-  }, [criteria, topN]);
+  }, [criteria, topN, cashThreshold]);
 
   // Determine current active model matching activeWeights
   const currentModel = useMemo(() => {
@@ -567,7 +589,7 @@ export default function ETFStrategyView({
       if (!pollInterval) setLoading(true);
       try {
         const ts = Date.now();
-        const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&t=${ts}`;
+        const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&cash_threshold=${cashThreshold}&t=${ts}`;
         const [stratRes, simRes] = await Promise.all([
           fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }),
           fetch(`/api/etf/simulation${query}`, { cache: 'no-store' })
@@ -603,7 +625,7 @@ export default function ETFStrategyView({
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [criteria, topN, activeWeights]);
+  }, [criteria, topN, activeWeights, cashThreshold]);
 
 
 
@@ -803,10 +825,8 @@ export default function ETFStrategyView({
   if (!data || data.length === 0) return <div className="p-4 text-red-500">Failed to load ETF Strategy data.</div>;
 
   const topETF = data[0];
-  // sharpe 지수 모드일 땐 샤프지수 값으로 현금 보유 여부를 판단하거나, 
-  // 기존과 같이 momentum_score가 0.5 이하일 때로 유지할 수 있음.
-  // 로직상 criteria에 따라 final_score가 결정되므로 final_score를 이용.
-  const isCash = topETF && topETF.final_score <= 0.0;
+  // 연환산 기대수익률이 cashThreshold%(디폴트 연 10%) 이하이거나 final_score <= 0일 때 ETF를 선택하지 않고 CASH 보유
+  const isCash = !topETF || topETF.is_selected === false || topETF.final_score <= 0.0;
   const etfTickers = simData && simData.etfs ? Object.keys(simData.etfs) : [];
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -892,6 +912,31 @@ export default function ETFStrategyView({
           <span className="px-2.5 py-0.5 bg-teal-900/70 border border-teal-500/50 text-teal-200 rounded text-xs sm:text-sm font-extrabold">
             최상위 1종목 (100% 집중)
           </span>
+        </div>
+
+        {/* CASH 보유 기준 연수익률(%) 입력창 (디폴트 연 10% 이하 시 CASH 보유) */}
+        <div className="bg-gray-800 px-3 py-2 rounded-lg flex items-center gap-1.5 shadow-lg border border-amber-500/50">
+          <span className="text-xs sm:text-sm font-extrabold text-amber-400 whitespace-nowrap">🛡️ CASH 보유 기준: 연</span>
+          <input
+            type="number"
+            step="1"
+            value={cashThresholdInput}
+            onChange={(e) => {
+              setCashThresholdInput(e.target.value);
+              const num = parseFloat(e.target.value);
+              if (!isNaN(num)) {
+                setCashThreshold(num);
+              }
+            }}
+            onBlur={() => {
+              const num = parseFloat(cashThresholdInput);
+              const valid = isNaN(num) ? 10 : num;
+              setCashThreshold(valid);
+              setCashThresholdInput(String(valid));
+            }}
+            className="w-16 bg-gray-950 border border-amber-500/60 rounded px-2 py-0.5 text-center font-mono font-extrabold text-amber-200 text-xs sm:text-sm outline-none focus:border-amber-300"
+          />
+          <span className="text-xs sm:text-sm font-bold text-amber-200 whitespace-nowrap">% 이하 시 CASH 보유</span>
         </div>
 
         {/* 선택 기준 토글 */}

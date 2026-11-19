@@ -401,6 +401,7 @@ async def get_etf_strategy(
     w5: float = 0.3,
     w20: float = 0.2,
     force_refresh: bool = False,
+    cash_threshold: float = 10.0,
 ):
     from etf_strategy import get_etf_strategy_results
     results = get_etf_strategy_results(
@@ -410,6 +411,7 @@ async def get_etf_strategy(
         w5=w5,
         w20=w20,
         force_refresh=force_refresh,
+        cash_threshold=cash_threshold,
     )
     return results
 
@@ -516,14 +518,32 @@ async def api_execute_etf_kis_order(req: KISEtfUsOrderRequest, request: Request)
     return res
 
 @app.get("/api/etf/simulation")
-async def get_etf_sim(criteria: str = "momentum", top_n: int = 1, w1: float = 0.5, w5: float = 0.3, w20: float = 0.2):
+async def get_etf_sim(
+    criteria: str = "momentum",
+    top_n: int = 1,
+    w1: float = 0.5,
+    w5: float = 0.3,
+    w20: float = 0.2,
+    cash_threshold: float = 10.0,
+):
     from etf_strategy import get_etf_simulation
-    return get_etf_simulation(criteria=criteria, top_n=top_n, w1=w1, w5=w5, w20=w20)
+    return get_etf_simulation(
+        criteria=criteria,
+        top_n=top_n,
+        w1=w1,
+        w5=w5,
+        w20=w20,
+        cash_threshold=cash_threshold,
+    )
 
 @app.get("/api/etf/simulation-models")
-async def api_get_etf_simulation_models(criteria: str = "momentum", top_n: int = 1):
+async def api_get_etf_simulation_models(
+    criteria: str = "momentum",
+    top_n: int = 1,
+    cash_threshold: float = 10.0,
+):
     from etf_strategy import run_bulk_simulation
-    return run_bulk_simulation(criteria=criteria, top_n=top_n)
+    return run_bulk_simulation(criteria=criteria, top_n=top_n, cash_threshold=cash_threshold)
 
 class ModelSwapRequest(BaseModel):
     from_model: str

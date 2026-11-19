@@ -179,7 +179,27 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
   // 2종목, 3종목 선택 삭제 -> 단일 1종목(100%) 집중 고정
   const topN = 1;
   const [period, setPeriod] = useState<string>('YTD(26.01~)');
-  
+  const [cashThreshold, setCashThreshold] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('etf_cash_threshold_annual');
+      if (saved !== null && !isNaN(Number(saved))) return Number(saved);
+    }
+    return 10;
+  });
+  const [cashThresholdInput, setCashThresholdInput] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('etf_cash_threshold_annual');
+      if (saved !== null && !isNaN(Number(saved))) return String(Number(saved));
+    }
+    return '10';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('etf_cash_threshold_annual', String(cashThreshold));
+    }
+  }, [cashThreshold]);
+
   // 26 Models Simulator States (21 추세추종 + 5 역추세·횡보·방어)
   const [models, setModels] = useState<any[]>([]);
   const [runningSimulator, setRunningSimulator] = useState(false);
@@ -205,12 +225,12 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
     }
   }, [selectedModelIdx, models, setEtfWeights]);
 
-  const handleRunSimulator = async (currentCriteria = criteria) => {
+  const handleRunSimulator = async (currentCriteria = criteria, currentCashTh = cashThreshold) => {
     setRunningSimulator(true);
     setModels([]);
     setSelectedModelIdx(-1);
     try {
-      const res = await fetch(`/api/etf/simulation-models?criteria=${currentCriteria}&top_n=1`);
+      const res = await fetch(`/api/etf/simulation-models?criteria=${currentCriteria}&top_n=1&cash_threshold=${currentCashTh}`);
       if (res.ok) {
         const json = await res.json();
         setModels(Array.isArray(json) ? json : []);
@@ -230,7 +250,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
         const w1 = etfWeights?.w1 ?? 0.5;
         const w5 = etfWeights?.w5 ?? 0.3;
         const w20 = etfWeights?.w20 ?? 0.2;
-        const res = await fetch(`/api/etf/simulation?criteria=${criteria}&top_n=1&w1=${w1}&w5=${w5}&w20=${w20}&t=${Date.now()}`);
+        const res = await fetch(`/api/etf/simulation?criteria=${criteria}&top_n=1&w1=${w1}&w5=${w5}&w20=${w20}&cash_threshold=${cashThreshold}&t=${Date.now()}`);
         if (!res.ok) throw new Error('API Error');
         const json = await res.json();
         setSimData(json);
@@ -241,8 +261,8 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
       }
     };
     fetchData();
-    handleRunSimulator(criteria);
-  }, [criteria, etfWeights]);
+    handleRunSimulator(criteria, cashThreshold);
+  }, [criteria, etfWeights, cashThreshold]);
 
   // 시뮬레이션 데이터의 최신 날짜 기준으로 Walk-Forward 분할 날짜 계산
   const wfDateBounds = useMemo(() => {
@@ -552,14 +572,11 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
         dailyReturn = ((strategy[i] - strategy[i-1]) / strategy[i-1]) * 100;
       }
 
-      const currentEtfBase = (selected_etf[i] !== "CASH" && selected_etf[i] !== "Waiting" && etfs && etfs[selected_etf[i]]) 
-                             ? etfs[selected_etf[i]][i] : 100;
-
       rows.push({
         date: dates[i],
         selected: selected_etf[i] || "CASH",
         action,
-        etfIndex: currentEtfBase,
+        cumIndex: isNaN(rebasedVal) ? 100 : rebasedVal,
         dailyReturn: isNaN(dailyReturn) ? 0 : dailyReturn,
         cumReturn: isNaN(cumReturn) ? 0 : cumReturn
       });
@@ -785,6 +802,31 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
             <span className="px-2 py-0.5 bg-teal-900/70 text-teal-200 border border-teal-500/50 rounded text-xs font-extrabold">
               최상위 1종목 (100% 집중)
             </span>
+          </div>
+
+          {/* CASH 보유 기준 연수익률(%) 입력창 (디폴트 연 10% 이하 시 CASH 보유) */}
+          <div className="bg-gray-900 px-3 py-1.5 rounded-lg flex items-center gap-1.5 border border-amber-500/50 shadow">
+            <span className="text-xs font-extrabold text-amber-400 whitespace-nowrap">🛡️ CASH 보유 기준: 연</span>
+            <input
+              type="number"
+              step="1"
+              value={cashThresholdInput}
+              onChange={(e) => {
+                setCashThresholdInput(e.target.value);
+                const num = parseFloat(e.target.value);
+                if (!isNaN(num)) {
+                  setCashThreshold(num);
+                }
+              }}
+              onBlur={() => {
+                const num = parseFloat(cashThresholdInput);
+                const valid = isNaN(num) ? 10 : num;
+                setCashThreshold(valid);
+                setCashThresholdInput(String(valid));
+              }}
+              className="w-14 bg-gray-950 border border-amber-500/60 rounded px-1.5 py-0.5 text-center font-mono font-extrabold text-amber-200 text-xs outline-none focus:border-amber-300"
+            />
+            <span className="text-xs font-bold text-amber-200 whitespace-nowrap">% 이하 시 CASH 보유</span>
           </div>
 
           {/* 선택 기준 토글 */}
@@ -1418,8 +1460,13 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
 
       {/* 기본 단일 시뮬레이션 히스토리 표 */}
       <div className="bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden">
-        <div className="p-4 border-b border-gray-700 bg-gray-800/80">
-          <h3 className="text-lg font-bold text-gray-200">단일 메인 모델 히스토리 기록 (표) - {period}</h3>
+        <div className="p-4 border-b border-gray-700 bg-gray-800/80 flex flex-wrap justify-between items-center gap-2">
+          <h3 className="text-lg font-bold text-gray-200">
+            단일 메인 모델 히스토리 기록 (표) - {period}
+          </h3>
+          <span className="text-xs text-amber-300 font-mono font-bold bg-gray-900 px-2.5 py-1 rounded border border-amber-500/40">
+            🛡️ 현재 CASH 전환 기준: 연환산 기대수익률 {cashThreshold}% 이하 시 CASH 보유 · 누적수익률 지수 = 100.00 기준
+          </span>
         </div>
         <div className="overflow-x-auto">
           {historyRows && historyRows.length > 0 ? (
@@ -1429,7 +1476,7 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
                   <th className="p-3 border-b border-gray-700">일자 (Date)</th>
                   <th className="p-3 border-b border-gray-700 text-center">액션 (Action)</th>
                   <th className="p-3 border-b border-gray-700">선택 ETF</th>
-                  <th className="p-3 border-b border-gray-700 text-right">ETF 지수 (Base=100)</th>
+                  <th className="p-3 border-b border-gray-700 text-right text-amber-300 font-bold">누적수익률 지수 (Base=100)</th>
                   <th className="p-3 border-b border-gray-700 text-right">일일 수익률</th>
                   <th className="p-3 border-b border-gray-700 text-right">누적 수익률</th>
                 </tr>
@@ -1442,8 +1489,8 @@ export default function ETFSimulationHistoryView({ etfWeights, setEtfWeights }: 
                     <td className="p-3">
                       {renderSelectedEtfs(row.selected)}
                     </td>
-                    <td className="p-3 text-right text-gray-300">
-                      {row.etfIndex !== 100 ? row.etfIndex.toFixed(2) : '-'}
+                    <td className="p-3 text-right font-bold text-amber-300">
+                      {row.cumIndex.toFixed(2)}
                     </td>
                     <td className={`p-3 text-right font-bold ${row.dailyReturn > 0 ? 'text-red-400' : row.dailyReturn < 0 ? 'text-blue-400' : 'text-gray-400'}`}>
                       {row.dailyReturn > 0 ? '+' : ''}{row.dailyReturn.toFixed(2)}%

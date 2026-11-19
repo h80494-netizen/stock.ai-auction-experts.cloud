@@ -269,16 +269,24 @@ def sanitize_val(val, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, force_refresh=False):
+def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, force_refresh=False, cash_threshold=10.0):
     try:
         top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
 
+    try:
+        cash_threshold = float(cash_threshold)
+    except (ValueError, TypeError):
+        cash_threshold = 10.0
+
     if abs(w1) > 1.0 or abs(w5) > 1.0 or abs(w20) > 1.0:
         w1 = w1 / 100.0
         w5 = w5 / 100.0
         w20 = w20 / 100.0
+
+    weighted_days = max(1.0, 1.0 * abs(w1) + 5.0 * abs(w5) + 20.0 * abs(w20))
+    min_req_score = (cash_threshold / 252.0) * weighted_days
 
     check_and_update_etf_data(force_live=bool(force_refresh))
     init_db()
@@ -331,6 +339,7 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
                 sharpe_ratio = sanitize_val(momentum_score / std_dev)
                 
         final_score = sanitize_val(sharpe_ratio if criteria == "sharpe" else momentum_score)
+        annualized_return = sanitize_val(momentum_score * (252.0 / weighted_days))
         
         results.append({
             "ticker": ticker,
@@ -340,6 +349,8 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
             "return_5d": return_5d,
             "return_20d": return_20d,
             "momentum_score": momentum_score,
+            "annualized_return": annualized_return,
+            "cash_threshold": cash_threshold,
             "sharpe_ratio": sharpe_ratio,
             "final_score": final_score,
             "last_updated": dates[-1] if dates else "",
@@ -349,11 +360,11 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
     # Sort by final_score descending
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
     
-    # Assign ranks & recommended weights based on top_n
+    # Assign ranks & recommended weights based on top_n & cash_threshold (연 cash_threshold% 이하 시 ETF 미선택 및 CASH 보유)
     equal_weight = 100.0 if top_n == 1 else (50.0 if top_n == 2 else 33.33)
     for idx, item in enumerate(results):
         item["rank"] = idx + 1
-        if idx < top_n and item["final_score"] > 0.0:
+        if idx < top_n and item["final_score"] > 0.0 and item["momentum_score"] > min_req_score:
             item["is_selected"] = True
             item["recommended_weight"] = equal_weight
         else:
@@ -439,16 +450,24 @@ def get_kospi_aligned_series(dates: list) -> list:
         return [100.0] * len(dates)
 
 
-def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pivot=None, precalc=None):
+def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pivot=None, precalc=None, cash_threshold=10.0):
     try:
         top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
 
+    try:
+        cash_threshold = float(cash_threshold)
+    except (ValueError, TypeError):
+        cash_threshold = 10.0
+
     if abs(w1) > 1.0 or abs(w5) > 1.0 or abs(w20) > 1.0:
         w1 = w1 / 100.0
         w5 = w5 / 100.0
         w20 = w20 / 100.0
+
+    weighted_days = max(1.0, 1.0 * abs(w1) + 5.0 * abs(w5) + 20.0 * abs(w20))
+    min_req_score = (cash_threshold / 252.0) * weighted_days
 
     if pivot is None:
         check_and_update_etf_data()
@@ -516,18 +535,18 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
                     if not pd.isna(std_dev) and std_dev > 0:
                         final_score = score / std_dev
                 
-                scores.append((ticker, final_score))
+                scores.append((ticker, final_score, score))
             except:
                 continue
                 
         # Sort by final_score descending
         scores.sort(key=lambda x: x[1], reverse=True)
         
-        # Select top_n tickers
+        # Select top_n tickers (연환산 기대수익률이 cash_threshold% 이하이면 ETF 미선택 및 CASH 보유)
         top_candidates = scores[:top_n]
         selected_tickers = []
-        for tkr, scr in top_candidates:
-            if scr <= 0.0:
+        for tkr, scr, raw_mom_score in top_candidates:
+            if scr <= 0.0 or raw_mom_score <= min_req_score:
                 selected_tickers.append("CASH")
             else:
                 selected_tickers.append(tkr)
@@ -569,11 +588,16 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
         "etfs": etf_normalized
     }
 
-def run_bulk_simulation(criteria="momentum", top_n=1):
+def run_bulk_simulation(criteria="momentum", top_n=1, cash_threshold=10.0):
     try:
         top_n = max(1, min(3, int(top_n)))
     except (ValueError, TypeError):
         top_n = 1
+
+    try:
+        cash_threshold = float(cash_threshold)
+    except (ValueError, TypeError):
+        cash_threshold = 10.0
 
     check_and_update_etf_data()
     try:
@@ -679,7 +703,7 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
         w5 = w5_pct / 100.0
         w20 = w20_pct / 100.0
         
-        sim_data = get_etf_simulation(criteria, top_n, w1, w5, w20, pivot=pivot, precalc=precalc)
+        sim_data = get_etf_simulation(criteria, top_n, w1, w5, w20, pivot=pivot, precalc=precalc, cash_threshold=cash_threshold)
         
         if not sim_data or not sim_data.get('dates'):
             continue
