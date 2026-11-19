@@ -920,6 +920,10 @@ def get_realtime_quote_dict(tickers_str: str) -> dict:
     
     for original_t in ticker_list:
         pure_ticker = original_t.split(":")[-1]
+        if not is_korean_stock(original_t):
+            missing_tickers.append(original_t)
+            continue
+
         detail = None
         
         # 1. KIS Client 상세 현재가 조회 시도 (전일대비 등락률 포함)
@@ -949,7 +953,7 @@ def get_realtime_quote_dict(tickers_str: str) -> dict:
         else:
             missing_tickers.append(original_t)
 
-    # 3. 해외주식/누락종목 yfinance fallback
+    # 3. 해외주식/누락종목 고속 일괄 yfinance 조회 (0.8초 내 20~30종목 일괄 처리)
     if missing_tickers:
         yf_tickers = []
         yf_map = {}
@@ -959,17 +963,29 @@ def get_realtime_quote_dict(tickers_str: str) -> dict:
             yf_map[clean_yf] = t
             
         try:
-            yf_data = yf.Tickers(" ".join(yf_tickers))
+            bulk_df = yf.download(yf_tickers, period="5d", interval="1d", progress=False)
+            close_df = bulk_df["Close"] if (not bulk_df.empty and isinstance(bulk_df.columns, pd.MultiIndex) and "Close" in bulk_df.columns) else bulk_df
+            vol_df = bulk_df["Volume"] if (not bulk_df.empty and isinstance(bulk_df.columns, pd.MultiIndex) and "Volume" in bulk_df.columns) else None
+
             for yf_t, orig_t in yf_map.items():
                 pure_t = orig_t.split(":")[-1]
                 try:
-                    hist = yf_data.tickers[yf_t].history(period="2d")
-                    if not hist.empty:
-                        p_val = float(hist['Close'].iloc[-1])
-                        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else p_val
-                        change = p_val - prev_close
+                    if len(yf_tickers) == 1 and not close_df.empty and "Close" in close_df.columns:
+                        s_close = close_df["Close"].dropna()
+                        s_vol = close_df["Volume"].dropna() if "Volume" in close_df.columns else pd.Series(dtype=float)
+                    elif not close_df.empty and yf_t in close_df.columns:
+                        s_close = close_df[yf_t].dropna()
+                        s_vol = vol_df[yf_t].dropna() if (vol_df is not None and yf_t in vol_df.columns) else pd.Series(dtype=float)
+                    else:
+                        s_close = pd.Series(dtype=float)
+                        s_vol = pd.Series(dtype=float)
+
+                    if len(s_close) >= 1:
+                        p_val = round(float(s_close.iloc[-1]), 2)
+                        prev_close = float(s_close.iloc[-2]) if len(s_close) >= 2 else p_val
+                        change = round(p_val - prev_close, 2)
                         change_pct = round((change / prev_close) * 100, 2) if prev_close > 0 else 0.0
-                        vol = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+                        vol = int(s_vol.iloc[-1]) if len(s_vol) >= 1 else 0
                         q_val = {
                             "price": p_val,
                             "change": change,

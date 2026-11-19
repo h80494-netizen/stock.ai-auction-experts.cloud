@@ -185,9 +185,9 @@ export default function ETFStrategyView({
         criteria,
         top_n: topN,
         weights: {
-          w1: activeWeights.w1 > 1 ? activeWeights.w1 / 100 : activeWeights.w1,
-          w5: activeWeights.w5 > 1 ? activeWeights.w5 / 100 : activeWeights.w5,
-          w20: activeWeights.w20 > 1 ? activeWeights.w20 / 100 : activeWeights.w20,
+          w1: Math.abs(activeWeights.w1) > 1 ? activeWeights.w1 / 100 : activeWeights.w1,
+          w5: Math.abs(activeWeights.w5) > 1 ? activeWeights.w5 / 100 : activeWeights.w5,
+          w20: Math.abs(activeWeights.w20) > 1 ? activeWeights.w20 / 100 : activeWeights.w20,
         },
       };
       const res = await fetch('/api/etf/kis-config', {
@@ -344,9 +344,9 @@ export default function ETFStrategyView({
               const found = json.find((m: any) => m.model === prev.model);
               if (found) return found;
             }
-            const curW1 = Math.round(activeWeights.w1 > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
-            const curW5 = Math.round(activeWeights.w5 > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
-            const curW20 = Math.round(activeWeights.w20 > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
+            const curW1 = Math.round(Math.abs(activeWeights.w1) > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
+            const curW5 = Math.round(Math.abs(activeWeights.w5) > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
+            const curW20 = Math.round(Math.abs(activeWeights.w20) > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
             const matchedIdx = json.findIndex((m: any) => 
               Math.abs(m.weights.w1 - curW1) <= 1 &&
               Math.abs(m.weights.w5 - curW5) <= 1 &&
@@ -366,9 +366,9 @@ export default function ETFStrategyView({
   // Determine current active model matching activeWeights
   const currentModel = useMemo(() => {
     if (!modelsList || modelsList.length === 0) return null;
-    const w1_pct = Math.round(activeWeights.w1 > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
-    const w5_pct = Math.round(activeWeights.w5 > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
-    const w20_pct = Math.round(activeWeights.w20 > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
+    const w1_pct = Math.round(Math.abs(activeWeights.w1) > 1 ? activeWeights.w1 : activeWeights.w1 * 100);
+    const w5_pct = Math.round(Math.abs(activeWeights.w5) > 1 ? activeWeights.w5 : activeWeights.w5 * 100);
+    const w20_pct = Math.round(Math.abs(activeWeights.w20) > 1 ? activeWeights.w20 : activeWeights.w20 * 100);
 
     const matched = modelsList.find((m: any) =>
       Math.abs(m.weights.w1 - w1_pct) <= 1 &&
@@ -546,9 +546,9 @@ export default function ETFStrategyView({
 
     // 3. Update weights
     const normWeights = {
-      w1: selectedSwapModel.weights.w1 > 1 ? selectedSwapModel.weights.w1 / 100 : selectedSwapModel.weights.w1,
-      w5: selectedSwapModel.weights.w5 > 1 ? selectedSwapModel.weights.w5 / 100 : selectedSwapModel.weights.w5,
-      w20: selectedSwapModel.weights.w20 > 1 ? selectedSwapModel.weights.w20 / 100 : selectedSwapModel.weights.w20,
+      w1: Math.abs(selectedSwapModel.weights.w1) > 1 ? selectedSwapModel.weights.w1 / 100 : selectedSwapModel.weights.w1,
+      w5: Math.abs(selectedSwapModel.weights.w5) > 1 ? selectedSwapModel.weights.w5 / 100 : selectedSwapModel.weights.w5,
+      w20: Math.abs(selectedSwapModel.weights.w20) > 1 ? selectedSwapModel.weights.w20 / 100 : selectedSwapModel.weights.w20,
     };
     updateWeights(normWeights);
     setShowModelSwap(false);
@@ -886,40 +886,12 @@ export default function ETFStrategyView({
       )}
 
       <div className="flex flex-col sm:flex-row justify-center items-center gap-3 mb-4 sm:mb-6 flex-wrap">
-        {/* ETF 선택 개수 (1개, 2개, 3개) 선택기 및 입력칸 */}
-        <div className="bg-gray-800 p-1.5 rounded-lg flex items-center gap-2 shadow-lg border border-gray-700 flex-wrap">
-          <span className="text-xs sm:text-sm font-bold text-teal-400 ml-1">🎯 종목 채택 수:</span>
-          <div className="flex items-center gap-1 bg-gray-900 px-2 py-1 rounded border border-gray-600">
-            <input
-              type="number"
-              min={1}
-              max={3}
-              value={topN}
-              onChange={(e) => {
-                const val = parseInt(e.target.value, 10);
-                if (!isNaN(val)) {
-                  setTopN(Math.max(1, Math.min(3, val)));
-                }
-              }}
-              className="w-10 bg-transparent text-center font-extrabold text-teal-300 outline-none text-sm"
-            />
-            <span className="text-xs text-gray-400 font-bold">개</span>
-          </div>
-          <div className="flex gap-1">
-            {[1, 2, 3].map(n => (
-              <button
-                key={n}
-                onClick={() => setTopN(n)}
-                className={`px-2.5 py-1 text-xs sm:text-sm font-bold rounded-md transition-colors ${
-                  topN === n
-                    ? 'bg-teal-600 text-white shadow'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
-                }`}
-              >
-                {n}개 ({n === 1 ? '100%' : n === 2 ? '50%' : '33.33%'})
-              </button>
-            ))}
-          </div>
+        {/* 단일 1종목(100%) 집중 배지 (2종목·3종목 선택 삭제) */}
+        <div className="bg-gray-800 px-3 py-2 rounded-lg flex items-center gap-2 shadow-lg border border-teal-500/40">
+          <span className="text-xs sm:text-sm font-bold text-teal-400">🎯 포트폴리오 기준:</span>
+          <span className="px-2.5 py-0.5 bg-teal-900/70 border border-teal-500/50 text-teal-200 rounded text-xs sm:text-sm font-extrabold">
+            최상위 1종목 (100% 집중)
+          </span>
         </div>
 
         {/* 선택 기준 토글 */}

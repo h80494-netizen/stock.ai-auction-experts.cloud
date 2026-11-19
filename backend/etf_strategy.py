@@ -275,7 +275,7 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
     except (ValueError, TypeError):
         top_n = 1
 
-    if w1 > 1.0 or w5 > 1.0 or w20 > 1.0:
+    if abs(w1) > 1.0 or abs(w5) > 1.0 or abs(w20) > 1.0:
         w1 = w1 / 100.0
         w5 = w5 / 100.0
         w20 = w20 / 100.0
@@ -445,7 +445,7 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
     except (ValueError, TypeError):
         top_n = 1
 
-    if w1 > 1.0 or w5 > 1.0 or w20 > 1.0:
+    if abs(w1) > 1.0 or abs(w5) > 1.0 or abs(w20) > 1.0:
         w1 = w1 / 100.0
         w5 = w5 / 100.0
         w20 = w20 / 100.0
@@ -598,11 +598,82 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
     }
 
     models = []
-    # Generate 21 models
+    # 1~21번: 추세추종(Momentum / Trend-Following) 모델군 + 22~26번: 역추세(Mean-Reversion)·횡보장(Range-Bound)·저변동 방어 모델군
+    model_specs = []
     for i in range(21):
         w1_pct = 50 - i
         w5_pct = 40 - i
         w20_pct = 100 - w1_pct - w5_pct
+        model_specs.append({
+            "model_id": i + 1,
+            "model": f"Model {i+1}",
+            "strategy_type": "TREND",
+            "strategy_label": "추세추종",
+            "strategy_desc": f"단기({w1_pct}%)·중기({w5_pct}%)·장기({w20_pct}%) 정배열 추세추종",
+            "w1_pct": w1_pct,
+            "w5_pct": w5_pct,
+            "w20_pct": w20_pct,
+        })
+
+    # 역추세(Mean-Reversion) 및 횡보장(Range-Bound / Low-Vol) 특화 5대 모델 추가
+    non_trend_specs = [
+        {
+            "model_id": 22,
+            "model": "Model 22 [역추세: 눌림목반등]",
+            "strategy_type": "MEAN_REV",
+            "strategy_label": "역추세(눌림목)",
+            "strategy_desc": "20일 상승추세(+60%) 내 1일(-40%)·5일(-20%) 단기 과매도 눌림목 저점매수",
+            "w1_pct": -40,
+            "w5_pct": -20,
+            "w20_pct": 60,
+        },
+        {
+            "model_id": 23,
+            "model": "Model 23 [역추세: 과매도반전]",
+            "strategy_type": "MEAN_REV",
+            "strategy_label": "역추세(과매도)",
+            "strategy_desc": "단기 1일(-60%)·5일(-40%) 급락 과매도 발생 시 기술적 되돌림(Z-Score 역추세) 포착",
+            "w1_pct": -60,
+            "w5_pct": -40,
+            "w20_pct": 0,
+        },
+        {
+            "model_id": 24,
+            "model": "Model 24 [횡보장: 박스권회귀]",
+            "strategy_type": "RANGE",
+            "strategy_label": "횡보(박스권)",
+            "strategy_desc": "20일 추세 중립(0%) 박스권 장세에서 5일 바닥확인(+50%) 후 1일 조정(-50%) 매수",
+            "w1_pct": -50,
+            "w5_pct": 50,
+            "w20_pct": 0,
+        },
+        {
+            "model_id": 25,
+            "model": "Model 25 [횡보·방어: 저변동성]",
+            "strategy_type": "LOW_VOL",
+            "strategy_label": "횡보(저변동방어)",
+            "strategy_desc": "1일 단기급등 배제(-20%) 및 5일(+40%)·20일(+80%) 완만한 저변동 우상향 자산 선호",
+            "w1_pct": -20,
+            "w5_pct": 40,
+            "w20_pct": 80,
+        },
+        {
+            "model_id": 26,
+            "model": "Model 26 [하이브리드: 추세+역추세]",
+            "strategy_type": "HYBRID",
+            "strategy_label": "바벨(추세+역추세)",
+            "strategy_desc": "20일 핵심 주도주(+85%)를 유지하되 당일 단기조정(-35%) 시점에 진입해 고점 추격 방지",
+            "w1_pct": -35,
+            "w5_pct": 50,
+            "w20_pct": 85,
+        },
+    ]
+    model_specs.extend(non_trend_specs)
+
+    for spec in model_specs:
+        w1_pct = spec["w1_pct"]
+        w5_pct = spec["w5_pct"]
+        w20_pct = spec["w20_pct"]
         
         w1 = w1_pct / 100.0
         w5 = w5_pct / 100.0
@@ -621,7 +692,7 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
             
         current_date = datetime.strptime(dates[-1], "%Y-%m-%d")
         
-        def get_return(months_back):
+        def get_idx_for_months_back(months_back):
             target_date = (current_date - timedelta(days=months_back*30)).strftime("%Y-%m-%d")
             start_idx = 0
             for j, d in enumerate(dates):
@@ -630,11 +701,36 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
                     break
             if start_idx >= len(strategy):
                 start_idx = len(strategy) - 1
-            
+            return start_idx
+
+        def get_return(months_back):
+            start_idx = get_idx_for_months_back(months_back)
             start_val = strategy[start_idx]
             end_val = strategy[-1]
             if start_val == 0: return 0
             return ((end_val / start_val) - 1) * 100
+
+        def get_slice_metrics(idx_start, idx_end):
+            sub = strategy[idx_start:idx_end + 1]
+            if len(sub) < 2 or sub[0] <= 0:
+                return {"ret": 0.0, "sharpe": 0.0, "mdd": 0.0}
+            ret_val = ((sub[-1] / sub[0]) - 1.0) * 100.0
+            s_ser = pd.Series(sub)
+            d_rets = s_ser.pct_change().dropna()
+            s_std = d_rets.std()
+            s_mean = d_rets.mean()
+            sh_val = float((s_mean / s_std) * (252 ** 0.5)) if (s_std and s_std > 0) else 0.0
+            c_max = s_ser.cummax()
+            dd = (s_ser - c_max) / c_max
+            mdd_val = abs(float(dd.min())) * 100.0
+            return {"ret": ret_val, "sharpe": sh_val, "mdd": mdd_val}
+
+        idx_6m = get_idx_for_months_back(6)
+        idx_3m = get_idx_for_months_back(3)
+        idx_now = len(strategy) - 1
+
+        p1_metrics = get_slice_metrics(idx_6m, idx_3m)     # 6개월 전 ~ 3개월 전 (전반기 3개월)
+        p2_metrics = get_slice_metrics(idx_3m, idx_now)    # 3개월 전 ~ 현재 (후반기 3개월)
 
         ret_3m = get_return(3)
         ret_6m = get_return(6)
@@ -690,9 +786,18 @@ def run_bulk_simulation(criteria="momentum", top_n=1):
             return float(val)
             
         models.append({
-            "model_id": i + 1,
-            "model": f"Model {i+1}",
+            "model_id": spec["model_id"],
+            "model": spec["model"],
+            "strategy_type": spec["strategy_type"],
+            "strategy_label": spec["strategy_label"],
+            "strategy_desc": spec["strategy_desc"],
             "weights": {"w1": w1_pct, "w5": w5_pct, "w20": w20_pct},
+            "ret_6m_to_3m": sanitize_float(p1_metrics["ret"]),
+            "sharpe_6m_to_3m": sanitize_float(p1_metrics["sharpe"]),
+            "mdd_6m_to_3m": sanitize_float(p1_metrics["mdd"]),
+            "ret_3m_to_now": sanitize_float(p2_metrics["ret"]),
+            "sharpe_3m_to_now": sanitize_float(p2_metrics["sharpe"]),
+            "mdd_3m_to_now": sanitize_float(p2_metrics["mdd"]),
             "ret_3m": sanitize_float(ret_3m),
             "ret_6m": sanitize_float(ret_6m),
             "ret_1y": sanitize_float(ret_1y),

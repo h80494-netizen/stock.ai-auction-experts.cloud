@@ -615,7 +615,14 @@ export default function Home() {
         ) : activeTab === 'reports' ? (
           <AnalystReportsView />
         ) : (
-          <HeatmapView />
+          <HeatmapView
+            stocks={stocks}
+            globalStocks={globalData?.stocks || []}
+            onNavigateToStock={(ticker) => {
+              setGlobalSearchTicker(ticker);
+              setActiveTab('price');
+            }}
+          />
         )}
       </main>
 
