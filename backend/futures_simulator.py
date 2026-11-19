@@ -161,8 +161,8 @@ def load_daily_dataframe(start_date: Optional[str] = None, end_date: Optional[st
     if not os.path.exists(DB_PATH):
         raise FileNotFoundError(f"데이터베이스 파일이 없습니다: {DB_PATH}. 먼저 update_rawdata.py를 실행하세요.")
 
-    if _CACHED_FULL_DF is None:
-        db_mtime = _get_effective_db_mtime()
+    db_mtime = _get_effective_db_mtime()
+    if _CACHED_FULL_DF is None or db_mtime > _CACHED_DB_MTIME:
         conn = sqlite3.connect(DB_PATH, timeout=30.0)
         query = "SELECT * FROM futures_daily_data ORDER BY date ASC"
         df_raw = pd.read_sql_query(query, conn)
@@ -177,6 +177,7 @@ def load_daily_dataframe(start_date: Optional[str] = None, end_date: Optional[st
         _CACHED_FULL_DF = df_raw.reset_index(drop=True)
         _CACHED_DB_MTIME = db_mtime
         _CACHED_SIGNALS.clear()
+        _CACHED_SIM_RESULTS.clear()
 
     df = _CACHED_FULL_DF
     if df is None or df.empty:
@@ -2218,7 +2219,7 @@ def lock_1530_daily_signals(
 
     latest_ledger = sim_res["recent_trading_ledger"][0]
     lock_date = latest_ledger["date"]
-    now_kst_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_kst_str = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
     active_5 = sim_res["active_5_models"]
     all_10_sigs = {
         m["model_id"]: {
@@ -2313,22 +2314,23 @@ def get_intraday_and_1530_lock_status(
             from update_rawdata import sync_intraday_realtime_tick
 
             live_sync_result = sync_intraday_realtime_tick(write_excel=False, force_excel=False)
+            invalidate_sim_cache()
         except Exception as e:
             live_sync_result = {"status": "warn", "detail": str(e)}
 
-    now = datetime.datetime.now()
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     hhmm = now.hour * 100 + now.minute
     is_weekend = now.weekday() >= 5
 
     if is_weekend or hhmm >= 1545 or hhmm < 845:
         phase_code = "MARKET_CLOSED_LOCKED"
-        phase_label = "장 마감 / 15:30 최종 시그널 확정 완료"
+        phase_label = "장 마감 / 15:30 최종 시그널 및 15:45 종가 확정 완료"
     elif 1530 <= hhmm < 1545:
         phase_code = "SIGNAL_LOCKED_FOR_AUCTION"
-        phase_label = "15:30 시그널 확정 완료 (15:35~15:45 동시호가 포지션 조정 구간)"
+        phase_label = "15:30 시그널 확정 완료 (15:35~15:45 동시호가 포지션 조정 구간 · 종가 확정 대기)"
     else:
         phase_code = "INTRADAY_LIVE"
-        phase_label = "장중 실시간 가격 연동 중 (15:30 KOSPI 마감 후 시그널 확정 대기)"
+        phase_label = "장중 실시간 가격·손익 연동 중 (15:30 시그널 확정 및 15:45 종가 확정 대기)"
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -2338,8 +2340,14 @@ def get_intraday_and_1530_lock_status(
     recent_db_rows = recent_120_rows[:2]
     latest_date = recent_db_rows[0]["date"] if recent_db_rows else now.strftime("%Y-%m-%d")
 
-    c.execute("SELECT * FROM daily_signal_lock WHERE lock_date = ?", (latest_date,))
-    lock_row = c.fetchone()
+    if phase_code == "INTRADAY_LIVE" and latest_date == now.strftime("%Y-%m-%d"):
+        # UTC 시간 오차로 장중(15:30 이전)에 조기 생성된 Lock 레코드가 있으면 자동 해제하여 장중 실시간 연동을 보장
+        c.execute("DELETE FROM daily_signal_lock WHERE lock_date = ?", (latest_date,))
+        conn.commit()
+        lock_row = None
+    else:
+        c.execute("SELECT * FROM daily_signal_lock WHERE lock_date = ?", (latest_date,))
+        lock_row = c.fetchone()
 
     # 장중 틱 로그 조회
     tick_rows = []

@@ -842,9 +842,9 @@ export default function FuturesSimulationView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
-  // 장중 실시간 가격(rawdata.xlsx) 및 Step 5 포지션 변화 30초 자동 갱신 (Step 5에서만 작동)
+  // 장중 실시간 가격(rawdata.xlsx), 매매원장 당일 행(실시간 현재가 및 실시간 손익) 및 포지션 변화 20초 자동 갱신 (전 탭 공통 작동)
   useEffect(() => {
-    if (!autoRefreshRealtime || step !== 5) return;
+    if (!autoRefreshRealtime) return;
     const timer = setInterval(async () => {
       try {
         const lockJson = await callApi(
@@ -853,12 +853,13 @@ export default function FuturesSimulationView({
         if (lockJson?.success) {
           setLockStatus(lockJson.data);
         }
+        fetchLedgerOnly();
       } catch (_) {
         // ignore background poll error
       }
-    }, 30000);
+    }, 20000);
     return () => clearInterval(timer);
-  }, [autoRefreshRealtime, step, callApi, multiplier, pointValueKrw, initialCapitalKrw]);
+  }, [autoRefreshRealtime, callApi, multiplier, pointValueKrw, initialCapitalKrw, fetchLedgerOnly]);
 
   const handlePointValueChange = async (nextPv: number) => {
     setPointValueKrw(nextPv);
@@ -1064,10 +1065,11 @@ export default function FuturesSimulationView({
         if (st?.trading_date) {
           setLockStatus(st);
         }
+        await Promise.all([fetchSimulation(), fetchLedgerOnly()]);
         const raw = st?.today_rawdata || {};
         const pos = st?.position_change_check || {};
         setBannerMsg(
-          `[Step 5 실시간 rawdata.xlsx & 포지션 동기화 완료] ${raw.date || st?.trading_date} | 선물현재가 ${raw.fut_close ?? "-"}pt (${raw.fut_change_pt >= 0 ? "+" : ""}${raw.fut_change_pt ?? 0}pt) | 전일 ${pos.prev_contracts ?? 0}계약 → 당일 목표 ${pos.today_target_contracts ?? 0}계약 (동시호가 예상 Delta: ${pos.order_delta_contracts >= 0 ? "+" : ""}${pos.order_delta_contracts ?? 0}계약)`
+          `[실시간 가격 & 매매원장 손익 동기화 완료] ${raw.date || st?.trading_date} | KOSPI200 ${raw.k200_close ?? "-"}pt · 선물현재가 ${raw.fut_close ?? "-"}pt (${raw.fut_change_pt >= 0 ? "+" : ""}${raw.fut_change_pt ?? 0}pt) | 당일 실시간 손익: ${(pos.today_daily_pnl_krw ?? 0) >= 0 ? "+" : ""}${Number(pos.today_daily_pnl_krw ?? 0).toLocaleString()}원`
         );
       }
     } finally {
@@ -1142,12 +1144,66 @@ export default function FuturesSimulationView({
   const ledgerRows: any[] = simData?.recent_trading_ledger || [];
   const swapHistory: any[] = simData?.mdd_swap_history || [];
 
-  // 매매원장 기간 설정(ledgerStartDate ~ ledgerEndDate / 현재까지) 독립 필터링 (2018~ 시뮬레이션 구간과 완전 분리)
+  // 매매원장 기간 설정(ledgerStartDate ~ ledgerEndDate / 현재까지) 독립 필터링 + 당일(Today) 행 실시간 현재가·실시간 손익 즉각 연동
   const effectiveLedgerEnd = ledgerUseCurrent ? "9999-12-31" : ledgerEndDate;
   const rawLedgerPool: any[] = step5LedgerRows.length > 0 ? step5LedgerRows : ledgerRows;
-  const activeLedgerRows = rawLedgerPool.filter((r: any) => {
+  const filteredLedgerPool = rawLedgerPool.filter((r: any) => {
     const d = String(r.date || "");
     return d >= ledgerStartDate && d <= effectiveLedgerEnd;
+  });
+
+  const liveRawData = lockStatus?.today_rawdata;
+  const livePosCheck = lockStatus?.position_change_check;
+  const isMarketClosedLocked = lockStatus?.phase_code === "MARKET_CLOSED_LOCKED";
+
+  const activeLedgerRows = filteredLedgerPool.map((r: any, idx: number) => {
+    const isLatestTodayRow =
+      idx === 0 &&
+      liveRawData &&
+      String(r.date || "") === String(liveRawData.date || lockStatus?.trading_date || "");
+    if (!isLatestTodayRow) return r;
+
+    const prevRow = filteredLedgerPool.length > 1 ? filteredLedgerPool[1] : null;
+    const liveK200 = Number(liveRawData.k200_close) > 0 ? Number(liveRawData.k200_close) : Number(r.k200_close || 0);
+    const liveFut = Number(liveRawData.fut_close) > 0 ? Number(liveRawData.fut_close) : Number(r.futures_close || 0);
+    const prevFut = Number(prevRow?.futures_close ?? liveRawData.prev_fut_close ?? liveFut);
+    const prevContracts = Number(r.prev_contracts ?? prevRow?.target_contracts ?? livePosCheck?.prev_contracts ?? 0);
+    const prevDelta = Number(prevRow?.order_delta_contracts ?? 0);
+    const feeRate = 0.00003;
+
+    const grossPnlKrw = prevContracts * (liveFut - prevFut) * pointValueKrw;
+    const feeKrw = Math.abs(prevDelta) * prevFut * pointValueKrw * feeRate;
+    const netPnlKrw = Math.round(grossPnlKrw - feeKrw);
+    const dailyRetPct = Number(((netPnlKrw / initialCapitalKrw) * 100).toFixed(3));
+    const prevEqIdx = Number(prevRow?.equity_index ?? 100);
+    const newEqIdx = Number((prevEqIdx + dailyRetPct).toFixed(2));
+    const newCumRetPct = Number((newEqIdx - 100).toFixed(2));
+
+    return {
+      ...r,
+      is_live_today: true,
+      is_market_closed: isMarketClosedLocked,
+      k200_close: liveK200,
+      futures_close: liveFut,
+      base_position_sum:
+        livePosCheck?.today_base_position_sum !== undefined
+          ? Number(livePosCheck.today_base_position_sum)
+          : r.base_position_sum,
+      prev_contracts: prevContracts,
+      target_contracts:
+        livePosCheck?.today_target_contracts !== undefined
+          ? Number(livePosCheck.today_target_contracts)
+          : r.target_contracts,
+      order_delta_contracts:
+        livePosCheck?.order_delta_contracts !== undefined
+          ? Number(livePosCheck.order_delta_contracts)
+          : r.order_delta_contracts,
+      order_action: livePosCheck?.order_action || r.order_action,
+      daily_return_pct: dailyRetPct,
+      daily_pnl_krw: netPnlKrw,
+      cum_return_pct: newCumRetPct,
+      equity_index: newEqIdx,
+    };
   });
   const ledgerChronological = [...activeLedgerRows].reverse();
 
@@ -3165,10 +3221,28 @@ export default function FuturesSimulationView({
                       ledgerCumRetByDate[String(r.date)] ??
                       Number((Number(r.equity_index || 100) - 100).toFixed(2));
                     return (
-                      <tr key={r.date} className="hover:bg-slate-800/50">
-                        <td className="p-2 font-bold text-white">{r.date}</td>
+                      <tr
+                        key={r.date}
+                        className={`hover:bg-slate-800/50 ${
+                          r.is_live_today && !r.is_market_closed ? "bg-emerald-950/20" : ""
+                        }`}
+                      >
+                        <td className="p-2 font-bold text-white">
+                          <span>{r.date}</span>
+                          {r.is_live_today && (
+                            <span
+                              className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-sans font-extrabold ${
+                                r.is_market_closed
+                                  ? "bg-amber-900/70 text-amber-200 border border-amber-500/50"
+                                  : "bg-emerald-900/80 text-emerald-200 border border-emerald-400/60 animate-pulse"
+                              }`}
+                            >
+                              {r.is_market_closed ? "🔒 종가확정" : "⚡ 실시간"}
+                            </span>
+                          )}
+                        </td>
                         <td className="p-2 text-right text-slate-300">{r.k200_close ?? "-"}</td>
-                        <td className="p-2 text-right">{r.futures_close}</td>
+                        <td className="p-2 text-right font-bold text-white">{r.futures_close}</td>
                         <td className="p-2 text-center">
                           <span
                             className={`px-2 py-0.5 rounded font-bold ${
@@ -5275,10 +5349,28 @@ export default function FuturesSimulationView({
                     ledgerCumRetByDate[String(r.date)] ??
                     Number((Number(r.equity_index || 100) - 100).toFixed(2));
                   return (
-                    <tr key={r.date} className="hover:bg-slate-800/50">
-                      <td className="p-2 font-bold text-white">{r.date}</td>
+                    <tr
+                      key={r.date}
+                      className={`hover:bg-slate-800/50 ${
+                        r.is_live_today && !r.is_market_closed ? "bg-emerald-950/20" : ""
+                      }`}
+                    >
+                      <td className="p-2 font-bold text-white">
+                        <span>{r.date}</span>
+                        {r.is_live_today && (
+                          <span
+                            className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-sans font-extrabold ${
+                              r.is_market_closed
+                                ? "bg-amber-900/70 text-amber-200 border border-amber-500/50"
+                                : "bg-emerald-900/80 text-emerald-200 border border-emerald-400/60 animate-pulse"
+                            }`}
+                          >
+                            {r.is_market_closed ? "🔒 종가확정" : "⚡ 실시간"}
+                          </span>
+                        )}
+                      </td>
                       <td className="p-2 text-right text-slate-300">{r.k200_close ?? "-"}</td>
-                      <td className="p-2 text-right">{r.futures_close}</td>
+                      <td className="p-2 text-right font-bold text-white">{r.futures_close}</td>
                       <td className="p-2 text-center">
                         <span
                           className={`px-2 py-0.5 rounded font-bold ${

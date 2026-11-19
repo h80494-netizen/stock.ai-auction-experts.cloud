@@ -398,6 +398,7 @@ def api_sync_realtime(req: RealtimeSyncRequest) -> Dict[str, Any]:
         from update_rawdata import sync_intraday_realtime_tick
 
         sync_res = sync_intraday_realtime_tick(write_excel=req.write_excel, force_excel=True)
+        invalidate_sim_cache()
         status_res = get_intraday_and_1530_lock_status(
             multiplier=req.multiplier,
             sync_now=False,
@@ -600,9 +601,10 @@ def _realtime_and_daily_background_worker() -> None:
                 )
                 startup_synced = True
 
-            if is_weekday and 900 <= hhmm <= 1530:
-                # 장중(09:00 ~ 15:30) Step 5용 실시간 가격 및 수급을 DB에 고속 업데이트 (전체 시뮬레이션 캐시 유지, 엑셀 재저장으로 인한 GIL 블로킹 방지)
+            if is_weekday and 900 <= hhmm <= 1546:
+                # 장중(09:00 ~ 15:46 선물 마감까지) 실시간 가격 및 수급을 DB에 고속 업데이트하고 시뮬레이션/매매원장 캐시를 즉시 갱신
                 sync_intraday_realtime_tick(write_excel=False)
+                invalidate_sim_cache()
 
             if is_weekday and 1530 <= hhmm <= 1535 and last_locked_date != today_str:
                 # 15:30 KOSPI 마감 직후 시그널 자동 확정(Lock)
