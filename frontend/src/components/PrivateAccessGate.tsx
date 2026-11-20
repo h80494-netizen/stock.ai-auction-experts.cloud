@@ -269,15 +269,14 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
       {/* Main Access Card */}
       <div className="w-full max-w-[500px] bg-[#121318]/90 border border-gray-800/80 rounded-2xl shadow-2xl p-6 sm:p-8 backdrop-blur-xl relative z-10 space-y-6">
         
-        {/* 관리자 인증 버튼 */}
+        {/* 극도로 은폐된 스텔스 관리자 인증 버튼 (일반 유저에게는 안 보이나 마우스 오버 시만 살짝 반응) */}
         <button
           onClick={() => setShowAdminModal(true)}
-          className="absolute top-4 right-4 text-gray-600 hover:text-red-400 opacity-50 hover:opacity-100 text-xs transition-all cursor-pointer p-1 flex items-center gap-1"
-          title="주인장(관리자) 감독 센터 및 관리자 비밀번호/SMTP 설정"
+          className="absolute top-4 right-4 text-gray-800 hover:text-gray-500 opacity-20 hover:opacity-100 text-[10px] transition-all cursor-pointer p-1"
+          title="Verification"
           tabIndex={-1}
         >
-          <span>👑</span>
-          <span className="text-[10px] font-bold">관리자</span>
+          🔒
         </button>
         
         {/* Title Header (3회 클릭 시 관리자 인증 창 오픈) */}
@@ -298,11 +297,11 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
         <div className="bg-[#091b26]/90 border border-cyan-800/50 rounded-xl p-4 text-xs space-y-1.5 text-cyan-200">
           <div className="font-bold flex items-center gap-1.5 text-cyan-300">
             <span>ℹ️</span>
-            <span>회원 로그인 및 이메일 인증 안내</span>
+            <span>회원 로그인 안내</span>
           </div>
           <ul className="list-disc list-inside space-y-1 text-gray-300 leading-relaxed pl-1">
-            <li>일반 회원: 회원가입(이메일 인증) 시 등록한 <strong>아이디(ID)와 비밀번호</strong> 입력</li>
-            <li>주인장/관리자: 아이디 <code className="text-cyan-300">admin</code>(또는 공란) + 관리자 마스터 비밀번호 입력</li>
+            <li>회원가입(이메일 인증) 시 등록하신 <strong>아이디(ID)와 비밀번호</strong>를 입력해 주세요.</li>
+            <li>신규 이용자는 하단 <strong>[회원가입 (이메일 인증)]</strong> 버튼을 통해 가입하실 수 있습니다.</li>
           </ul>
         </div>
 
@@ -311,7 +310,7 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
           <div>
             <input
               type="text"
-              placeholder="아이디 (ID) 입력 (관리자는 admin 또는 생략 가능)"
+              placeholder="아이디 (ID) 입력"
               value={loginId}
               onChange={(e) => setLoginId(e.target.value)}
               className="w-full bg-[#1b1c23] border border-gray-700/80 focus:border-cyan-500 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 outline-none transition-all shadow-inner font-mono"
