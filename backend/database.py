@@ -147,11 +147,11 @@ def init_db():
     except Exception:
         pass
 
-    # 시스템 전역 설정 테이블 (관리자 마스터 비밀번호 영구 저장 및 이메일 SMTP 설정)
+    # 시스템 전역 인증/SMTP 설정 테이블 (관리자 마스터 비밀번호 영구 저장 및 이메일 SMTP 설정)
     c.execute('''
-        CREATE TABLE IF NOT EXISTS system_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
+        CREATE TABLE IF NOT EXISTS auth_system_config (
+            config_key TEXT PRIMARY KEY,
+            config_value TEXT,
             updated_at TEXT
         )
     ''')
@@ -1363,11 +1363,18 @@ def get_system_setting(key: str, default: str = "") -> str:
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS auth_system_config (
+                config_key TEXT PRIMARY KEY,
+                config_value TEXT,
+                updated_at TEXT
+            )
+        ''')
+        c.execute("SELECT config_value FROM auth_system_config WHERE config_key = ?", (key,))
         row = c.fetchone()
         conn.close()
-        if row and row["value"] is not None:
-            return str(row["value"])
+        if row and row["config_value"] is not None:
+            return str(row["config_value"])
     except Exception:
         pass
     return default
@@ -1377,9 +1384,16 @@ def set_system_setting(key: str, value: str):
     import datetime
     conn = get_db_connection()
     c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS auth_system_config (
+            config_key TEXT PRIMARY KEY,
+            config_value TEXT,
+            updated_at TEXT
+        )
+    ''')
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
-        "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO auth_system_config (config_key, config_value, updated_at) VALUES (?, ?, ?)",
         (key, str(value), now_str),
     )
     conn.commit()
