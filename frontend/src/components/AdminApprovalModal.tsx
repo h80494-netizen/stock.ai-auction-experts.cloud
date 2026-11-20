@@ -4,10 +4,12 @@ import React, { useState } from 'react';
 
 interface UserRequestItem {
   id: number;
+  login_id?: string;
   name: string;
   phone: string;
   email: string;
   requested_password: string;
+  email_verified?: number;
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
   approved_at: string | null;
@@ -84,7 +86,7 @@ export default function AdminApprovalModal({
   onInspectUser,
 }: AdminApprovalModalProps) {
   const [adminPassword, setAdminPassword] = useState('');
-  const [activeTab, setActiveTab] = useState<'requests' | 'trading'>('requests');
+  const [activeTab, setActiveTab] = useState<'requests' | 'trading' | 'settings'>('requests');
   const [requests, setRequests] = useState<UserRequestItem[]>([]);
   const [tradingOverview, setTradingOverview] = useState<UserTradingOverviewItem[]>([]);
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -94,6 +96,18 @@ export default function AdminApprovalModal({
   // 비밀번호 수정 인라인 상태
   const [editingId, setEditingId] = useState<number | null>(null);
   const [newPasswordInput, setNewPasswordInput] = useState('');
+
+  // 관리자 마스터 비밀번호 변경 & 이메일 SMTP 설정 상태
+  const [newAdminMasterPw, setNewAdminMasterPw] = useState('');
+  const [confirmAdminMasterPw, setConfirmAdminMasterPw] = useState('');
+  const [smtpForm, setSmtpForm] = useState({
+    smtp_host: 'smtp.gmail.com',
+    smtp_port: 587,
+    smtp_user: '',
+    smtp_password: '',
+    smtp_sender_name: 'AI Stock Expert 2.0',
+    is_configured: false,
+  });
 
   const fetchAllAdminData = async (pwd?: string) => {
     const targetPassword = pwd || adminPassword;
@@ -106,13 +120,18 @@ export default function AdminApprovalModal({
     setMsg(null);
 
     try {
-      const [reqRes, ovRes] = await Promise.all([
+      const [reqRes, ovRes, smtpRes] = await Promise.all([
         fetch('/api/auth/admin/requests', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ admin_password: targetPassword }),
         }),
         fetch('/api/auth/admin/trading-overview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ admin_password: targetPassword }),
+        }),
+        fetch('/api/auth/admin/smtp-config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ admin_password: targetPassword }),
@@ -134,11 +153,95 @@ export default function AdminApprovalModal({
           setTradingOverview(ovData.data || []);
         }
       }
+
+      if (smtpRes.ok) {
+        const smtpData = await smtpRes.json();
+        if (smtpData.status === 'success' && smtpData.data) {
+          setSmtpForm({
+            smtp_host: smtpData.data.smtp_host || 'smtp.gmail.com',
+            smtp_port: smtpData.data.smtp_port || 587,
+            smtp_user: smtpData.data.smtp_user || '',
+            smtp_password: smtpData.data.smtp_password_masked || '',
+            smtp_sender_name: smtpData.data.smtp_sender_name || 'AI Stock Expert 2.0',
+            is_configured: !!smtpData.data.is_configured,
+          });
+        }
+      }
     } catch (err) {
       console.error(err);
       setMsg({ type: 'error', text: '서버와 통신할 수 없습니다.' });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleChangeAdminMasterPassword = async () => {
+    if (!adminPassword.trim()) {
+      setMsg({ type: 'error', text: '상단의 현재 관리자 마스터 암호를 입력해 주세요.' });
+      return;
+    }
+    if (!newAdminMasterPw.trim() || newAdminMasterPw.trim().length < 4) {
+      setMsg({ type: 'error', text: '새 관리자 마스터 비밀번호는 4자리 이상 입력해 주세요.' });
+      return;
+    }
+    if (newAdminMasterPw.trim() !== confirmAdminMasterPw.trim()) {
+      setMsg({ type: 'error', text: '새 관리자 비밀번호와 확인 비밀번호가 일치하지 않습니다.' });
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/admin/change-master-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          admin_password: adminPassword.trim(),
+          new_admin_password: newAdminMasterPw.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        const updatedPw = newAdminMasterPw.trim();
+        setAdminPassword(updatedPw);
+        setNewAdminMasterPw('');
+        setConfirmAdminMasterPw('');
+        setMsg({ type: 'success', text: data.message || '✅ 관리자 마스터 비밀번호가 변경되었습니다.' });
+      } else {
+        setMsg({ type: 'error', text: data.detail || '관리자 마스터 비밀번호 변경 실패' });
+      }
+    } catch (err) {
+      console.error(err);
+      setMsg({ type: 'error', text: '서버 통신 오류' });
+    }
+  };
+
+  const handleSaveSmtpConfig = async () => {
+    if (!adminPassword.trim()) {
+      setMsg({ type: 'error', text: '상단의 관리자 마스터 암호를 먼저 입력해 주세요.' });
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/admin/save-smtp-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          admin_password: adminPassword.trim(),
+          smtp_host: smtpForm.smtp_host,
+          smtp_port: Number(smtpForm.smtp_port) || 587,
+          smtp_user: smtpForm.smtp_user,
+          smtp_password: smtpForm.smtp_password,
+          smtp_sender_name: smtpForm.smtp_sender_name,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        setSmtpForm((prev) => ({ ...prev, is_configured: !!data.data?.is_configured }));
+        setMsg({ type: 'success', text: data.message || '✅ 이메일 인증 SMTP 설정이 저장되었습니다.' });
+      } else {
+        setMsg({ type: 'error', text: data.detail || 'SMTP 설정 저장 실패' });
+      }
+    } catch (err) {
+      console.error(err);
+      setMsg({ type: 'error', text: '서버 통신 오류' });
     }
   };
 
@@ -256,7 +359,7 @@ export default function AdminApprovalModal({
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setActiveTab('requests')}
@@ -278,6 +381,17 @@ export default function AdminApprovalModal({
               }`}
             >
               📊 회원별 개별 계좌 & 트레이딩 현황 ({tradingOverview.length}계정)
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('settings')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                activeTab === 'settings'
+                  ? 'bg-amber-600 text-black shadow'
+                  : 'bg-gray-800 text-amber-300 hover:text-white'
+              }`}
+            >
+              🔐 관리자 비번 & 이메일(SMTP) 설정
             </button>
           </div>
         </div>
@@ -312,9 +426,10 @@ export default function AdminApprovalModal({
                 <thead className="bg-gray-900/90 text-gray-400 uppercase font-mono border-b border-gray-800 sticky top-0 backdrop-blur-sm">
                   <tr>
                     <th className="p-2.5">고유ID</th>
+                    <th className="p-2.5">로그인 ID</th>
                     <th className="p-2.5">성함</th>
                     <th className="p-2.5">연락처</th>
-                    <th className="p-2.5">이메일</th>
+                    <th className="p-2.5">가입자 이메일 (인증)</th>
                     <th className="p-2.5">비밀번호</th>
                     <th className="p-2.5">신청일시</th>
                     <th className="p-2.5">상태</th>
@@ -329,9 +444,19 @@ export default function AdminApprovalModal({
                     return (
                       <tr key={req.id} className="hover:bg-gray-900/60 transition-colors">
                         <td className="p-2.5 text-gray-500">user_{req.id}</td>
+                        <td className="p-2.5 font-bold text-purple-300">{req.login_id || req.name}</td>
                         <td className="p-2.5 font-bold text-white">{req.name}</td>
                         <td className="p-2.5 text-cyan-300">{req.phone}</td>
-                        <td className="p-2.5 text-gray-400">{req.email || '-'}</td>
+                        <td className="p-2.5 text-gray-300">
+                          <div className="flex items-center gap-1.5">
+                            <span>{req.email || '-'}</span>
+                            {req.email_verified ? (
+                              <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-700 px-1.5 py-0.5 rounded font-bold">
+                                ✉️ 인증됨
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
 
                         <td className="p-2.5">
                           {isEditingThis ? (
@@ -438,7 +563,7 @@ export default function AdminApprovalModal({
               </table>
             )}
           </div>
-        ) : (
+        ) : activeTab === 'trading' ? (
           /* 탭 2: 전 회원 개별 증권사 계좌 및 트레이딩 현황 감독 (관리자 전용) */
           <div className="flex-1 overflow-y-auto border border-gray-800 rounded-xl bg-black/60 min-h-[320px] p-4 space-y-3">
             {isLoading ? (
@@ -576,6 +701,137 @@ export default function AdminApprovalModal({
                 );
               })
             )}
+          </div>
+        ) : (
+          /* 탭 3: 관리자 마스터 비밀번호 변경 & 회원가입 이메일 인증(SMTP) 설정 */
+          <div className="flex-1 overflow-y-auto border border-gray-800 rounded-xl bg-black/60 min-h-[320px] p-5 space-y-5 text-xs">
+            {/* 섹션 1: 관리자 마스터 비밀번호 변경 */}
+            <div className="bg-gray-900/80 border border-red-700/50 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between border-b border-gray-800 pb-2">
+                <h4 className="text-sm font-extrabold text-red-400 flex items-center gap-2">
+                  <span>👑</span>
+                  <span>1. 주인장(관리자) 마스터 비밀번호 변경 (서버 DB 영구 저장)</span>
+                </h4>
+                <span className="text-[11px] text-gray-400">
+                  관리자 로그인 ID: <code className="text-red-300 font-bold">admin</code> (또는 ID 생략)
+                </span>
+              </div>
+              <p className="text-gray-400 leading-relaxed">
+                상단 <strong className="text-white">[관리자 마스터 암호]</strong> 입력창에 현재 관리자 암호를 입력한 상태에서, 아래에 새 관리자 비밀번호를 입력하고 저장하면 즉시 변경되며 서버가 재부팅되어도 영구 유지됩니다.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end pt-1">
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">새 관리자 마스터 비밀번호 *</label>
+                  <input
+                    type="password"
+                    placeholder="새 관리자 암호 (4자리 이상)"
+                    value={newAdminMasterPw}
+                    onChange={(e) => setNewAdminMasterPw(e.target.value)}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-red-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">새 관리자 비밀번호 확인 *</label>
+                  <input
+                    type="password"
+                    placeholder="동일하게 재입력"
+                    value={confirmAdminMasterPw}
+                    onChange={(e) => setConfirmAdminMasterPw(e.target.value)}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-red-500"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleChangeAdminMasterPassword}
+                  className="bg-red-600 hover:bg-red-500 text-white font-extrabold py-2 px-4 rounded-lg shadow transition-all cursor-pointer"
+                >
+                  🔐 관리자 마스터 비밀번호 변경 저장
+                </button>
+              </div>
+            </div>
+
+            {/* 섹션 2: 회원가입 이메일 인증 발송용 SMTP 설정 */}
+            <div className="bg-gray-900/80 border border-cyan-700/50 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between border-b border-gray-800 pb-2">
+                <h4 className="text-sm font-extrabold text-cyan-400 flex items-center gap-2">
+                  <span>✉️</span>
+                  <span>2. 회원가입 이메일 인증번호 발송(SMTP) 설정</span>
+                </h4>
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                    smtpForm.is_configured
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                      : 'bg-amber-950 text-amber-300 border border-amber-700'
+                  }`}
+                >
+                  {smtpForm.is_configured ? '✅ 실제 이메일(SMTP) 발송 활성' : '⚡ 화면 즉시 인증코드 안내 모드'}
+                </span>
+              </div>
+              <p className="text-gray-400 leading-relaxed">
+                Gmail(<code className="text-cyan-300">smtp.gmail.com</code>, 포트 <code className="text-cyan-300">587</code>) 또는 네이버(<code className="text-cyan-300">smtp.naver.com</code>, 포트 <code className="text-cyan-300">587</code>) 계정과 <strong>앱 비밀번호(App Password)</strong>를 등록하면 회원가입 시 가입자의 이메일로 6자리 인증번호 메일이 실제 발송됩니다.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">SMTP 호스트</label>
+                  <input
+                    type="text"
+                    placeholder="예: smtp.gmail.com 또는 smtp.naver.com"
+                    value={smtpForm.smtp_host}
+                    onChange={(e) => setSmtpForm({ ...smtpForm, smtp_host: e.target.value })}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">SMTP 포트 (TLS: 587 / SSL: 465)</label>
+                  <input
+                    type="number"
+                    value={smtpForm.smtp_port}
+                    onChange={(e) => setSmtpForm({ ...smtpForm, smtp_port: Number(e.target.value) || 587 })}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">발신자 표시 이름</label>
+                  <input
+                    type="text"
+                    value={smtpForm.smtp_sender_name}
+                    onChange={(e) => setSmtpForm({ ...smtpForm, smtp_sender_name: e.target.value })}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">발신 이메일 계정 (SMTP ID)</label>
+                  <input
+                    type="email"
+                    placeholder="예: sender@gmail.com"
+                    value={smtpForm.smtp_user}
+                    onChange={(e) => setSmtpForm({ ...smtpForm, smtp_user: e.target.value })}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-gray-300 font-bold block mb-1">이메일 앱 비밀번호 (SMTP Password)</label>
+                  <input
+                    type="password"
+                    placeholder="Gmail 16자리 앱 비밀번호 등"
+                    value={smtpForm.smtp_password}
+                    onChange={(e) => setSmtpForm({ ...smtpForm, smtp_password: e.target.value })}
+                    className="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSaveSmtpConfig}
+                  className="bg-cyan-600 hover:bg-cyan-500 text-black font-extrabold py-2 px-4 rounded-lg shadow transition-all cursor-pointer"
+                >
+                  ✉️ 이메일 인증 SMTP 설정 저장
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

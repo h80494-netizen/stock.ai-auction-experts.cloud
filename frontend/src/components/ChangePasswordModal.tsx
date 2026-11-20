@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface ChangePasswordModalProps {
   isOpen: boolean;
@@ -9,7 +9,13 @@ interface ChangePasswordModalProps {
 }
 
 export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' }: ChangePasswordModalProps) {
-  const [name, setName] = useState(defaultName);
+  const isAdminSession =
+    defaultName.includes('주인장') ||
+    defaultName.includes('관리자') ||
+    (typeof window !== 'undefined' && sessionStorage.getItem('stock_terminal_is_admin') === 'true');
+
+  const [mode, setMode] = useState<'user' | 'admin'>(isAdminSession ? 'admin' : 'user');
+  const [loginId, setLoginId] = useState('');
   const [phone, setPhone] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -17,24 +23,46 @@ export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' 
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  useEffect(() => {
+    if (isOpen) {
+      const adminFlag =
+        defaultName.includes('주인장') ||
+        defaultName.includes('관리자') ||
+        (typeof window !== 'undefined' && sessionStorage.getItem('stock_terminal_is_admin') === 'true');
+      setMode(adminFlag ? 'admin' : 'user');
+      if (!adminFlag && defaultName) {
+        setLoginId(defaultName);
+      }
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setMsg(null);
+    }
+  }, [isOpen, defaultName]);
+
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMsg(null);
 
+    if (mode === 'user' && !loginId.trim()) {
+      setMsg({ type: 'error', text: '아이디(ID) 또는 가입 시 등록한 성함을 입력해 주세요.' });
+      return;
+    }
+
     if (!currentPassword.trim() || !newPassword.trim()) {
       setMsg({ type: 'error', text: '현재 비밀번호와 새 비밀번호를 모두 입력해 주세요.' });
       return;
     }
 
-    if (newPassword.length < 4) {
+    if (newPassword.trim().length < 4) {
       setMsg({ type: 'error', text: '새 비밀번호는 4자리 이상이어야 합니다.' });
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setMsg({ type: 'error', text: '새 비밀번호가 일치하지 않습니다.' });
+      setMsg({ type: 'error', text: '새 비밀번호와 비밀번호 확인이 일치하지 않습니다.' });
       return;
     }
 
@@ -44,11 +72,13 @@ export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: name.trim(),
+          login_id: mode === 'admin' ? 'admin' : loginId.trim(),
+          name: mode === 'admin' ? '주인장(관리자)' : loginId.trim(),
           phone: phone.trim(),
           current_password: currentPassword.trim(),
-          new_password: newPassword.trim()
-        })
+          new_password: newPassword.trim(),
+          is_admin_mode: mode === 'admin',
+        }),
       });
 
       const data = await res.json();
@@ -78,46 +108,90 @@ export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' 
           </h3>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white text-sm"
+            className="text-gray-400 hover:text-white text-sm cursor-pointer"
           >
             ✕ 닫기
           </button>
         </div>
 
+        {/* 일반 회원 / 관리자(주인장) 모드 전환 탭 */}
+        <div className="grid grid-cols-2 gap-2 bg-gray-900 p-1 rounded-xl border border-gray-800">
+          <button
+            type="button"
+            onClick={() => {
+              setMode('user');
+              setMsg(null);
+            }}
+            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              mode === 'user'
+                ? 'bg-cyan-600 text-black shadow'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            👤 일반 회원 비번 변경
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode('admin');
+              setMsg(null);
+            }}
+            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              mode === 'admin'
+                ? 'bg-red-600 text-white shadow'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            👑 관리자(주인장) 비번 변경
+          </button>
+        </div>
+
         <p className="text-xs text-gray-400 leading-relaxed">
-          승인된 회원은 성함, 연락처 및 현재 비밀번호를 확인 후 새로운 비밀번호로 즉시 변경하실 수 있습니다.
+          {mode === 'admin' ? (
+            <>
+              <strong className="text-red-400">주인장(관리자) 마스터 비밀번호</strong>를 변경합니다. 변경된 비밀번호는 서버 DB에 영구 저장되며 즉시 적용됩니다.
+            </>
+          ) : (
+            <>
+              가입 시 등록한 <strong className="text-cyan-300">아이디(ID)</strong>(또는 성함)와 현재 비밀번호를 확인 후 새 비밀번호로 즉시 변경합니다.
+            </>
+          )}
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-3 pt-1">
-          <div>
-            <label className="text-[11px] text-gray-400 block mb-1">성함 / 닉네임 *</label>
-            <input
-              type="text"
-              placeholder="가입 시 등록한 성함"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-cyan-500"
-              required
-            />
-          </div>
+          {mode === 'user' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">아이디(ID) 또는 성함 *</label>
+                <input
+                  type="text"
+                  placeholder="가입 아이디(ID) 또는 성함"
+                  value={loginId}
+                  onChange={(e) => setLoginId(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-cyan-500"
+                  required
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">연락처 (선택)</label>
+                <input
+                  type="text"
+                  placeholder="예: 010-1234-5678"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+          )}
 
           <div>
-            <label className="text-[11px] text-gray-400 block mb-1">연락처 *</label>
-            <input
-              type="text"
-              placeholder="예: 010-1234-5678"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-cyan-500"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="text-[11px] text-gray-400 block mb-1">현재 비밀번호 *</label>
+            <label className="text-[11px] text-gray-400 block mb-1">
+              {mode === 'admin' ? '현재 관리자(주인장) 마스터 비밀번호 *' : '현재 비밀번호 *'}
+            </label>
             <input
               type="password"
-              placeholder="현재 사용 중인 비밀번호"
+              placeholder={mode === 'admin' ? '현재 관리자 마스터 비밀번호 입력' : '현재 사용 중인 비밀번호'}
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-cyan-500 font-mono"
@@ -152,8 +226,8 @@ export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' 
 
           {msg && (
             <div className={`text-xs p-2.5 rounded-lg border font-semibold ${
-              msg.type === 'success' 
-                ? 'bg-emerald-950/60 border-emerald-700 text-emerald-300' 
+              msg.type === 'success'
+                ? 'bg-emerald-950/60 border-emerald-700 text-emerald-300'
                 : 'bg-red-950/60 border-red-700 text-red-300'
             }`}>
               {msg.text}
@@ -164,16 +238,20 @@ export default function ChangePasswordModal({ isOpen, onClose, defaultName = '' 
             <button
               type="button"
               onClick={onClose}
-              className="w-1/3 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2 rounded-xl text-xs transition-all"
+              className="w-1/3 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2 rounded-xl text-xs transition-all cursor-pointer"
             >
               취소
             </button>
             <button
               type="submit"
               disabled={isLoading}
-              className="w-2/3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-black font-extrabold py-2 rounded-xl text-xs transition-all shadow-lg"
+              className={`w-2/3 font-extrabold py-2 rounded-xl text-xs transition-all shadow-lg cursor-pointer ${
+                mode === 'admin'
+                  ? 'bg-red-600 hover:bg-red-500 disabled:bg-gray-700 text-white'
+                  : 'bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-black'
+              }`}
             >
-              {isLoading ? '변경 처리 중...' : '비밀번호 변경하기'}
+              {isLoading ? '변경 처리 중...' : mode === 'admin' ? '👑 관리자 비밀번호 변경' : '비밀번호 변경하기'}
             </button>
           </div>
         </form>

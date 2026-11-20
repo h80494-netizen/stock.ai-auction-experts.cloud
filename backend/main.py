@@ -33,6 +33,13 @@ from database import (
     verify_user_password,
     change_user_password,
     admin_update_user_password,
+    get_admin_master_password,
+    set_admin_master_password,
+    get_smtp_config,
+    save_smtp_config,
+    send_email_verification_code,
+    verify_email_code,
+    is_email_verified,
     get_user_trading_account,
     save_user_trading_account,
     get_all_users_trading_overview,
@@ -3175,47 +3182,109 @@ def api_export_market_scan():
 
 # ==================== 사용자 가입/비밀번호 신청 및 관리자 승인 API ====================
 
+class EmailSendCodeModel(BaseModel):
+    email: str
+
+
+class EmailVerifyCodeModel(BaseModel):
+    email: str
+    code: str
+
+
+@app.post("/api/auth/send-email-code")
+async def api_send_email_code(req: EmailSendCodeModel):
+    res = await asyncio.to_thread(send_email_verification_code, req.email)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message", "인증번호 발송 실패"))
+    return res
+
+
+@app.post("/api/auth/verify-email-code")
+def api_verify_email_code(req: EmailVerifyCodeModel):
+    res = verify_email_code(req.email, req.code)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("message", "인증번호 검증 실패"))
+    return res
+
+
 class RegisterRequestModel(BaseModel):
-    name: str
-    phone: str
+    login_id: str = ""
+    name: str = ""
+    phone: str = ""
     email: str = ""
     requested_password: str
+    verification_code: str = ""
+
 
 @app.post("/api/auth/register-request")
 def register_access_request(req: RegisterRequestModel):
-    if not req.name.strip() or not req.phone.strip() or not req.requested_password.strip():
-        raise HTTPException(status_code=400, detail="성함, 연락처, 희망 비밀번호를 모두 입력해 주세요.")
-    
-    if len(req.requested_password.strip()) < 2:
-        raise HTTPException(status_code=400, detail="비밀번호는 최소 2자리 이상이어야 합니다.")
-        
-    req_id = create_user_request(
-        req.name.strip(),
-        req.phone.strip(),
-        req.email.strip() if req.email else "",
-        req.requested_password.strip()
-    )
+    clean_id = (req.login_id or "").strip()
+    clean_pw = (req.requested_password or "").strip()
+    clean_email = (req.email or "").strip().lower()
+    clean_name = (req.name or clean_id).strip()
+    clean_phone = (req.phone or "-").strip()
+
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="사용하실 아이디(ID)를 입력해 주세요.")
+    if len(clean_id) < 2:
+        raise HTTPException(status_code=400, detail="아이디(ID)는 최소 2자 이상이어야 합니다.")
+    if not clean_pw or len(clean_pw) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 최소 4자리 이상 입력해 주세요.")
+    if not clean_email or "@" not in clean_email:
+        raise HTTPException(status_code=400, detail="이메일 인증을 위해 유효한 이메일 주소를 입력해 주세요.")
+
+    # 이메일 인증번호가 함께 전달된 경우 즉시 검증 수행
+    if req.verification_code.strip():
+        v_res = verify_email_code(clean_email, req.verification_code.strip())
+        if not v_res.get("success"):
+            raise HTTPException(status_code=400, detail=v_res.get("message", "이메일 인증번호가 일치하지 않습니다."))
+
+    verified_flag = is_email_verified(clean_email)
+    if not verified_flag:
+        raise HTTPException(status_code=400, detail="이메일 인증이 완료되지 않았습니다. [인증번호 발송] 후 6자리 인증번호를 인증해 주세요.")
+
+    try:
+        req_id = create_user_request(
+            clean_name,
+            clean_phone,
+            clean_email,
+            clean_pw,
+            login_id=clean_id,
+            email_verified=True,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
     return {
         "status": "success",
-        "message": "가입 및 비밀번호 신청이 성공적으로 접수되었습니다. 관리자(주인장) 승인 후 접속 가능합니다.",
-        "id": req_id
+        "message": f"✅ 이메일 인증 및 회원가입이 완료되었습니다! 이제 아이디 [{clean_id}]와 비밀번호로 즉시 로그인하실 수 있습니다.",
+        "id": req_id,
+        "login_id": clean_id,
+        "email_verified": True,
     }
 
+
 class LoginRequestModel(BaseModel):
+    login_id: str = ""
     password: str
+
 
 @app.post("/api/auth/login")
 def check_user_login(req: LoginRequestModel):
-    res = verify_user_password(req.password.strip())
+    res = verify_user_password(req.password.strip(), req.login_id.strip() if req.login_id else "")
     if not res["authenticated"]:
-        raise HTTPException(status_code=401, detail="올바르지 않거나 승인되지 않은 비밀번호입니다.")
+        raise HTTPException(status_code=401, detail="아이디(ID) 또는 비밀번호가 일치하지 않거나 승인되지 않은 계정입니다.")
     return res
 
+
 class ChangePasswordModel(BaseModel):
+    login_id: str = ""
     name: str = ""
     phone: str = ""
     current_password: str
     new_password: str
+    is_admin_mode: bool = False
+
 
 @app.post("/api/auth/change-password")
 def api_change_password(req: ChangePasswordModel):
@@ -3223,32 +3292,107 @@ def api_change_password(req: ChangePasswordModel):
         raise HTTPException(status_code=400, detail="현재 비밀번호와 새 비밀번호를 모두 입력해 주세요.")
     if len(req.new_password.strip()) < 4:
         raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자리 이상이어야 합니다.")
-    res = change_user_password(req.name, req.phone, req.current_password, req.new_password)
+    res = change_user_password(
+        req.name,
+        req.phone,
+        req.current_password,
+        req.new_password,
+        login_id=req.login_id,
+        is_admin_mode=req.is_admin_mode,
+    )
     if not res["success"]:
         raise HTTPException(status_code=400, detail=res["message"])
     return res
 
+
 class AdminAuthModel(BaseModel):
     admin_password: str
 
+
+class AdminMasterPwUpdateModel(BaseModel):
+    admin_password: str
+    new_admin_password: str
+
+
+@app.post("/api/auth/admin/change-master-password")
+def api_admin_change_master_password(req: AdminMasterPwUpdateModel):
+    admin_master = get_admin_master_password()
+    if req.admin_password.strip() != admin_master:
+        raise HTTPException(status_code=403, detail="현재 관리자 마스터 암호가 일치하지 않습니다.")
+    if not req.new_admin_password or len(req.new_admin_password.strip()) < 4:
+        raise HTTPException(status_code=400, detail="새 관리자 마스터 암호는 4자리 이상이어야 합니다.")
+    set_admin_master_password(req.new_admin_password.strip())
+    return {
+        "success": True,
+        "message": "✅ 주인장(관리자) 마스터 비밀번호가 성공적으로 변경되어 DB에 영구 저장되었습니다.",
+    }
+
+
+class AdminSmtpConfigSaveModel(BaseModel):
+    admin_password: str
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_sender_name: str = "AI Stock Expert 2.0"
+
+
+@app.post("/api/auth/admin/smtp-config")
+def api_admin_get_smtp_config(req: AdminAuthModel):
+    admin_master = get_admin_master_password()
+    if req.admin_password.strip() != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    cfg = get_smtp_config()
+    return {
+        "status": "success",
+        "data": {
+            "smtp_host": cfg["smtp_host"],
+            "smtp_port": cfg["smtp_port"],
+            "smtp_user": cfg["smtp_user"],
+            "smtp_password_masked": "••••••••" if cfg["smtp_password"] else "",
+            "smtp_sender_name": cfg["smtp_sender_name"],
+            "is_configured": cfg["is_configured"],
+        },
+    }
+
+
+@app.post("/api/auth/admin/save-smtp-config")
+def api_admin_save_smtp_config(req: AdminSmtpConfigSaveModel):
+    admin_master = get_admin_master_password()
+    if req.admin_password.strip() != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    saved = save_smtp_config(
+        req.smtp_host,
+        req.smtp_port,
+        req.smtp_user,
+        req.smtp_password,
+        req.smtp_sender_name,
+    )
+    return {
+        "status": "success",
+        "message": "✅ 회원가입 이메일 인증용 SMTP 발송 설정이 저장되었습니다.",
+        "data": saved,
+    }
+
+
 @app.post("/api/auth/admin/requests")
 def get_user_requests_admin(req: AdminAuthModel):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    admin_master = get_admin_master_password()
     if req.admin_password != admin_master:
         raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
     requests = get_all_user_requests()
     return {"status": "success", "data": requests}
+
 
 class AdminApproveModel(BaseModel):
     admin_password: str
     request_id: int
     status: str # 'approved' or 'rejected' or 'pending'
 
+
 @app.post("/api/auth/admin/approve")
 def approve_user_request_admin(req: AdminApproveModel):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    admin_master = get_admin_master_password()
     if req.admin_password != admin_master:
         raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
     if req.status not in ["approved", "rejected", "pending"]:
@@ -3256,15 +3400,16 @@ def approve_user_request_admin(req: AdminApproveModel):
     update_user_request_status(req.request_id, req.status)
     return {"status": "success", "message": f"요청이 성공적으로 {req.status} 변경되었습니다."}
 
+
 class AdminPasswordResetModel(BaseModel):
     admin_password: str
     request_id: int
     new_password: str
 
+
 @app.post("/api/auth/admin/reset-password")
 def api_admin_reset_password(req: AdminPasswordResetModel):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    admin_master = get_admin_master_password()
     if req.admin_password != admin_master:
         raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
     if not req.new_password or len(req.new_password.strip()) < 4:
@@ -3326,8 +3471,7 @@ def api_save_user_trading_account(req: UserTradingAccountUpdateModel, request: R
 
 @app.post("/api/auth/admin/trading-overview")
 def api_admin_trading_overview(req: AdminAuthModel):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
+    admin_master = get_admin_master_password()
     if req.admin_password != admin_master:
         raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
     overview_list = get_all_users_trading_overview()

@@ -127,13 +127,43 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_access_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login_id TEXT,
             name TEXT NOT NULL,
             phone TEXT NOT NULL,
             email TEXT,
             requested_password TEXT NOT NULL,
+            email_verified INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending',
             created_at TEXT,
             approved_at TEXT
+        )
+    ''')
+    try:
+        c.execute("ALTER TABLE user_access_requests ADD COLUMN login_id TEXT")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE user_access_requests ADD COLUMN email_verified INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # 시스템 전역 설정 테이블 (관리자 마스터 비밀번호 영구 저장 및 이메일 SMTP 설정)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT
+        )
+    ''')
+
+    # 회원가입 이메일 인증코드 테이블
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS email_verifications (
+            email TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            verified INTEGER DEFAULT 0,
+            created_at TEXT
         )
     ''')
 
@@ -1329,15 +1359,251 @@ def recalculate_all_ttm_financials():
             pass
     print(f"[TTM Batch] Recalculation complete!")
 
-def create_user_request(name: str, phone: str, email: str, requested_password: str):
+def get_system_setting(key: str, default: str = "") -> str:
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        if row and row["value"] is not None:
+            return str(row["value"])
+    except Exception:
+        pass
+    return default
+
+
+def set_system_setting(key: str, value: str):
     import datetime
     conn = get_db_connection()
     c = conn.cursor()
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute(
+        "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        (key, str(value), now_str),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_admin_master_password() -> str:
+    import os
+    db_pw = get_system_setting("admin_master_password", "").strip()
+    if db_pw:
+        os.environ["ADMIN_MASTER_PASSWORD"] = db_pw
+        return db_pw
+    env_pw = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494").strip() or "h80494"
+    return env_pw
+
+
+def set_admin_master_password(new_password: str):
+    import os
+    clean_pw = new_password.strip()
+    set_system_setting("admin_master_password", clean_pw)
+    os.environ["ADMIN_MASTER_PASSWORD"] = clean_pw
+
+
+def get_smtp_config() -> dict:
+    import os
+    host = get_system_setting("smtp_host", os.environ.get("SMTP_HOST", "smtp.gmail.com")).strip() or "smtp.gmail.com"
+    port_str = get_system_setting("smtp_port", os.environ.get("SMTP_PORT", "587")).strip() or "587"
+    user = get_system_setting("smtp_user", os.environ.get("SMTP_USER", "")).strip()
+    password = get_system_setting("smtp_password", os.environ.get("SMTP_PASSWORD", "")).strip()
+    sender_name = get_system_setting("smtp_sender_name", "AI Stock Expert 2.0").strip() or "AI Stock Expert 2.0"
+    try:
+        port = int(port_str)
+    except Exception:
+        port = 587
+    return {
+        "smtp_host": host,
+        "smtp_port": port,
+        "smtp_user": user,
+        "smtp_password": password,
+        "smtp_sender_name": sender_name,
+        "is_configured": bool(host and user and password),
+    }
+
+
+def save_smtp_config(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str = "", smtp_sender_name: str = "AI Stock Expert 2.0") -> dict:
+    set_system_setting("smtp_host", smtp_host.strip() or "smtp.gmail.com")
+    set_system_setting("smtp_port", str(int(smtp_port or 587)))
+    set_system_setting("smtp_user", smtp_user.strip())
+    if smtp_password and not smtp_password.startswith("••••"):
+        set_system_setting("smtp_password", smtp_password.strip())
+    set_system_setting("smtp_sender_name", smtp_sender_name.strip() or "AI Stock Expert 2.0")
+    cfg = get_smtp_config()
+    return {
+        "smtp_host": cfg["smtp_host"],
+        "smtp_port": cfg["smtp_port"],
+        "smtp_user": cfg["smtp_user"],
+        "smtp_sender_name": cfg["smtp_sender_name"],
+        "is_configured": cfg["is_configured"],
+    }
+
+
+def send_email_verification_code(email: str) -> dict:
+    import datetime
+    import random
+    import time
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.utils import formataddr
+
+    clean_email = (email or "").strip().lower()
+    if not clean_email or "@" not in clean_email:
+        return {"success": False, "message": "유효한 이메일 주소를 입력해 주세요."}
+
+    code = f"{random.randint(100000, 999999)}"
+    now_ts = time.time()
+    expires_at = now_ts + 600.0  # 10분 유효
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO email_verifications (email, code, expires_at, verified, created_at) VALUES (?, ?, ?, 0, ?)",
+        (clean_email, code, expires_at, now_str),
+    )
+    conn.commit()
+    conn.close()
+
+    smtp_cfg = get_smtp_config()
+    if smtp_cfg["is_configured"]:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[AI Stock Expert 2.0] 회원가입 이메일 인증번호 [{code}]"
+            msg["From"] = formataddr((smtp_cfg["smtp_sender_name"], smtp_cfg["smtp_user"]))
+            msg["To"] = clean_email
+
+            html_body = f"""
+            <div style="font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #121318; color: #f3f4f6; border-radius: 16px; border: 1px solid #374151;">
+              <h2 style="color: #38bdf8; margin-top: 0;">AI Stock Expert 2.0 이메일 인증</h2>
+              <p style="font-size: 14px; color: #d1d5db; line-height: 1.6;">
+                안녕하세요. 회원가입을 위한 6자리 이메일 인증번호입니다.<br/>
+                아래 인증번호를 회원가입 화면에 입력해 주세요. (유효시간 10분)
+              </p>
+              <div style="margin: 20px 0; padding: 18px; background: #1f2937; border: 1px solid #6366f1; border-radius: 12px; text-align: center;">
+                <span style="font-size: 28px; font-weight: 800; letter-spacing: 6px; color: #ffffff; font-family: monospace;">{code}</span>
+              </div>
+              <p style="font-size: 12px; color: #9ca3af;">본인이 요청하지 않은 경우 이 메일을 무시하셔도 됩니다.</p>
+            </div>
+            """
+            msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+            if int(smtp_cfg["smtp_port"]) == 465:
+                with smtplib.SMTP_SSL(smtp_cfg["smtp_host"], int(smtp_cfg["smtp_port"]), timeout=10) as server:
+                    server.login(smtp_cfg["smtp_user"], smtp_cfg["smtp_password"])
+                    server.sendmail(smtp_cfg["smtp_user"], [clean_email], msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_cfg["smtp_host"], int(smtp_cfg["smtp_port"]), timeout=10) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(smtp_cfg["smtp_user"], smtp_cfg["smtp_password"])
+                    server.sendmail(smtp_cfg["smtp_user"], [clean_email], msg.as_string())
+
+            return {
+                "success": True,
+                "smtp_sent": True,
+                "message": f"{clean_email} 주소로 6자리 인증번호 메일이 발송되었습니다. (10분 내 입력)",
+            }
+        except Exception as e:
+            print(f"[Email Verification SMTP Error] {e}")
+            return {
+                "success": True,
+                "smtp_sent": False,
+                "fallback_code": code,
+                "message": f"SMTP 메일 발송 실패({str(e)[:60]})로 인해 화면 즉시 인증코드 [{code}]가 발급되었습니다.",
+            }
+    else:
+        return {
+            "success": True,
+            "smtp_sent": False,
+            "fallback_code": code,
+            "message": f"[이메일 인증코드: {code}] (현재 관리자 SMTP 발송 계정이 미등록 상태여서 즉시 인증코드가 표시됩니다. 관리자 센터에서 Gmail/Naver SMTP를 등록하면 실제 메일로 발송됩니다.)",
+        }
+
+
+def verify_email_code(email: str, code: str) -> dict:
+    import time
+    clean_email = (email or "").strip().lower()
+    clean_code = (code or "").strip()
+    if not clean_email or not clean_code:
+        return {"success": False, "message": "이메일과 인증번호 6자리를 모두 입력해 주세요."}
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT email, code, expires_at, verified FROM email_verifications WHERE email = ?", (clean_email,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"success": False, "message": "해당 이메일로 발송된 인증번호 내역이 없습니다. [인증번호 발송]을 먼저 눌러주세요."}
+
+    if time.time() > float(row["expires_at"]):
+        conn.close()
+        return {"success": False, "message": "인증번호 유효시간(10분)이 만료되었습니다. 다시 발송해 주세요."}
+
+    if str(row["code"]).strip() != clean_code:
+        conn.close()
+        return {"success": False, "message": "인증번호가 일치하지 않습니다. 다시 확인해 주세요."}
+
+    c.execute("UPDATE email_verifications SET verified = 1 WHERE email = ?", (clean_email,))
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": "✅ 이메일 인증이 완료되었습니다."}
+
+
+def is_email_verified(email: str) -> bool:
+    import time
+    clean_email = (email or "").strip().lower()
+    if not clean_email:
+        return False
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT verified, expires_at FROM email_verifications WHERE email = ?", (clean_email,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return False
+    # 인증 완료 후 30분 이내 가입 허용
+    return bool(int(row["verified"] or 0) == 1 and (time.time() <= float(row["expires_at"]) + 1800.0))
+
+
+def create_user_request(name: str, phone: str, email: str, requested_password: str, login_id: str = "", email_verified: bool = False):
+    import datetime
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    clean_login_id = (login_id or "").strip()
+    clean_email = (email or "").strip().lower()
+    clean_name = (name or clean_login_id).strip()
+    clean_phone = (phone or "-").strip()
+
+    if clean_login_id:
+        if clean_login_id.lower() in ("admin", "administrator", "주인장", "관리자"):
+            conn.close()
+            raise ValueError("해당 아이디(ID)는 관리자 예약어이므로 사용할 수 없습니다.")
+        c.execute("SELECT id FROM user_access_requests WHERE lower(login_id) = lower(?)", (clean_login_id,))
+        if c.fetchone():
+            conn.close()
+            raise ValueError(f"이미 사용 중인 아이디({clean_login_id})입니다. 다른 아이디를 입력해 주세요.")
+
+    if clean_email:
+        c.execute("SELECT id FROM user_access_requests WHERE lower(email) = lower(?) AND status = 'approved'", (clean_email,))
+        if c.fetchone():
+            conn.close()
+            raise ValueError(f"이미 가입된 이메일({clean_email})입니다.")
+
     created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 이메일 인증을 완료한 가입자는 즉시 승인(approved) 처리하여 ID/PW로 바로 로그인 가능
+    status_val = 'approved' if email_verified else 'pending'
+    approved_at = created_at if email_verified else None
+
     c.execute('''
-        INSERT INTO user_access_requests (name, phone, email, requested_password, status, created_at)
-        VALUES (?, ?, ?, ?, 'pending', ?)
-    ''', (name, phone, email, requested_password, created_at))
+        INSERT INTO user_access_requests (login_id, name, phone, email, requested_password, email_verified, status, created_at, approved_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (clean_login_id, clean_name, clean_phone, clean_email, requested_password, 1 if email_verified else 0, status_val, created_at, approved_at))
     conn.commit()
     req_id = c.lastrowid
     conn.close()
@@ -1346,7 +1612,7 @@ def create_user_request(name: str, phone: str, email: str, requested_password: s
 def get_all_user_requests():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT id, name, phone, email, requested_password, status, created_at, approved_at FROM user_access_requests ORDER BY id DESC')
+    c.execute('SELECT id, login_id, name, phone, email, requested_password, email_verified, status, created_at, approved_at FROM user_access_requests ORDER BY id DESC')
     rows = [dict(row) for row in c.fetchall()]
     conn.close()
     return rows
@@ -1364,25 +1630,37 @@ def update_user_request_status(request_id: int, status: str):
     conn.commit()
     conn.close()
 
-def verify_user_password(password: str):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
-    # 마스터 관리자 비밀번호 (주인장)
-    if password == admin_master:
+def verify_user_password(password: str, login_id: str = ""):
+    admin_master = get_admin_master_password()
+    clean_id = (login_id or "").strip()
+    clean_pw = (password or "").strip()
+
+    # 마스터 관리자 비밀번호 (주인장): ID가 비어있거나 admin/주인장/관리자일 때 마스터 비밀번호 일치 시 로그인
+    if clean_pw == admin_master and clean_id.lower() in ("", "admin", "주인장", "관리자"):
         return {
             "authenticated": True,
             "is_admin": True,
             "user_id": "admin",
+            "login_id": "admin",
             "name": "주인장(관리자)",
         }
 
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''
-        SELECT id, name, requested_password, status FROM user_access_requests
-        WHERE requested_password = ? AND status = 'approved'
-    ''', (password,))
-    row = c.fetchone()
+    row = None
+    if clean_id:
+        c.execute('''
+            SELECT id, login_id, name, email, requested_password, status FROM user_access_requests
+            WHERE (lower(login_id) = lower(?) OR lower(email) = lower(?) OR name = ?)
+              AND requested_password = ? AND status = 'approved'
+        ''', (clean_id, clean_id, clean_id, clean_pw))
+        row = c.fetchone()
+    else:
+        c.execute('''
+            SELECT id, login_id, name, email, requested_password, status FROM user_access_requests
+            WHERE requested_password = ? AND status = 'approved'
+        ''', (clean_pw,))
+        row = c.fetchone()
     conn.close()
 
     if row:
@@ -1391,8 +1669,9 @@ def verify_user_password(password: str):
             "authenticated": True,
             "is_admin": False,
             "user_id": uid,
+            "login_id": row["login_id"] or row["name"],
             "request_id": row["id"],
-            "name": row["name"],
+            "name": row["name"] or row["login_id"],
         }
 
     return {"authenticated": False, "is_admin": False, "user_id": None, "name": None}
@@ -1662,42 +1941,69 @@ def get_all_users_trading_overview() -> list:
     return overview
 
 
-def change_user_password(name: str, phone: str, current_password: str, new_password: str):
-    import os
-    admin_master = os.environ.get("ADMIN_MASTER_PASSWORD", "h80494")
-    
-    # 관리자 비밀번호 변경 요청인 경우 (마스터 계정)
-    if current_password == admin_master and (name == "주인장" or name == "관리자" or not name):
-        # 환경변수 메모리 변경
-        os.environ["ADMIN_MASTER_PASSWORD"] = new_password
-        return {"success": True, "message": "주인장(관리자) 비밀번호가 성공적으로 변경되었습니다."}
+def change_user_password(name: str, phone: str, current_password: str, new_password: str, login_id: str = "", is_admin_mode: bool = False):
+    admin_master = get_admin_master_password()
+    clean_name = (name or "").strip()
+    clean_id = (login_id or "").strip()
+    clean_curr = (current_password or "").strip()
+    clean_new = (new_password or "").strip()
 
-    # 일반 회원 비밀번호 변경
+    is_admin_target = (
+        is_admin_mode
+        or clean_id.lower() in ("admin", "주인장", "관리자")
+        or clean_name in ("주인장", "관리자", "주인장(관리자)", "admin", "")
+    )
+
+    # 관리자 비밀번호 변경 요청인 경우 (DB에 영구 저장)
+    if is_admin_target and clean_curr == admin_master:
+        set_admin_master_password(clean_new)
+        return {"success": True, "message": "✅ 주인장(관리자) 마스터 비밀번호가 DB에 영구 저장되어 변경되었습니다."}
+    elif is_admin_mode and clean_curr != admin_master:
+        return {"success": False, "message": "현재 관리자 마스터 비밀번호가 일치하지 않습니다."}
+
+    # 일반 회원 비밀번호 변경 (ID + 현재 비밀번호 또는 성함 + 연락처 + 현재 비밀번호 지원)
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''
-        SELECT id, name, phone, requested_password, status FROM user_access_requests
-        WHERE name = ? AND phone = ? AND requested_password = ?
-    ''', (name.strip(), phone.strip(), current_password.strip()))
-    row = c.fetchone()
-    
+    row = None
+    if clean_id:
+        c.execute('''
+            SELECT id, login_id, name, phone, requested_password, status FROM user_access_requests
+            WHERE (lower(login_id) = lower(?) OR lower(email) = lower(?) OR name = ?)
+              AND requested_password = ?
+        ''', (clean_id, clean_id, clean_id, clean_curr))
+        row = c.fetchone()
+
+    if not row and clean_name and phone.strip():
+        c.execute('''
+            SELECT id, login_id, name, phone, requested_password, status FROM user_access_requests
+            WHERE name = ? AND phone = ? AND requested_password = ?
+        ''', (clean_name, phone.strip(), clean_curr))
+        row = c.fetchone()
+
+    if not row and clean_name:
+        c.execute('''
+            SELECT id, login_id, name, phone, requested_password, status FROM user_access_requests
+            WHERE (lower(login_id) = lower(?) OR name = ?) AND requested_password = ?
+        ''', (clean_name, clean_name, clean_curr))
+        row = c.fetchone()
+
     if not row:
         conn.close()
-        return {"success": False, "message": "성함, 연락처 또는 현재 비밀번호가 일치하지 않습니다."}
-    
+        return {"success": False, "message": "아이디(또는 성함) 및 현재 비밀번호가 일치하지 않습니다."}
+
     if row["status"] != "approved":
         conn.close()
-        return {"success": False, "message": "아직 관리자 승인이 완료되지 않은 계정입니다."}
-    
-    # 새 비밀번호로 업데이트
+        return {"success": False, "message": "아직 승인이 완료되지 않은 계정입니다."}
+
     c.execute('''
         UPDATE user_access_requests
         SET requested_password = ?
         WHERE id = ?
-    ''', (new_password.strip(), row["id"]))
+    ''', (clean_new, row["id"]))
     conn.commit()
     conn.close()
-    return {"success": True, "message": f"{name} 님의 비밀번호가 성공적으로 변경되었습니다."}
+    display_label = row["login_id"] or row["name"]
+    return {"success": True, "message": f"✅ {display_label} 님의 비밀번호가 성공적으로 변경되었습니다."}
 
 def admin_update_user_password(request_id: int, new_password: str):
     conn = get_db_connection()
