@@ -404,14 +404,15 @@ async def get_etf_strategy(
     cash_threshold: float = 10.0,
 ):
     from etf_strategy import get_etf_strategy_results
-    results = get_etf_strategy_results(
-        criteria=criteria,
-        top_n=top_n,
-        w1=w1,
-        w5=w5,
-        w20=w20,
-        force_refresh=force_refresh,
-        cash_threshold=cash_threshold,
+    results = await asyncio.to_thread(
+        get_etf_strategy_results,
+        criteria,
+        top_n,
+        w1,
+        w5,
+        w20,
+        force_refresh,
+        cash_threshold,
     )
     return results
 
@@ -527,13 +528,16 @@ async def get_etf_sim(
     cash_threshold: float = 10.0,
 ):
     from etf_strategy import get_etf_simulation
-    return get_etf_simulation(
-        criteria=criteria,
-        top_n=top_n,
-        w1=w1,
-        w5=w5,
-        w20=w20,
-        cash_threshold=cash_threshold,
+    return await asyncio.to_thread(
+        get_etf_simulation,
+        criteria,
+        top_n,
+        w1,
+        w5,
+        w20,
+        None,
+        None,
+        cash_threshold,
     )
 
 @app.get("/api/etf/simulation-models")
@@ -543,7 +547,12 @@ async def api_get_etf_simulation_models(
     cash_threshold: float = 10.0,
 ):
     from etf_strategy import run_bulk_simulation
-    return run_bulk_simulation(criteria=criteria, top_n=top_n, cash_threshold=cash_threshold)
+    return await asyncio.to_thread(
+        run_bulk_simulation,
+        criteria,
+        top_n,
+        cash_threshold,
+    )
 
 class ModelSwapRequest(BaseModel):
     from_model: str

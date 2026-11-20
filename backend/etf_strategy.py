@@ -29,10 +29,58 @@ ETF_TARGETS = {
     "GLD": "금 (Gold)"
 }
 
+import threading
+import numpy as np
+from functools import lru_cache
+
+_DB_INITIALIZED = False
+_DB_HAS_HISTORY = False
+_LIVE_QUOTE_LOCK = threading.Lock()
+_BG_SYNC_RUNNING = False
+_LAST_LIVE_SYNC_TS = 0.0
+_LAST_LIVE_SYNC_KST = ""
+_LAST_KOSPI_FETCH_TS = 0.0
+_KOSPI_ALIGNED_CACHE = {}
+_SIM_RESULT_CACHE = {}
+_BULK_MODELS_CACHE = {}
+
+
+def _get_cache_key() -> str:
+    try:
+        p = os.path.join(DATA_DIR, 'last_update.txt')
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                return f.read().strip() or "0"
+    except Exception:
+        pass
+    return str(int(_LAST_LIVE_SYNC_TS))
+
+
+def _invalidate_etf_caches():
+    try:
+        get_cached_etf_df.cache_clear()
+    except Exception:
+        pass
+    try:
+        get_cached_etf_pivot.cache_clear()
+    except Exception:
+        pass
+    _SIM_RESULT_CACHE.clear()
+    _BULK_MODELS_CACHE.clear()
+
+
 def init_db():
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED and os.path.exists(DB_PATH):
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
     c = conn.cursor()
+    try:
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     c.execute('''
         CREATE TABLE IF NOT EXISTS etf_daily_prices (
             ticker TEXT,
@@ -59,6 +107,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    _DB_INITIALIZED = True
 
 def update_etf_data():
     init_db()
@@ -122,141 +171,123 @@ def update_etf_data():
         with open(os.path.join(DATA_DIR, 'last_update.txt'), 'w') as f:
             f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-_LIVE_QUOTE_LOCK = None
-_LAST_LIVE_SYNC_TS = 0.0
-_LAST_LIVE_SYNC_KST = ""
-
-
 def sync_live_etf_prices(force: bool = False) -> dict:
     """
     11개 글로벌/미국 ETF(EWY, EWJ, SPY, QQQ, FXI, INDA, EWZ, EWA, EZU, USO, GLD)의
     실시간 현재가/최근 종가(USD)를 고속 수집하여 etf_daily_prices DB에 즉시 반영합니다.
-    - 45초 캐시 적용 (force=True 시 즉시 강제 조회)
+    - 60초 캐시 적용 (force=True 시 즉시 강제 조회)
+    - 단일 bulk yf.download(5d)로 11개 개별 fast_info 순차 HTTP 병목 제거
     """
-    global _LIVE_QUOTE_LOCK, _LAST_LIVE_SYNC_TS, _LAST_LIVE_SYNC_KST
-    import threading
+    global _LIVE_QUOTE_LOCK, _LAST_LIVE_SYNC_TS, _LAST_LIVE_SYNC_KST, _BG_SYNC_RUNNING
     if _LIVE_QUOTE_LOCK is None:
         _LIVE_QUOTE_LOCK = threading.Lock()
 
     now_ts = time.time()
-    if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 45.0:
+    if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 60.0:
         return {"synced": False, "cached": True, "updated_at_kst": _LAST_LIVE_SYNC_KST}
 
     with _LIVE_QUOTE_LOCK:
         now_ts = time.time()
-        if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 45.0:
+        if not force and (now_ts - _LAST_LIVE_SYNC_TS) < 60.0:
             return {"synced": False, "cached": True, "updated_at_kst": _LAST_LIVE_SYNC_KST}
 
-        init_db()
-        tickers = list(ETF_TARGETS.keys())
-        updated_prices = {}
-        latest_us_date = None
-
+        _BG_SYNC_RUNNING = True
         try:
-            # 1) 최근 5일 일봉 빠른 일괄 다운로드 (약 0.8~1.2초 소요)
-            recent_df = yf.download(tickers, period="5d", interval="1d", progress=False)
-            if not recent_df.empty:
-                close_df = recent_df["Close"].copy() if isinstance(recent_df.columns, pd.MultiIndex) else recent_df.copy()
-                close_df = close_df.ffill()
-                if not close_df.empty:
-                    records_5d = []
-                    for dt_idx, row in close_df.iterrows():
-                        d_str = dt_idx.strftime("%Y-%m-%d") if hasattr(dt_idx, "strftime") else str(dt_idx)[:10]
-                        latest_us_date = d_str
-                        for tk in tickers:
-                            if tk in row and not pd.isna(row[tk]):
-                                pv = float(row[tk])
-                                if pv > 0 and math.isfinite(pv):
-                                    records_5d.append((tk, d_str, round(pv, 4)))
-                                    updated_prices[tk] = round(pv, 2)
-                    if records_5d:
-                        conn = sqlite3.connect(DB_PATH, timeout=20.0)
-                        c = conn.cursor()
-                        c.executemany(
-                            "INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) VALUES (?, ?, ?)",
-                            records_5d,
-                        )
-                        conn.commit()
-                        conn.close()
-        except Exception as e:
-            print(f"[ETF Live Sync] 5d download notice: {e}")
+            init_db()
+            tickers = list(ETF_TARGETS.keys())
+            updated_prices = {}
+            latest_us_date = None
 
-        # 2) fast_info 실시간 체결가(장중/프리/애프터마켓 최신가) 보강
-        if not latest_us_date:
             try:
-                from zoneinfo import ZoneInfo
-                latest_us_date = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+                # 최근 5일 일봉(당일 장중 실시간 현재가 포함) 단일 일괄 다운로드 (약 0.6~1.1초 소요)
+                recent_df = yf.download(tickers, period="5d", interval="1d", progress=False, timeout=6)
+                if not recent_df.empty:
+                    close_df = recent_df["Close"].copy() if isinstance(recent_df.columns, pd.MultiIndex) else recent_df.copy()
+                    close_df = close_df.ffill()
+                    if not close_df.empty:
+                        records_5d = []
+                        for dt_idx, row in close_df.iterrows():
+                            d_str = dt_idx.strftime("%Y-%m-%d") if hasattr(dt_idx, "strftime") else str(dt_idx)[:10]
+                            latest_us_date = d_str
+                            for tk in tickers:
+                                if tk in row and not pd.isna(row[tk]):
+                                    pv = float(row[tk])
+                                    if pv > 0 and math.isfinite(pv):
+                                        records_5d.append((tk, d_str, round(pv, 4)))
+                                        updated_prices[tk] = round(pv, 2)
+                        if records_5d:
+                            conn = sqlite3.connect(DB_PATH, timeout=20.0)
+                            c = conn.cursor()
+                            c.executemany(
+                                "INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) VALUES (?, ?, ?)",
+                                records_5d,
+                            )
+                            conn.commit()
+                            conn.close()
+            except Exception as e:
+                print(f"[ETF Live Sync] 5d download notice: {e}")
+
+            kst_now_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+            _LAST_LIVE_SYNC_TS = time.time()
+            _LAST_LIVE_SYNC_KST = kst_now_str
+            try:
+                with open(os.path.join(DATA_DIR, "last_update.txt"), "w") as f:
+                    f.write(kst_now_str)
+                _invalidate_etf_caches()
             except Exception:
-                latest_us_date = (datetime.utcnow() - timedelta(hours=5)).strftime("%Y-%m-%d")
+                pass
 
-        live_records = []
-        try:
-            yf_objs = yf.Tickers(" ".join(tickers))
-            for tk in tickers:
-                try:
-                    t_obj = yf_objs.tickers.get(tk) if hasattr(yf_objs, "tickers") else yf.Ticker(tk)
-                    lp = getattr(t_obj, "fast_info", {}).get("lastPrice")
-                    if lp and math.isfinite(float(lp)) and float(lp) > 0:
-                        f_lp = round(float(lp), 4)
-                        updated_prices[tk] = round(f_lp, 2)
-                        live_records.append((tk, latest_us_date, f_lp))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            return {
+                "synced": True,
+                "cached": False,
+                "latest_us_date": latest_us_date,
+                "updated_at_kst": kst_now_str,
+                "prices": updated_prices,
+            }
+        finally:
+            _BG_SYNC_RUNNING = False
 
-        if live_records:
-            try:
-                conn = sqlite3.connect(DB_PATH, timeout=20.0)
-                c = conn.cursor()
-                c.executemany(
-                    "INSERT OR REPLACE INTO etf_daily_prices (ticker, date, close) VALUES (?, ?, ?)",
-                    live_records,
-                )
-                conn.commit()
-                conn.close()
-            except Exception as db_e:
-                print(f"[ETF Live Sync] DB write notice: {db_e}")
 
-        kst_now_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
-        _LAST_LIVE_SYNC_TS = time.time()
-        _LAST_LIVE_SYNC_KST = kst_now_str
-        try:
-            with open(os.path.join(DATA_DIR, "last_update.txt"), "w") as f:
-                f.write(kst_now_str)
-            get_cached_etf_pivot.cache_clear()
-        except Exception:
-            pass
-
-        return {
-            "synced": True,
-            "cached": False,
-            "latest_us_date": latest_us_date,
-            "updated_at_kst": kst_now_str,
-            "prices": updated_prices,
-        }
+def _trigger_background_live_sync():
+    global _BG_SYNC_RUNNING
+    if _BG_SYNC_RUNNING:
+        return
+    if (time.time() - _LAST_LIVE_SYNC_TS) < 60.0:
+        return
+    _BG_SYNC_RUNNING = True
+    t = threading.Thread(target=sync_live_etf_prices, kwargs={"force": False}, daemon=True)
+    t.start()
 
 
 def check_and_update_etf_data(force_live: bool = False):
-    last_update_file = os.path.join(DATA_DIR, 'last_update.txt')
-    needs_full_history = False
-    
+    global _DB_HAS_HISTORY, _LAST_LIVE_SYNC_KST, _LAST_LIVE_SYNC_TS
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT count(*), max(date) FROM etf_daily_prices")
-    row = c.fetchone()
-    conn.close()
-    
-    count_val = row[0] if row else 0
-    if count_val < 200:
-        needs_full_history = True
 
-    if needs_full_history:
-        update_etf_data()
+    if not _DB_HAS_HISTORY:
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+        c = conn.cursor()
+        c.execute("SELECT count(*) FROM etf_daily_prices")
+        row = c.fetchone()
+        conn.close()
+        count_val = row[0] if row else 0
+        if count_val >= 200:
+            _DB_HAS_HISTORY = True
+            if not _LAST_LIVE_SYNC_KST:
+                _LAST_LIVE_SYNC_KST = _get_cache_key()
+                _LAST_LIVE_SYNC_TS = time.time() - 30.0
+        else:
+            update_etf_data()
+            _DB_HAS_HISTORY = True
+            _invalidate_etf_caches()
+            return
+
+    if force_live:
+        # 사용자가 명시적으로 [실시간 ETF 현재가 새로고침] 버튼을 클릭한 경우에만 동기 실행
+        sync_live_etf_prices(force=True)
     else:
-        # 실시간/최근 5일 ETF 현재가를 45초 주기로 즉시 동기화
-        sync_live_etf_prices(force=force_live)
+        # 일반 조회 시에는 DB/메모리 캐시에서 1ms 만에 즉시 반환하고, 60초 경과 시 백그라운드 스레드에서 비동기 갱신
+        _trigger_background_live_sync()
+
 
 def sanitize_val(val, default=0.0):
     if val is None:
@@ -268,6 +299,23 @@ def sanitize_val(val, default=0.0):
         return val_f
     except (ValueError, TypeError):
         return default
+
+
+@lru_cache(maxsize=2)
+def get_cached_etf_df(cache_key=None):
+    init_db()
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
+    try:
+        df = pd.read_sql_query(
+            "SELECT ticker, date, close FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC",
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    return df
+
 
 def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, force_refresh=False, cash_threshold=10.0):
     try:
@@ -289,58 +337,51 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
     min_req_score = (cash_threshold / 252.0) * weighted_days
 
     check_and_update_etf_data(force_live=bool(force_refresh))
-    init_db()
-    conn = sqlite3.connect(DB_PATH)
-    
+    cache_key = _get_cache_key()
+    df = get_cached_etf_df(cache_key)
+    if df is None or df.empty:
+        update_etf_data()
+        _invalidate_etf_caches()
+        df = get_cached_etf_df(_get_cache_key())
+        if df is None or df.empty:
+            return []
+
     results = []
-    try:
-        # Load all prices into a dataframe
-        df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
-        if df.empty:
-            update_etf_data()
-            df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
-    except:
-        conn.close()
-        return []
-    
-    conn.close()
-    
-    if df.empty:
-        return []
-        
     for ticker, name in ETF_TARGETS.items():
-        ticker_df = df[df['ticker'] == ticker].copy()
+        ticker_df = df[df['ticker'] == ticker]
         if len(ticker_df) < 6:
-            continue # Need at least a few days of data
-            
-        ticker_df = ticker_df.sort_values(by='date', ascending=True)
-        closes = ticker_df['close'].tolist()
+            continue
+
+        closes = ticker_df['close'].to_numpy(dtype=float)
         dates = ticker_df['date'].tolist()
-        
+
         current_price = sanitize_val(closes[-1])
         prev_1d_price = sanitize_val(closes[-2])
         prev_5d_price = sanitize_val(closes[-6] if len(closes) >= 6 else closes[0])
         prev_20d_price = sanitize_val(closes[-21] if len(closes) >= 21 else closes[0])
-        
+
         return_1d = sanitize_val(((current_price - prev_1d_price) / prev_1d_price) * 100) if prev_1d_price > 0 else 0.0
         return_5d = sanitize_val(((current_price - prev_5d_price) / prev_5d_price) * 100) if prev_5d_price > 0 else 0.0
         return_20d = sanitize_val(((current_price - prev_20d_price) / prev_20d_price) * 100) if prev_20d_price > 0 else 0.0
-        
+
         momentum_score = sanitize_val((return_1d * w1) + (return_5d * w5) + (return_20d * w20))
-        
+
         sharpe_ratio = 0.0
         if criteria == "sharpe":
-            recent_20 = ticker_df.tail(21).copy() # 21 rows for 20 returns
-            recent_20['daily_ret'] = recent_20['close'].pct_change() * 100
-            std_dev = recent_20['daily_ret'].std()
-            if pd.isna(std_dev) or std_dev == 0:
-                sharpe_ratio = momentum_score
+            recent_closes = closes[-21:] if len(closes) >= 21 else closes
+            if len(recent_closes) >= 2:
+                daily_ret = (recent_closes[1:] - recent_closes[:-1]) / recent_closes[:-1] * 100.0
+                std_dev = float(np.std(daily_ret, ddof=1)) if len(daily_ret) > 1 else 0.0
+                if math.isnan(std_dev) or std_dev == 0:
+                    sharpe_ratio = momentum_score
+                else:
+                    sharpe_ratio = sanitize_val(momentum_score / std_dev)
             else:
-                sharpe_ratio = sanitize_val(momentum_score / std_dev)
-                
+                sharpe_ratio = momentum_score
+
         final_score = sanitize_val(sharpe_ratio if criteria == "sharpe" else momentum_score)
         annualized_return = sanitize_val(momentum_score * (252.0 / weighted_days))
-        
+
         results.append({
             "ticker": ticker,
             "name": name,
@@ -354,12 +395,12 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
             "sharpe_ratio": sharpe_ratio,
             "final_score": final_score,
             "last_updated": dates[-1] if dates else "",
-            "quote_updated_at": _LAST_LIVE_SYNC_KST or (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+            "quote_updated_at": _LAST_LIVE_SYNC_KST or cache_key
         })
-        
+
     # Sort by final_score descending
     results = sorted(results, key=lambda x: x['final_score'], reverse=True)
-    
+
     # Assign ranks & recommended weights based on top_n & cash_threshold (연 cash_threshold% 이하 시 ETF 미선택 및 CASH 보유)
     equal_weight = 100.0 if top_n == 1 else (50.0 if top_n == 2 else 33.33)
     for idx, item in enumerate(results):
@@ -370,26 +411,17 @@ def get_etf_strategy_results(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0
         else:
             item["is_selected"] = False
             item["recommended_weight"] = 0.0
-            
+
     return results
 
-from functools import lru_cache
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def get_cached_etf_pivot(cache_key=None):
-    check_and_update_etf_data()
-    init_db()
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        df = pd.read_sql_query("SELECT * FROM etf_daily_prices WHERE close IS NOT NULL AND close > 0 ORDER BY date ASC", conn)
-    except:
-        conn.close()
+    check_and_update_etf_data(force_live=False)
+    df = get_cached_etf_df(cache_key or _get_cache_key())
+    if df is None or df.empty:
         return None
-    conn.close()
-    
-    if df.empty:
-        return None
-        
+
     df = df[df['ticker'].isin(ETF_TARGETS.keys())]
     pivot = df.pivot(index='date', columns='ticker', values='close')
     pivot = pivot.ffill().dropna()
@@ -400,9 +432,17 @@ def get_kospi_aligned_series(dates: list) -> list:
     """
     KOSPI 지수(^KS11) 일별 종가 캐시(kospi_history_cache.json) 및 최신 시세를 로드하여
     시뮬레이션 거래일(dates)에 맞춰 전방/후방 보간(ffill/bfill) 후 Base=100 정규화 배열을 반환합니다.
+    - 메모리 캐시 및 10분(600초) yfinance 재조회 쿨다운 적용으로 매 요청마다 ^KS11 HTTP 블로킹 방지
     """
+    global _LAST_KOSPI_FETCH_TS, _KOSPI_ALIGNED_CACHE
     if not dates:
         return []
+
+    cache_sig = (dates[0], dates[-1], len(dates))
+    now_ts = time.time()
+    if cache_sig in _KOSPI_ALIGNED_CACHE and (now_ts - _LAST_KOSPI_FETCH_TS) < 600.0:
+        return _KOSPI_ALIGNED_CACHE[cache_sig]
+
     kospi_cache_path = os.path.join(DATA_DIR, "kospi_history_cache.json")
     kospi_dict = {}
     try:
@@ -415,12 +455,15 @@ def get_kospi_aligned_series(dates: list) -> list:
     except Exception as e:
         print(f"[KOSPI Series] Cache read error: {e}")
 
-    # 캐시 데이터가 부족하거나 가장 오래된 날짜가 dates[0]보다 늦으면 ^KS11 보강
-    need_fetch = (not kospi_dict) or (min(kospi_dict.keys()) > dates[0]) or (max(kospi_dict.keys()) < dates[-1])
+    # 캐시가 없거나 10분 이상 경과한 경우에만 ^KS11 최신 데이터 보강
+    need_fetch = (not kospi_dict) or (min(kospi_dict.keys()) > dates[0]) or (
+        max(kospi_dict.keys()) < dates[-1] and (now_ts - _LAST_KOSPI_FETCH_TS) >= 600.0
+    )
     if need_fetch:
+        _LAST_KOSPI_FETCH_TS = now_ts
         try:
             period_str = "5y" if (not kospi_dict or min(kospi_dict.keys()) > dates[0]) else "5d"
-            ks_hist = yf.Ticker("^KS11").history(period=period_str, interval="1d")
+            ks_hist = yf.Ticker("^KS11").history(period=period_str, interval="1d", timeout=5)
             if not ks_hist.empty and "Close" in ks_hist.columns:
                 for dt_idx, row in ks_hist.iterrows():
                     d_str = dt_idx.strftime("%Y-%m-%d") if hasattr(dt_idx, "strftime") else str(dt_idx)[:10]
@@ -435,6 +478,8 @@ def get_kospi_aligned_series(dates: list) -> list:
                     pass
         except Exception as e:
             print(f"[KOSPI Series] yfinance ^KS11 fetch notice: {e}")
+    elif _LAST_KOSPI_FETCH_TS == 0.0:
+        _LAST_KOSPI_FETCH_TS = now_ts
 
     if not kospi_dict:
         return [100.0] * len(dates)
@@ -444,7 +489,9 @@ def get_kospi_aligned_series(dates: list) -> list:
         s = pd.Series(kospi_dict, dtype=float).reindex(all_dates).sort_index().ffill().bfill()
         aligned = s.reindex(dates).ffill().bfill()
         base_val = float(aligned.iloc[0]) if len(aligned) > 0 and float(aligned.iloc[0]) > 0 else 1.0
-        return [sanitize_val((float(v) / base_val) * 100.0, 100.0) for v in aligned.tolist()]
+        res = [sanitize_val((float(v) / base_val) * 100.0, 100.0) for v in aligned.tolist()]
+        _KOSPI_ALIGNED_CACHE[cache_sig] = res
+        return res
     except Exception as e:
         print(f"[KOSPI Series] Alignment error: {e}")
         return [100.0] * len(dates)
@@ -469,80 +516,95 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
     weighted_days = max(1.0, 1.0 * abs(w1) + 5.0 * abs(w5) + 20.0 * abs(w20))
     min_req_score = (cash_threshold / 252.0) * weighted_days
 
+    cache_key = _get_cache_key()
+    sim_cache_sig = (
+        cache_key,
+        str(criteria),
+        int(top_n),
+        round(float(w1), 4),
+        round(float(w5), 4),
+        round(float(w20), 4),
+        round(float(cash_threshold), 2),
+    )
+    if pivot is None and precalc is None and sim_cache_sig in _SIM_RESULT_CACHE:
+        return _SIM_RESULT_CACHE[sim_cache_sig]
+
     if pivot is None:
-        check_and_update_etf_data()
-        try:
-            with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
-                cache_key = f.read().strip()
-        except:
-            cache_key = "0"
-            
+        check_and_update_etf_data(force_live=False)
+        cache_key = _get_cache_key()
         pivot = get_cached_etf_pivot(cache_key)
-    
+
     if pivot is None:
         return {}
-        
+
     dates = pivot.index.tolist()
-    if len(dates) < 6:
+    n_dates = len(dates)
+    if n_dates < 6:
         return {}
-        
-    etf_normalized = {ticker: [100.0] * len(dates) for ticker in pivot.columns}
-    strategy_returns = [100.0] * len(dates)
-    selected_etf = [""] * len(dates)
-    selected_etf_lists = [[] for _ in range(len(dates))]
-    
-    # Calculate ETF individual normalized base 100
-    for ticker in pivot.columns:
-        base_price = float(pivot[ticker].iloc[0])
-        for i, date in enumerate(dates):
-            val = (pivot[ticker].iloc[i] / base_price) * 100.0 if base_price > 0 else 100.0
-            etf_normalized[ticker][i] = sanitize_val(val, 100.0)
+
+    cols = list(pivot.columns)
+    n_cols = len(cols)
+    col_to_idx = {c: idx for idx, c in enumerate(cols)}
+    pivot_arr = precalc.get('pivot_arr') if (precalc and 'pivot_arr' in precalc) else pivot.to_numpy(dtype=float)
+
+    etf_normalized = precalc.get('etf_norm') if (precalc and 'etf_norm' in precalc) else None
+    if etf_normalized is None:
+        etf_normalized = {}
+        for c_idx, ticker in enumerate(cols):
+            base_price = float(pivot_arr[0, c_idx])
+            if base_price > 0:
+                norm_arr = (pivot_arr[:, c_idx] / base_price) * 100.0
+                etf_normalized[ticker] = [sanitize_val(v, 100.0) for v in norm_arr.tolist()]
+            else:
+                etf_normalized[ticker] = [100.0] * n_dates
 
     if precalc:
-        ret_1d_df = precalc.get('r1')
-        ret_5d_df = precalc.get('r5')
-        ret_20d_df = precalc.get('r20')
-        rolling_std_df = precalc.get('rstd')
+        r1_arr = precalc.get('r1_arr')
+        r5_arr = precalc.get('r5_arr')
+        r20_arr = precalc.get('r20_arr')
+        rstd_arr = precalc.get('rstd_arr')
     else:
-        ret_1d_df = pivot.pct_change(1) * 100
-        ret_5d_df = pivot.pct_change(5) * 100
-        ret_20d_df = pivot.pct_change(20) * 100
-        rolling_std_df = (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None
+        r1_arr = (pivot.pct_change(1) * 100.0).to_numpy(dtype=float)
+        r5_arr = (pivot.pct_change(5) * 100.0).to_numpy(dtype=float)
+        r20_arr = (pivot.pct_change(20) * 100.0).to_numpy(dtype=float)
+        rstd_arr = ((pivot.pct_change() * 100.0).rolling(window=21).std()).to_numpy(dtype=float) if criteria == "sharpe" else None
 
+    strategy_returns = [100.0] * n_dates
+    selected_etf = [""] * n_dates
+    selected_etf_lists = [[] for _ in range(n_dates)]
     current_targets = []
-    
-    for i in range(len(dates)):
+    use_sharpe = (criteria == "sharpe" and rstd_arr is not None)
+
+    for i in range(n_dates):
         if i < 21:
             selected_etf[i] = "Waiting"
             selected_etf_lists[i] = ["Waiting"]
             continue
-            
+
         scores = []
-        for ticker in pivot.columns:
-            try:
-                r1 = ret_1d_df[ticker].iloc[i]
-                r5 = ret_5d_df[ticker].iloc[i]
-                r20 = ret_20d_df[ticker].iloc[i]
-                
-                if pd.isna(r1) or pd.isna(r5) or pd.isna(r20):
-                    continue
-                    
-                score = (r1 * w1) + (r5 * w5) + (r20 * w20)
-                final_score = score
-                
-                if criteria == "sharpe" and rolling_std_df is not None:
-                    std_dev = rolling_std_df[ticker].iloc[i]
-                    if not pd.isna(std_dev) and std_dev > 0:
-                        final_score = score / std_dev
-                
-                scores.append((ticker, final_score, score))
-            except:
+        r1_row = r1_arr[i]
+        r5_row = r5_arr[i]
+        r20_row = r20_arr[i]
+        std_row = rstd_arr[i] if use_sharpe else None
+
+        for c_idx in range(n_cols):
+            r1 = r1_row[c_idx]
+            r5 = r5_row[c_idx]
+            r20 = r20_row[c_idx]
+            if math.isnan(r1) or math.isnan(r5) or math.isnan(r20):
                 continue
-                
-        # Sort by final_score descending
+
+            score = (r1 * w1) + (r5 * w5) + (r20 * w20)
+            final_score = score
+            if use_sharpe:
+                std_dev = std_row[c_idx]
+                if not math.isnan(std_dev) and std_dev > 0:
+                    final_score = score / std_dev
+
+            scores.append((cols[c_idx], final_score, score))
+
         scores.sort(key=lambda x: x[1], reverse=True)
-        
-        # Select top_n tickers (연환산 기대수익률이 cash_threshold% 이하이면 ETF 미선택 및 CASH 보유)
+
         top_candidates = scores[:top_n]
         selected_tickers = []
         for tkr, scr, raw_mom_score in top_candidates:
@@ -550,36 +612,34 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
                 selected_tickers.append("CASH")
             else:
                 selected_tickers.append(tkr)
-                
-        # If no valid tickers or less than top_n, fill remaining with CASH
+
         while len(selected_tickers) < top_n:
             selected_tickers.append("CASH")
-            
+
         selected_etf[i] = ", ".join(selected_tickers)
         selected_etf_lists[i] = selected_tickers
-        
-        # Apply return from current_targets (selected at i-1)
+
         if current_targets:
             port_ret = 0.0
+            prev_row = pivot_arr[i - 1]
+            curr_row = pivot_arr[i]
             for tgt in current_targets:
-                if tgt in pivot.columns:
-                    prev_p = float(pivot[tgt].iloc[i-1])
-                    curr_p = float(pivot[tgt].iloc[i])
+                c_idx = col_to_idx.get(tgt)
+                if c_idx is not None:
+                    prev_p = prev_row[c_idx]
+                    curr_p = curr_row[c_idx]
                     d_ret = (curr_p - prev_p) / prev_p if prev_p > 0 else 0.0
                     port_ret += d_ret
-                else:
-                    # CASH or Waiting: 0 return
-                    port_ret += 0.0
             avg_daily_ret = port_ret / len(current_targets)
-            strategy_returns[i] = sanitize_val(strategy_returns[i-1] * (1 + avg_daily_ret), 100.0)
+            strategy_returns[i] = sanitize_val(strategy_returns[i - 1] * (1.0 + avg_daily_ret), 100.0)
         else:
-            strategy_returns[i] = sanitize_val(strategy_returns[i-1], 100.0)
-            
+            strategy_returns[i] = sanitize_val(strategy_returns[i - 1], 100.0)
+
         current_targets = selected_tickers
 
     kospi_series = precalc.get("kospi") if (precalc and "kospi" in precalc) else get_kospi_aligned_series(dates)
 
-    return {
+    result_obj = {
         "dates": dates,
         "strategy": strategy_returns,
         "kospi": kospi_series,
@@ -587,6 +647,11 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
         "selected_etf_list": selected_etf_lists,
         "etfs": etf_normalized
     }
+    if len(_SIM_RESULT_CACHE) > 128:
+        _SIM_RESULT_CACHE.clear()
+    _SIM_RESULT_CACHE[sim_cache_sig] = result_obj
+    return result_obj
+
 
 def run_bulk_simulation(criteria="momentum", top_n=1, cash_threshold=10.0):
     try:
@@ -599,25 +664,37 @@ def run_bulk_simulation(criteria="momentum", top_n=1, cash_threshold=10.0):
     except (ValueError, TypeError):
         cash_threshold = 10.0
 
-    check_and_update_etf_data()
-    try:
-        with open(os.path.join(DATA_DIR, 'last_update.txt'), 'r') as f:
-            cache_key = f.read().strip()
-    except:
-        cache_key = "0"
-        
+    check_and_update_etf_data(force_live=False)
+    cache_key = _get_cache_key()
+    bulk_cache_sig = (cache_key, str(criteria), int(top_n), round(float(cash_threshold), 2))
+    if bulk_cache_sig in _BULK_MODELS_CACHE:
+        return _BULK_MODELS_CACHE[bulk_cache_sig]
+
     pivot = get_cached_etf_pivot(cache_key)
     if pivot is None:
         return []
 
-    kospi_aligned = get_kospi_aligned_series(pivot.index.tolist())
+    dates = pivot.index.tolist()
+    kospi_aligned = get_kospi_aligned_series(dates)
+    pivot_arr = pivot.to_numpy(dtype=float)
+    cols = list(pivot.columns)
+    etf_norm = {}
+    for c_idx, ticker in enumerate(cols):
+        base_price = float(pivot_arr[0, c_idx])
+        if base_price > 0:
+            norm_arr = (pivot_arr[:, c_idx] / base_price) * 100.0
+            etf_norm[ticker] = [sanitize_val(v, 100.0) for v in norm_arr.tolist()]
+        else:
+            etf_norm[ticker] = [100.0] * len(dates)
 
-    # Pre-calculate returns dataframes
+    # Pre-calculate NumPy arrays once for all 26 models
     precalc = {
-        'r1': pivot.pct_change(1) * 100,
-        'r5': pivot.pct_change(5) * 100,
-        'r20': pivot.pct_change(20) * 100,
-        'rstd': (pivot.pct_change() * 100).rolling(window=21).std() if criteria == "sharpe" else None,
+        'pivot_arr': pivot_arr,
+        'etf_norm': etf_norm,
+        'r1_arr': (pivot.pct_change(1) * 100.0).to_numpy(dtype=float),
+        'r5_arr': (pivot.pct_change(5) * 100.0).to_numpy(dtype=float),
+        'r20_arr': (pivot.pct_change(20) * 100.0).to_numpy(dtype=float),
+        'rstd_arr': ((pivot.pct_change() * 100.0).rolling(window=21).std()).to_numpy(dtype=float) if criteria == "sharpe" else None,
         'kospi': kospi_aligned,
     }
 
@@ -840,6 +917,9 @@ def run_bulk_simulation(criteria="momentum", top_n=1, cash_threshold=10.0):
             "selected_etf_list": sim_data.get("selected_etf_list", [])
         })
         
+    if len(_BULK_MODELS_CACHE) > 16:
+        _BULK_MODELS_CACHE.clear()
+    _BULK_MODELS_CACHE[bulk_cache_sig] = models
     return models
 
 

@@ -582,30 +582,76 @@ export default function ETFStrategyView({
 
 
   useEffect(() => {
+    try {
+      const cachedData = localStorage.getItem('etf_strategy_cached_data_v1');
+      const cachedSim = localStorage.getItem('etf_strategy_cached_sim_v1');
+      if (cachedData && data.length === 0) {
+        const parsed = JSON.parse(cachedData);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setData(parsed);
+          setLoading(false);
+        }
+      }
+      if (cachedSim && !simData) {
+        const parsedSim = JSON.parse(cachedSim);
+        if (parsedSim && Array.isArray(parsedSim.dates)) {
+          setSimData(parsedSim);
+        }
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
     let isMounted = true;
     let pollInterval: NodeJS.Timeout;
 
-    const fetchData = async () => {
-      if (!pollInterval) setLoading(true);
+    const fetchWithRetry = async (url: string, retries = 2): Promise<Response> => {
+      let lastErr: any;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (res.ok) return res;
+          lastErr = new Error(`HTTP ${res.status}`);
+        } catch (err) {
+          lastErr = err;
+        }
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+        }
+      }
+      throw lastErr;
+    };
+
+    const fetchData = async (isInitial = false) => {
+      if (isInitial && data.length === 0) setLoading(true);
       try {
         const ts = Date.now();
         const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&cash_threshold=${cashThreshold}&t=${ts}`;
-        const [stratRes, simRes] = await Promise.all([
-          fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }),
-          fetch(`/api/etf/simulation${query}`, { cache: 'no-store' })
+        const [stratRes, simRes] = await Promise.allSettled([
+          fetchWithRetry(`/api/etf/strategy${query}`, 2),
+          fetchWithRetry(`/api/etf/simulation${query}`, 2)
         ]);
-        if (!stratRes.ok || !simRes.ok) {
-          console.error('ETF Strategy API Error:', stratRes.statusText, simRes.statusText);
-          if (isMounted) setLoading(false);
-          return;
+
+        if (stratRes.status === 'fulfilled' && stratRes.value.ok) {
+          const stratJson = await stratRes.value.json();
+          if (isMounted && Array.isArray(stratJson) && stratJson.length > 0) {
+            setData(stratJson);
+            try { localStorage.setItem('etf_strategy_cached_data_v1', JSON.stringify(stratJson)); } catch {}
+          }
+        } else {
+          console.warn('ETF Strategy fetch warning:', stratRes.status === 'rejected' ? stratRes.reason : 'Not OK');
         }
-        const stratJson = await stratRes.json();
-        const simJson = await simRes.json();
-        
-        if (isMounted && Array.isArray(stratJson) && stratJson.length > 0) {
-          setData(stratJson);
-          setSimData(simJson);
+
+        if (simRes.status === 'fulfilled' && simRes.value.ok) {
+          const simJson = await simRes.value.json();
+          if (isMounted && simJson && Array.isArray(simJson.dates)) {
+            setSimData(simJson);
+            try { localStorage.setItem('etf_strategy_cached_sim_v1', JSON.stringify(simJson)); } catch {}
+          }
+        } else {
+          console.warn('ETF Simulation fetch warning:', simRes.status === 'rejected' ? simRes.reason : 'Not OK');
         }
+
         if (isMounted) {
           fetchKisEtfAccount(false);
         }
@@ -616,9 +662,9 @@ export default function ETFStrategyView({
       }
     };
 
-    fetchData();
+    fetchData(true);
     pollInterval = setInterval(() => {
-      if (!document.hidden) fetchData();
+      if (!document.hidden) fetchData(false);
     }, 30000);
 
     return () => {
@@ -821,8 +867,37 @@ export default function ETFStrategyView({
     };
   }, [simData, period]);
 
-  if (loading) return <div className="p-4 animate-pulse text-xl font-bold">ETF 전략 분석 및 백테스트 실행 중...</div>;
-  if (!data || data.length === 0) return <div className="p-4 text-red-500">Failed to load ETF Strategy data.</div>;
+  if (loading && (!data || data.length === 0)) {
+    return <div className="p-4 animate-pulse text-xl font-bold text-indigo-300">⚡ ETF 전략 분석 및 백테스트 고속 로딩 중...</div>;
+  }
+  if (!data || data.length === 0) {
+    return (
+      <div className="p-6 bg-gray-900/80 border border-indigo-700/60 rounded-xl text-center space-y-3 my-4">
+        <div className="text-amber-400 font-bold text-base">⏳ ETF 투자전략 데이터를 동기화하고 있습니다.</div>
+        <div className="text-xs text-gray-400">일시적인 네트워크 지연이 발생했을 수 있습니다. 아래 버튼을 누르면 즉시 다시 불러옵니다.</div>
+        <button
+          onClick={() => {
+            setLoading(true);
+            const ts = Date.now();
+            const query = `?criteria=${criteria}&top_n=${topN}&w1=${activeWeights.w1}&w5=${activeWeights.w5}&w20=${activeWeights.w20}&cash_threshold=${cashThreshold}&t=${ts}`;
+            Promise.all([
+              fetch(`/api/etf/strategy${query}`, { cache: 'no-store' }).then(r => r.json()),
+              fetch(`/api/etf/simulation${query}`, { cache: 'no-store' }).then(r => r.json()),
+            ])
+              .then(([sData, simJ]) => {
+                if (Array.isArray(sData) && sData.length > 0) setData(sData);
+                if (simJ && Array.isArray(simJ.dates)) setSimData(simJ);
+              })
+              .catch(() => {})
+              .finally(() => setLoading(false));
+          }}
+          className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow"
+        >
+          🔄 즉시 다시 불러오기
+        </button>
+      </div>
+    );
+  }
 
   const topETF = data[0];
   // 연환산 기대수익률이 cashThreshold%(디폴트 연 10%) 이하이거나 final_score <= 0일 때 ETF를 선택하지 않고 CASH 보유
