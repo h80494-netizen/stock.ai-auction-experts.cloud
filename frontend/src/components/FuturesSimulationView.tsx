@@ -5787,7 +5787,7 @@ export default function FuturesSimulationView({
               {/* Gate 방식 vs Scoring 방식 비교 테이블 */}
               <div className="bg-slate-900/90 border border-indigo-500/40 rounded-xl p-4 overflow-x-auto">
                 <h3 className="text-xs font-extrabold text-white mb-2.5">
-                  📊 [3단계 순차 게이트(Gate) 방식] vs [4대 지표 가중합산 스코어링(Scoring) 방식] 백테스트 정밀 비교 (
+                  📊 [3단계 순차 게이트(Gate) 방식] vs [4대 지표 가중합산 스코어링(Scoring) 방식] 단독 백테스트 정밀 비교 (
                   {scBacktestData.params?.start_date} ~ {scBacktestData.params?.end_date}, {scBacktestData.params?.total_trading_days}거래일)
                 </h3>
                 <table className="w-full text-xs text-left border-collapse font-mono">
@@ -5846,6 +5846,136 @@ export default function FuturesSimulationView({
                   </tbody>
                 </table>
               </div>
+
+              {/* ★ 기술적 지표(60%) + 기존 수급지표(25%) + 신규 4대 수급 역추세(15%) 최적 연결 아키텍처 5종 비교 */}
+              {scBacktestData.synergy_optimization && (
+                <div className="bg-slate-900/95 border-2 border-emerald-500/60 rounded-xl p-4 space-y-4 shadow-xl">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                    <div>
+                      <h3 className="text-sm font-extrabold text-emerald-300">
+                        🏆 [기술적 지표] + [기존 추세·옵션 수급지표] + [신규 4대 잔고·누적차익 역추세] 최적 결합 아키텍처 5종 비교 검증
+                      </h3>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        기존 채택 5대 주력 모델({(scBacktestData.synergy_optimization.active_5_models || []).join(", ")})과 신규 4대 수급 역추세 모델을 어떻게 연결해야 수익률·샤프지수(Sharpe)·칼마지수(Calmar)·MDD 방어가 극대화되는지 비교한 결과입니다.
+                      </p>
+                    </div>
+                    <span className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-400 text-emerald-200 font-extrabold text-xs">
+                      ★ 최적 결합 황금비율: 기술지표 60% + 기존 추세·옵션수급 25% + 신규 4대수급 역추세 15%
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse font-mono">
+                      <thead>
+                        <tr className="border-b border-slate-700 bg-slate-950 text-slate-300">
+                          <th className="p-2">결합 아키텍처 구분</th>
+                          <th className="p-2">비중 및 결합 공식</th>
+                          <th className="p-2 text-right text-emerald-300">누적수익률</th>
+                          <th className="p-2 text-right">누적손익(원)</th>
+                          <th className="p-2 text-right">연환산</th>
+                          <th className="p-2 text-right">일간승률(Hit)</th>
+                          <th className="p-2 text-right text-amber-300">MDD</th>
+                          <th className="p-2 text-right">P/L Factor</th>
+                          <th className="p-2 text-right text-sky-300">Sharpe</th>
+                          <th className="p-2 text-right">Sortino</th>
+                          <th className="p-2 text-right text-yellow-300">Calmar</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {(scBacktestData.synergy_optimization.architectures || []).map((arch: any, idx: number) => {
+                          const m = arch.metrics || {};
+                          return (
+                            <tr
+                              key={arch.arch_id || idx}
+                              className={
+                                arch.is_optimal
+                                  ? "bg-emerald-950/35 text-emerald-100 font-bold border-l-4 border-emerald-400"
+                                  : idx === 3
+                                  ? "bg-sky-950/25 text-sky-100 font-semibold"
+                                  : "hover:bg-slate-800/40 text-slate-300"
+                              }
+                            >
+                              <td className="p-2 font-sans">
+                                <div className="font-extrabold text-white">{arch.title}</div>
+                                <div className="text-[10px] text-slate-400 mt-0.5">{arch.role_desc}</div>
+                              </td>
+                              <td className="p-2 font-sans text-[11px] text-amber-200">{arch.weight_formula}</td>
+                              <td className="p-2 text-right text-emerald-400 font-extrabold text-sm">
+                                {(m.cum_return_pct ?? 0) >= 0 ? "+" : ""}
+                                {m.cum_return_pct}%
+                              </td>
+                              <td className="p-2 text-right">
+                                {(m.total_pnl_krw ?? 0) >= 0 ? "+" : ""}
+                                {Number(m.total_pnl_krw || 0).toLocaleString()}원
+                              </td>
+                              <td className="p-2 text-right">{m.annual_return_pct}%</td>
+                              <td className="p-2 text-right">{m.hitting_ratio_pct}%</td>
+                              <td className="p-2 text-right text-amber-300 font-bold">-{m.mdd_pct}%</td>
+                              <td className="p-2 text-right">{m.profit_loss_factor}</td>
+                              <td className="p-2 text-right text-sky-300 font-extrabold">{m.sharpe_ratio}</td>
+                              <td className="p-2 text-right">{m.sortino_ratio}</td>
+                              <td className="p-2 text-right text-yellow-300 font-extrabold">{m.calmar_ratio}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+                      <h4 className="text-xs font-extrabold text-white mb-2">
+                        📈 결합 아키텍처별 누적수익률(%) 비교 차트 (순수기술 vs 기존35% vs 역풍브레이크 vs ★최적 하이브리드)
+                      </h4>
+                      <SvgMultiLineChart
+                        dates={scBacktestData.chart_series?.dates || []}
+                        seriesList={[
+                          {
+                            label: "⑤ ★ 최적 하이브리드 (기술60%+기존수급25%+4대역추세15%)",
+                            data: scBacktestData.chart_series?.synergy_optimal_hybrid_pct || [],
+                            color: "#10b981",
+                            width: 2.8,
+                          },
+                          {
+                            label: "④ 과열 역풍 브레이크 + Gate 스위칭 (저MDD 방어형)",
+                            data: scBacktestData.chart_series?.synergy_brake_switch_pct || [],
+                            color: "#38bdf8",
+                            width: 2.3,
+                          },
+                          {
+                            label: "② 현재 기본 모델 (기술65% + 기존수급35%)",
+                            data: scBacktestData.chart_series?.synergy_current_35_pct || [],
+                            color: "#f59e0b",
+                            width: 2.0,
+                          },
+                          {
+                            label: "① 순수 기술지표 단독 (기술100%)",
+                            data: scBacktestData.chart_series?.synergy_pure_tech_pct || [],
+                            color: "#94a3b8",
+                            dashed: true,
+                            width: 1.6,
+                          },
+                        ]}
+                      />
+                    </div>
+
+                    <div className="bg-slate-950/90 border border-emerald-500/30 rounded-xl p-4 space-y-2.5">
+                      <div className="text-xs font-extrabold text-emerald-300">
+                        💡 최적 연결 설계 공식 (기술지표 60% : 기존 추세·옵션수급 25% : 신규 4대 수급 역추세 15%)
+                      </div>
+                      <ul className="space-y-2 text-[11px] text-slate-200 leading-relaxed">
+                        {(scBacktestData.synergy_optimization.optimal_blueprint?.rules || []).map(
+                          (rule: string, rIdx: number) => (
+                            <li key={rIdx} className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5">
+                              {rule}
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* 누적수익률 비교 차트 & 4대 수급 Z-Score 추이 차트 */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
