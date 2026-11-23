@@ -739,6 +739,9 @@ export default function FuturesSimulationView({
   const [scLoading, setScLoading] = useState<boolean>(false);
   const [scTradeTab, setScTradeTab] = useState<"GATE" | "SCORING">("GATE");
   const [step5SelectedIndicator, setStep5SelectedIndicator] = useState<string>("open_interest");
+  const [scVix20Thresh, setScVix20Thresh] = useState<number>(16.0);
+  const [scEnergyThresh, setScEnergyThresh] = useState<number>(1.35);
+  const [scOiAbsThresh, setScOiAbsThresh] = useState<number>(240000);
   const [kisOrdDvsnInput, setKisOrdDvsnInput] = useState<string>("02");
   const [kisOrderLoading, setKisOrderLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
@@ -989,6 +992,9 @@ export default function FuturesSimulationView({
             point_value_krw: pointValueKrw,
             initial_capital_krw: initialCapitalKrw,
             contracts_per_trade: scContracts,
+            vix_20ma_threshold: scVix20Thresh,
+            energy_max_threshold: scEnergyThresh,
+            oi_abs_max_threshold: scOiAbsThresh,
           }),
         });
         if (res?.success && res.data) {
@@ -1012,6 +1018,9 @@ export default function FuturesSimulationView({
       pointValueKrw,
       initialCapitalKrw,
       scContracts,
+      scVix20Thresh,
+      scEnergyThresh,
+      scOiAbsThresh,
     ]
   );
 
@@ -6148,11 +6157,11 @@ export default function FuturesSimulationView({
                   시총/거래대금 대비 120일 롤링 Z-Score 표준화 · 공매도/신용 T+2 shift(2) 시점 보정 · 동시만기일(D-3~D+2) 진입제한 및 누적차익 리셋 · 3단계 Gate 방식 vs 가중합산 Scoring 방식 비교 및 6개월 슬라이딩 Walk-Forward 검증
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                 {[
+                  { label: "2013~현재 (박스권+추세 14년)", dt: "2013-01-02" },
                   { label: "최근 10년 (2016~현재)", dt: "2016-01-04" },
                   { label: "최근 3년 (2023~현재)", dt: "2023-01-02" },
-                  { label: "최근 1년 (2025~현재)", dt: "2025-01-02" },
                   { label: "2026년 YTD", dt: "2026-01-02" },
                 ].map((b) => (
                   <button
@@ -6253,6 +6262,42 @@ export default function FuturesSimulationView({
                     value={scSlippagePt}
                     onChange={(e) => setScSlippagePt(Number(e.target.value) || 0.05)}
                     className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-slate-300 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-amber-300 font-bold mb-1">📦 박스권 VIX 20MA(≤)</label>
+                  <input
+                    type="number"
+                    step={0.5}
+                    min={10.0}
+                    max={30.0}
+                    value={scVix20Thresh}
+                    onChange={(e) => setScVix20Thresh(Number(e.target.value) || 16.0)}
+                    className="w-20 bg-slate-950 border border-amber-500/60 rounded px-2.5 py-1.5 text-amber-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-amber-300 font-bold mb-1">📦 변동×거래량 에너지(≤)</label>
+                  <input
+                    type="number"
+                    step={0.05}
+                    min={0.5}
+                    max={3.0}
+                    value={scEnergyThresh}
+                    onChange={(e) => setScEnergyThresh(Number(e.target.value) || 1.35)}
+                    className="w-20 bg-slate-950 border border-amber-500/60 rounded px-2.5 py-1.5 text-amber-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-amber-300 font-bold mb-1">📦 미결제 절대수준(≤)</label>
+                  <input
+                    type="number"
+                    step={10000}
+                    min={100000}
+                    max={400000}
+                    value={scOiAbsThresh}
+                    onChange={(e) => setScOiAbsThresh(Number(e.target.value) || 240000)}
+                    className="w-24 bg-slate-950 border border-amber-500/60 rounded px-2.5 py-1.5 text-amber-300 font-mono font-bold"
                   />
                 </div>
                 <label className="flex items-center gap-1.5 text-amber-300 font-bold cursor-pointer pb-1.5">
@@ -6477,20 +6522,20 @@ export default function FuturesSimulationView({
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
                     <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
                       <h4 className="text-xs font-extrabold text-white mb-2">
-                        📈 결합 아키텍처별 누적수익률(%) 비교 차트 (순수기술 vs 기존35% vs 역풍브레이크 vs ★최적 하이브리드)
+                        📈 결합 아키텍처별 누적수익률(%) 비교 차트 (★ ⑥ VIX·에너지·OI·PCR 박스권 자동감지 역추세 리밸런싱 vs ⑤ 하이브리드 vs ② 현재기본)
                       </h4>
                       <SvgMultiLineChart
                         dates={scBacktestData.chart_series?.dates || []}
                         seriesList={[
                           {
-                            label: "⑤ ★ 최적 하이브리드 (기술60%+기존수급25%+4대역추세15%)",
-                            data: scBacktestData.chart_series?.synergy_optimal_hybrid_pct || [],
+                            label: "⑥ ★ 박스권 자동감지 역추세 리밸런싱 (VIX 20MA·에너지·OI·PCR)",
+                            data: scBacktestData.chart_series?.synergy_vix_range_auto_pct || [],
                             color: "#10b981",
-                            width: 2.8,
+                            width: 2.9,
                           },
                           {
-                            label: "④ 과열 역풍 브레이크 + Gate 스위칭 (저MDD 방어형)",
-                            data: scBacktestData.chart_series?.synergy_brake_switch_pct || [],
+                            label: "⑤ 하이브리드 (기술60%+기존수급25%+4대역추세15%)",
+                            data: scBacktestData.chart_series?.synergy_optimal_hybrid_pct || [],
                             color: "#38bdf8",
                             width: 2.3,
                           },
@@ -6513,7 +6558,7 @@ export default function FuturesSimulationView({
 
                     <div className="bg-slate-950/90 border border-emerald-500/30 rounded-xl p-4 space-y-2.5">
                       <div className="text-xs font-extrabold text-emerald-300">
-                        💡 최적 연결 설계 공식 (기술지표 60% : 기존 추세·옵션수급 25% : 신규 4대 수급 역추세 15%)
+                        💡 최적 연결 설계 공식 (기술 60% : 기존수급 25% : 4대수급 15% + ★ VIX 20MA 박스권 자동감지 스위칭)
                       </div>
                       <ul className="space-y-2 text-[11px] text-slate-200 leading-relaxed">
                         {(scBacktestData.synergy_optimization.optimal_blueprint?.rules || []).map(
@@ -6526,6 +6571,82 @@ export default function FuturesSimulationView({
                       </ul>
                     </div>
                   </div>
+
+                  {/* 📦 5대 복합 지표(20일 이평 VIX · 변동성×거래량 에너지 · 미결제 절대수준 · PCR · 4대수급) 기반 박스권 자동 감지 vs 추세장 분리 성과 분석 보드 */}
+                  {scBacktestData.synergy_optimization.range_vs_trend_breakdown && (
+                    <div className="bg-slate-950/95 border border-amber-500/50 rounded-xl p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                        <div>
+                          <h4 className="text-xs font-extrabold text-amber-300">
+                            📦 박스권 자동 감지 역추세 비중 리밸런싱 모니터 (① 20일 이평 VIX ≤ {scBacktestData.synergy_optimization.range_vs_trend_breakdown.vix_20ma_threshold}pt · ② 변동×거래량 에너지 ≤ {scBacktestData.synergy_optimization.range_vs_trend_breakdown.energy_max_threshold} · ③ 미결제 절대수준 ≤ {Number(scBacktestData.synergy_optimization.range_vs_trend_breakdown.oi_abs_max_threshold).toLocaleString()}계약 · ④ PCR 밴드)
+                          </h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            전체 {scBacktestData.synergy_optimization.range_vs_trend_breakdown.total_days}거래일 중{" "}
+                            <strong className="text-amber-300">
+                              박스권 감지 {scBacktestData.synergy_optimization.range_vs_trend_breakdown.detected_range_days}일 (
+                              {scBacktestData.synergy_optimization.range_vs_trend_breakdown.detected_range_ratio_pct}%)
+                            </strong>{" "}
+                            / 추세장 감지 {scBacktestData.synergy_optimization.range_vs_trend_breakdown.detected_trend_days}일 | 현재 장세 판정:{" "}
+                            <strong className="text-emerald-300">
+                              {scBacktestData.synergy_optimization.range_vs_trend_breakdown.latest_regime?.regime_label} (VIX 20MA:{" "}
+                              {scBacktestData.synergy_optimization.range_vs_trend_breakdown.latest_regime?.vix_20ma}pt · 에너지:{" "}
+                              {scBacktestData.synergy_optimization.range_vs_trend_breakdown.latest_regime?.vol_volume_energy} · OI:{" "}
+                              {Number(scBacktestData.synergy_optimization.range_vs_trend_breakdown.latest_regime?.open_interest || 0).toLocaleString()}계약)
+                            </strong>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs text-left border-collapse font-mono">
+                          <thead>
+                            <tr className="border-b border-slate-700 bg-slate-900 text-slate-300">
+                              <th className="p-2">운용 모드 비교</th>
+                              <th className="p-2 text-right text-emerald-300">전체 기간 누적수익률</th>
+                              <th className="p-2 text-right text-amber-300">📦 박스권 감지 구간 수익률</th>
+                              <th className="p-2 text-right text-sky-300">🚀 추세장 감지 구간 수익률</th>
+                              <th className="p-2 text-right">포트폴리오 MDD</th>
+                              <th className="p-2 text-right">Sharpe Ratio</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800">
+                            {(scBacktestData.synergy_optimization.range_vs_trend_breakdown.regime_returns_comparison || []).map(
+                              (rc: any, idx: number) => (
+                                <tr
+                                  key={idx}
+                                  className={
+                                    idx === 2
+                                      ? "bg-emerald-950/35 text-emerald-200 font-bold border-l-4 border-emerald-400"
+                                      : "text-slate-300"
+                                  }
+                                >
+                                  <td className="p-2 font-sans font-bold text-white">{rc.mode_title}</td>
+                                  <td className="p-2 text-right text-emerald-400 font-extrabold">
+                                    {rc.total_return_pct >= 0 ? "+" : ""}
+                                    {rc.total_return_pct}%
+                                  </td>
+                                  <td
+                                    className={`p-2 text-right font-extrabold ${
+                                      rc.range_regime_return_pct >= 0 ? "text-emerald-300" : "text-rose-400"
+                                    }`}
+                                  >
+                                    {rc.range_regime_return_pct >= 0 ? "+" : ""}
+                                    {rc.range_regime_return_pct}%
+                                  </td>
+                                  <td className="p-2 text-right text-sky-300 font-extrabold">
+                                    {rc.trend_regime_return_pct >= 0 ? "+" : ""}
+                                    {rc.trend_regime_return_pct}%
+                                  </td>
+                                  <td className="p-2 text-right text-amber-300">-{rc.mdd_pct}%</td>
+                                  <td className="p-2 text-right text-indigo-300 font-extrabold">{rc.sharpe_ratio}</td>
+                                </tr>
+                              )
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
 
                   {/* 🛡️ 과최적화(Overfitting) 방지 감사 & Out-of-Sample Forward 일관성 검증 패널 */}
                   {scBacktestData.synergy_optimization.overfitting_audit && (

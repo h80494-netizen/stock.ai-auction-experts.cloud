@@ -128,11 +128,16 @@ class SupplyContrarianBacktestRequest(BaseModel):
     point_value_krw: float = 50000.0
     initial_capital_krw: float = 100000000.0
     contracts_per_trade: int = 2
+    vix_20ma_threshold: float = 16.0
+    energy_max_threshold: float = 1.35
+    oi_abs_max_threshold: float = 240000.0
+    pcr_band_low: float = 0.70
+    pcr_band_high: float = 2.60
 
 
 @router.post("/supply-contrarian-backtest")
 def api_run_supply_contrarian_backtest(req: SupplyContrarianBacktestRequest) -> Dict[str, Any]:
-    """① 공매도잔고(T+2), ② 신용잔고(T+2), ③ 미결제약정(OI), ④ 5일·20일 누적 차익거래 4대 수급 역추세 백테스트(Gate vs Scoring + 6M Walk-Forward)를 실행합니다."""
+    """① 공매도잔고(T+2), ② 신용잔고(T+2), ③ 미결제약정(OI), ④ 5일·20일 누적 차익거래 4대 수급 역추세 백테스트(Gate vs Scoring + VIX 20MA 박스권 자동감지 역추세 리밸런싱)를 실행합니다."""
     try:
         from supply_contrarian_simulator import run_4supply_contrarian_backtest
 
@@ -148,6 +153,11 @@ def api_run_supply_contrarian_backtest(req: SupplyContrarianBacktestRequest) -> 
             point_value_krw=req.point_value_krw,
             initial_capital_krw=req.initial_capital_krw,
             contracts_per_trade=req.contracts_per_trade,
+            vix_20ma_threshold=req.vix_20ma_threshold,
+            energy_max_threshold=req.energy_max_threshold,
+            oi_abs_max_threshold=req.oi_abs_max_threshold,
+            pcr_band_low=req.pcr_band_low,
+            pcr_band_high=req.pcr_band_high,
         )
         return {"success": bool(res.get("success")), "data": res}
     except Exception as e:

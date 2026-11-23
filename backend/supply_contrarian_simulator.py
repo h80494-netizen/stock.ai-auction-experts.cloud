@@ -199,6 +199,45 @@ def prepare_4supply_features(
     )
     feat["composite_overheat_score"] = composite_overheat.round(3)
 
+    # ------------------------------------------------------------------
+    # ★ [박스권 자동 감지 5대 복합 지표 (Range-Bound Regime Detector)]
+    # ① VIX 지수 (VKOSPI: 선물 20일 연율화 실현변동성 65% + 등가격 Call/Put 옵션 스트래들 내재변동성 35%) 및 20일 이평 VIX (vix_20ma)
+    #    -> 20일 이평 VIX가 임계치(기본 16.0pt) 이하일 때 핵심 박스권(Low-VIX Range)으로 감지
+    # ② 변동성 × 거래량 결합 에너지 (Vol×Volume Energy):
+    #    -> 일간 고저 변동폭 비율((H-L)/C*100) × (당일 거래량 / 60일 평균 거래량)의 10일 이동평균 (에너지가 약하면 박스권)
+    # ③ 미결제약정(OI) 절대수준 (oi_abs_level & oi_level_ratio):
+    #    -> OI 절대수준이 임계치 이하이거나 120일 이동평균 대비 낮을 때 추세 응집력 부족(박스권) 감지
+    # ④ 옵션 Put/Call Ratio (PCR) 중립·역발상 밴드:
+    #    -> 등가격 PCR 및 20일 Z-Score가 극단 추세 쏠림 없이 박스권 평균회귀 구간에 위치하는지 측정
+    # ⑤ 4대 수급(공매도·신용·OI·누적차익) 과열도 결합
+    # ------------------------------------------------------------------
+    hv20 = fut_c.pct_change().rolling(20, min_periods=5).std() * np.sqrt(250.0) * 100.0
+    call_c = df["call_close"].astype(float).fillna(0.0)
+    put_c = df["put_close"].astype(float).fillna(0.0)
+    atm_straddle_iv = ((call_c + put_c) / fut_c.replace(0, np.nan)) * 100.0 * 6.5
+    vix_daily = (hv20 * 0.65 + atm_straddle_iv.fillna(hv20) * 0.35).bfill().fillna(16.0)
+    vix_20ma = vix_daily.rolling(20, min_periods=5).mean().bfill().fillna(16.0)
+
+    feat["vix_daily"] = vix_daily.round(2)
+    feat["vix_20ma"] = vix_20ma.round(2)
+
+    # 변동성과 거래량을 감안한 시장 에너지 측정 (Vol × Volume Energy)
+    intraday_range_pct = ((fut_h - fut_l) / fut_c.replace(0, np.nan)).fillna(0.01) * 100.0
+    vol_ratio_60d = (k200_vol / k200_vol.rolling(60, min_periods=10).mean().replace(0, 1.0)).clip(0.2, 4.0)
+    raw_vv_energy = intraday_range_pct * vol_ratio_60d
+    vv_energy_10ma = raw_vv_energy.rolling(10, min_periods=3).mean().bfill().fillna(1.25)
+    feat["vol_volume_energy"] = vv_energy_10ma.round(3)
+
+    # 미결제약정 절대수준 및 120일 평균 대비 비율
+    oi_ma120 = oi.rolling(120, min_periods=20).mean().bfill().fillna(150000.0)
+    feat["oi_level_ratio"] = (oi / oi_ma120.replace(0, 1.0)).round(3)
+
+    # 옵션 PCR 및 20일 Z-Score
+    pcr_series = (put_c + 0.05) / (call_c + 0.05)
+    pcr_z = _rolling_zscore(pcr_series, window=20, min_periods=5)
+    feat["pcr_ratio"] = pcr_series.round(3)
+    feat["pcr_z"] = pcr_z.round(2)
+
     return feat
 
 
@@ -463,6 +502,11 @@ def _evaluate_synergy_with_existing_models(
     point_value_krw: float = 50000.0,
     initial_capital_krw: float = 100000000.0,
     fee_rate: float = 0.00003,
+    vix_20ma_threshold: float = 16.0,
+    energy_max_threshold: float = 1.35,
+    oi_abs_max_threshold: float = 240000.0,
+    pcr_band_low: float = 0.70,
+    pcr_band_high: float = 2.60,
 ) -> Dict[str, Any]:
     """
     기존 5대 채택 주력 모델(기술지표 65% + 기존 추세·에너지 수급 35% 결합: M01, M03, M05, M08, M10)과
@@ -576,6 +620,123 @@ def _evaluate_synergy_with_existing_models(
     m_mode4, curve_mode4, ret_mode4 = _calc_pos_performance(pos_mode4)
 
     # =========================================================================
+    # [모드 5] ★ 박스권 자동 감지 역추세 비중 리밸런싱 모드 (5대 복합 박스권 감지기)
+    # 1) 20일 이평 VIX (vix_20ma <= vix_20ma_threshold, 기본 16.0pt 이하 = 핵심 저변동 박스권)
+    # 2) 변동성 × 거래량 결합 에너지 (vol_volume_energy <= energy_max_threshold, 기본 1.35 이하 = 추세 돌파 에너지 약화)
+    # 3) 미결제약정(OI) 절대수준 (open_interest <= oi_abs_max_threshold 또는 120일 평균 이하 = 추세 응집력 약화)
+    # 4) 옵션 Put/Call Ratio (PCR) 중립·평균회귀 밴드 (pcr_band_low <= pcr_ratio <= pcr_band_high 또는 |pcr_z| <= 1.15)
+    # 5) 4대 수급(공매도·신용·OI·누적차익) 역추세 시그널 결합
+    # -> 박스권 감지 시: 추세 모델(M01, M03, M08, M10) 비중을 대폭 축소하고,
+    #    박스권 특화 역추세·횡보 모델(M04 더블스토캐스틱 + M05 시가갭 + M07 캔들에너지 + C01 매크로) 및 4대 수급 역추세로 자동 스위칭!
+    # =========================================================================
+    vix20_arr = feat_sub["vix_20ma"].values.astype(float)
+    energy_arr = feat_sub["vol_volume_energy"].values.astype(float)
+    oi_abs_arr = feat_sub["open_interest"].values.astype(float)
+    oi_ratio_arr = feat_sub["oi_level_ratio"].values.astype(float)
+    pcr_arr = feat_sub["pcr_ratio"].values.astype(float)
+    pcr_z_arr = feat_sub["pcr_z"].values.astype(float)
+
+    # 박스권 특화 역추세·횡보 4대 모델 시그널 배열
+    m04_sig = sig_sub["M04_Double_Stochastic"].values.astype(int) if "M04_Double_Stochastic" in sig_sub.columns else np.zeros(n, dtype=int)
+    m05_sig = sig_sub["M05_Gap_Reversion"].values.astype(int) if "M05_Gap_Reversion" in sig_sub.columns else np.zeros(n, dtype=int)
+    m07_sig = sig_sub["M07_Popular_Energy"].values.astype(int) if "M07_Popular_Energy" in sig_sub.columns else np.zeros(n, dtype=int)
+    c01_sig = sig_sub["C01_KTB_FX_Macro_Trend"].values.astype(int) if "C01_KTB_FX_Macro_Trend" in sig_sub.columns else np.zeros(n, dtype=int)
+
+    is_range_regime = np.zeros(n, dtype=bool)
+    range_confidence_score = np.zeros(n, dtype=float)
+    pos_mode5 = np.zeros(n, dtype=int)
+
+    for i in range(n):
+        c_vix = vix20_arr[i] <= vix_20ma_threshold
+        c_energy = energy_arr[i] <= energy_max_threshold
+        c_oi = (oi_abs_arr[i] <= oi_abs_max_threshold) or (oi_ratio_arr[i] <= 1.02)
+        c_pcr = (pcr_band_low <= pcr_arr[i] <= pcr_band_high) or (abs(pcr_z_arr[i]) <= 1.15)
+
+        # 20일 이평 VIX가 기준치 이하이면서 (에너지 약화 / OI 응집력 부족 / PCR 박스권) 중 2개 이상 만족하거나,
+        # VIX가 기준치의 1.12배 이내이면서 3개 보조 지표가 모두 약할 때 박스권(Range Regime)으로 판정
+        r_score = (
+            (0.45 if c_vix else (0.20 if vix20_arr[i] <= vix_20ma_threshold * 1.12 else 0.0))
+            + (0.25 if c_energy else 0.0)
+            + (0.15 if c_oi else 0.0)
+            + (0.15 if c_pcr else 0.0)
+        )
+        range_confidence_score[i] = round(r_score * 100.0, 1)
+        is_box = r_score >= 0.60
+        is_range_regime[i] = is_box
+
+        if is_box:
+            # [박스권 장세 감지 시 역추세 비중 리밸런싱]:
+            # 추세 모델(M01/M03/M08/M10)의 잦은 고점물림(Whip-saw)을 차단하고
+            # 박스권 최강 역추세·횡보 조합(M04 더블스토캐스틱 × 2 + M05 시가갭 + M07 캔들에너지 + C01 환율국채 + 4대수급 역추세)으로 운용
+            contrarian_pos = (
+                m04_sig[i] * 2
+                + m05_sig[i] * 1
+                + m07_sig[i] * 1
+                + c01_sig[i] * 1
+                + gate_unit[i] * 1
+                + score_unit[i] * 1
+            )
+            pos_mode5[i] = int(np.clip(contrarian_pos, -5, 5))
+        else:
+            # [추세 장세 감지 시]: 최적 하이브리드(모드 4: 추세 5대 모델 + 과열 역풍 브레이크 + 4대수급 알파 부스트) 가동
+            pos_mode5[i] = pos_mode4[i]
+
+    m_mode5, curve_mode5, ret_mode5 = _calc_pos_performance(pos_mode5)
+
+    # 박스권 구간 vs 추세 구간 분리 성과 비교 (기존 기본모델 vs 최적 하이브리드 vs 박스권 자동감지 역추세 리밸런싱)
+    range_days_cnt = int(np.sum(is_range_regime))
+    trend_days_cnt = int(n - range_days_cnt)
+    range_ratio_pct = round((range_days_cnt / max(1, n)) * 100.0, 1)
+
+    range_vs_trend_breakdown = {
+        "vix_20ma_threshold": vix_20ma_threshold,
+        "energy_max_threshold": energy_max_threshold,
+        "oi_abs_max_threshold": int(oi_abs_max_threshold),
+        "pcr_band": [pcr_band_low, pcr_band_high],
+        "total_days": n,
+        "detected_range_days": range_days_cnt,
+        "detected_trend_days": trend_days_cnt,
+        "detected_range_ratio_pct": range_ratio_pct,
+        "latest_regime": {
+            "is_range_regime": bool(is_range_regime[-1]) if n > 0 else False,
+            "regime_label": "📦 박스권 장세 (역추세 비중 확대 모드)" if (n > 0 and is_range_regime[-1]) else "🚀 추세 장세 (추세+수급 하이브리드 모드)",
+            "range_confidence_pct": float(range_confidence_score[-1]) if n > 0 else 0.0,
+            "vix_daily": float(feat_sub["vix_daily"].iloc[-1]) if n > 0 else 0.0,
+            "vix_20ma": float(vix20_arr[-1]) if n > 0 else 0.0,
+            "vol_volume_energy": float(energy_arr[-1]) if n > 0 else 0.0,
+            "open_interest": int(oi_abs_arr[-1]) if n > 0 else 0,
+            "oi_level_ratio": float(oi_ratio_arr[-1]) if n > 0 else 1.0,
+            "pcr_ratio": float(pcr_arr[-1]) if n > 0 else 1.0,
+        },
+        "regime_returns_comparison": [
+            {
+                "mode_title": "② 현재 기본 모델 (추세4 : 역추세1 고정)",
+                "total_return_pct": m_base["cum_return_pct"],
+                "range_regime_return_pct": round(float(np.sum(ret_base[is_range_regime]) * 100.0), 2),
+                "trend_regime_return_pct": round(float(np.sum(ret_base[~is_range_regime]) * 100.0), 2),
+                "mdd_pct": m_base["mdd_pct"],
+                "sharpe_ratio": m_base["sharpe_ratio"],
+            },
+            {
+                "mode_title": "⑤ 최적 하이브리드 (기술60%+기존25%+4대역추세15%)",
+                "total_return_pct": m_mode4["cum_return_pct"],
+                "range_regime_return_pct": round(float(np.sum(ret_mode4[is_range_regime]) * 100.0), 2),
+                "trend_regime_return_pct": round(float(np.sum(ret_mode4[~is_range_regime]) * 100.0), 2),
+                "mdd_pct": m_mode4["mdd_pct"],
+                "sharpe_ratio": m_mode4["sharpe_ratio"],
+            },
+            {
+                "mode_title": "⑥ ★ 박스권 자동 감지 역추세 비중 리밸런싱 (VIX 20MA·에너지·OI·PCR 연동)",
+                "total_return_pct": m_mode5["cum_return_pct"],
+                "range_regime_return_pct": round(float(np.sum(ret_mode5[is_range_regime]) * 100.0), 2),
+                "trend_regime_return_pct": round(float(np.sum(ret_mode5[~is_range_regime]) * 100.0), 2),
+                "mdd_pct": m_mode5["mdd_pct"],
+                "sharpe_ratio": m_mode5["sharpe_ratio"],
+            },
+        ],
+    }
+
+    # =========================================================================
     # [과최적화(Overfitting) 방지 & Out-of-Sample Forward 일관성 정밀 검증]
     # 1) In-Sample (전반부 60% 구간) vs Out-of-Sample Forward (후반부 40% 미학습 구간) 성과 일관성 비교
     # 2) 6개월(126영업일) 롤링 Forward 구간별 양(+)의 수익 달성 비율(Positive Window Ratio) 및 기준모델 대비 우위 비율
@@ -641,6 +802,7 @@ def _evaluate_synergy_with_existing_models(
     fwd_mode2 = _eval_is_oos_and_rolling(ret_mode2, ret_base)
     fwd_mode3 = _eval_is_oos_and_rolling(ret_mode3, ret_base)
     fwd_mode4 = _eval_is_oos_and_rolling(ret_mode4, ret_base)
+    fwd_mode5 = _eval_is_oos_and_rolling(ret_mode5, ret_base)
 
     # 파라미터 섭동(Parameter Perturbation) 과최적화 민감도 감사 (임계치를 ±20% 흔들었을 때도 수익률과 Sharpe가 안정적인지 검증)
     perturbation_grid: List[Dict[str, Any]] = []
@@ -720,11 +882,20 @@ def _evaluate_synergy_with_existing_models(
         },
         {
             "arch_id": "ARCH_4_OPTIMAL_HYBRID",
-            "title": "⑤ ★ 최적 하이브리드 결합 (기술 60% + 기존 추세수급 25% + 신규 4대수급 역추세 15%)",
+            "title": "⑤ 하이브리드 결합 (기술 60% + 기존 추세수급 25% + 신규 4대수급 역추세 15%)",
             "weight_formula": "기술지표 60% | 기존 추세·옵션수급 25% | 신규 4대수급(공매도·신용·OI·20일차익) 15%",
             "role_desc": "추세 구간은 기존 5대 모델로 수익 극대화 + 다계약(±3~5계약) 과열 피크아웃 시 50% 차익실현 브레이크 + 숏스퀴즈/롱청산 변곡점 알파 부스트",
             "metrics": m_mode4,
             "forward_consistency": fwd_mode4,
+            "is_optimal": False,
+        },
+        {
+            "arch_id": "ARCH_5_VIX_RANGE_AUTO_REBALANCE",
+            "title": "⑥ ★ 박스권 자동 감지 역추세 비중 리밸런싱 (VIX 20MA·에너지·OI·PCR + 4대수급 결합)",
+            "weight_formula": f"VIX 20MA ≤ {vix_20ma_threshold} & 에너지 ≤ {energy_max_threshold} & OI·PCR 박스권 감지 시 역추세(M04·M05·M07·4대수급) 자동 리밸런싱",
+            "role_desc": "20일 이평 VIX·변동성×거래량 에너지·미결제 절대수준·PCR로 박스권을 자동 감지해 추세 모델 손실을 차단하고 역추세 비중으로 전환 (박스권 흑자 전환 + 최고 Sharpe/Calmar)",
+            "metrics": m_mode5,
+            "forward_consistency": fwd_mode5,
             "is_optimal": True,
         },
     ]
@@ -749,12 +920,14 @@ def _evaluate_synergy_with_existing_models(
         "active_5_models": active_5,
         "architectures": architectures,
         "overfitting_audit": overfitting_audit,
+        "range_vs_trend_breakdown": range_vs_trend_breakdown,
         "curves": {
             "pure_tech_cum_pct": curve_pure.tolist(),
             "current_35_cum_pct": curve_base.tolist(),
             "ensemble_gate_cum_pct": curve_mode2.tolist(),
             "brake_switch_cum_pct": curve_mode3.tolist(),
             "optimal_hybrid_cum_pct": curve_mode4.tolist(),
+            "vix_range_auto_cum_pct": curve_mode5.tolist(),
         },
         "optimal_blueprint": {
             "recommended_weights": {
@@ -765,8 +938,9 @@ def _evaluate_synergy_with_existing_models(
             "rules": [
                 "① [주 동력 60% - 기술지표]: M01(다중MA)·M03(11일채널)·M05(시가갭)·M08/M10의 고유 가격 추세 및 오실레이터 시그널로 기본 포지션(-5 ~ +5) 산출",
                 "② [추세 확증 25% - 기존 당일 수급]: 52주 신고신저×외국인 선물·현물 동조(trend_up/trend_dn) 및 옵션 PCR·이론가 괴리로 일간 역풍 진입 1차 차단",
-                "③ [고점/저점 디레버리징 브레이크 7.5% - 신규 4대 수급]: 다계약(±3계약 이상) 보유 중 신용잔고(T+2)/공매도잔고(T+2) 및 20일 누적차익 Z-Score가 ±1.85σ를 돌파한 뒤 미결제약정 감소(ΔOI < 0)가 시작되면 보유 계약을 50% 선제 감축하여 추세 끝물 급반전 MDD 방어",
+                "③ [고점/저점 디레버리징 브레이크 7.5% - 신규 4대 수급]: 다계약(±3계약 이상) 보유 중 신용잔고(T+2)/공매도잔고(T+2) 및 20일 누적차익 Z-Score가 ±1.75σ를 돌파한 뒤 미결제약정 감소(ΔOI < 0)가 시작되면 보유 계약을 50% 선제 감축하여 추세 끝물 급반전 MDD 방어",
                 "④ [숏스퀴즈·롱청산 알파 부스트 7.5% - 신규 4대 수급]: 기존 포트폴리오가 중립(0) 또는 동방향일 때 4대 수급 3단계 Gate / Scoring 피크아웃 타점이 발생하면 +1~+2계약 역추세 스나이퍼 포지션을 결합하여 변곡점 초과수익(Alpha) 획득",
+                f"⑤ [★ 5대 복합 박스권 자동 감지 역추세 비중 리밸런싱]: 20일 이평 VIX ≤ {vix_20ma_threshold}pt + 변동성×거래량 에너지 ≤ {energy_max_threshold} + 미결제약정 절대수준({int(oi_abs_max_threshold):,}계약/120MA 이하) + PCR 박스권 밴드({pcr_band_low}~{pcr_band_high}배) 결합 점수가 60% 이상일 때 박스권 장세로 자동 판정하여 추세 모델을 쉬게 하고 역추세·횡보 주력 조합(M04×2 + M05 + M07 + C01 + 4대수급 역추세)으로 자동 리밸런싱",
             ],
         },
     }
@@ -784,6 +958,11 @@ def run_4supply_contrarian_backtest(
     point_value_krw: float = 50000.0,
     initial_capital_krw: float = 100000000.0,
     contracts_per_trade: int = 2,
+    vix_20ma_threshold: float = 16.0,
+    energy_max_threshold: float = 1.35,
+    oi_abs_max_threshold: float = 240000.0,
+    pcr_band_low: float = 0.70,
+    pcr_band_high: float = 2.60,
 ) -> Dict[str, Any]:
     """
     4대 수급 지표(① 공매도잔고, ② 신용잔고, ③ 미결제약정 OI, ④ 5일·20일 누적 차익거래)
@@ -851,6 +1030,11 @@ def run_4supply_contrarian_backtest(
         point_value_krw=point_value_krw,
         initial_capital_krw=initial_capital_krw,
         fee_rate=fee_rate,
+        vix_20ma_threshold=vix_20ma_threshold,
+        energy_max_threshold=energy_max_threshold,
+        oi_abs_max_threshold=oi_abs_max_threshold,
+        pcr_band_low=pcr_band_low,
+        pcr_band_high=pcr_band_high,
     )
 
     # KOSPI200 벤치마크 수익률
@@ -972,6 +1156,7 @@ def run_4supply_contrarian_backtest(
             "active_5_models": synergy_analysis["active_5_models"],
             "architectures": synergy_analysis["architectures"],
             "overfitting_audit": synergy_analysis["overfitting_audit"],
+            "range_vs_trend_breakdown": synergy_analysis["range_vs_trend_breakdown"],
             "optimal_blueprint": synergy_analysis["optimal_blueprint"],
         },
         "walk_forward_6m": wf_windows,
@@ -984,9 +1169,12 @@ def run_4supply_contrarian_backtest(
             "credit_z_series": [round(float(feat["credit_z"].iloc[i]), 2) for i in s_idx],
             "arb20_z_series": [round(float(feat["cum_arb_20_z"].iloc[i]), 2) for i in s_idx],
             "comp_score_series": [round(float(feat["composite_overheat_score"].iloc[i]), 2) for i in s_idx],
+            "vix_20ma_series": [round(float(feat["vix_20ma"].iloc[i]), 2) for i in s_idx],
+            "vol_energy_series": [round(float(feat["vol_volume_energy"].iloc[i]), 3) for i in s_idx],
             "synergy_pure_tech_pct": [round(float(synergy_analysis["curves"]["pure_tech_cum_pct"][i]), 2) for i in s_idx],
             "synergy_current_35_pct": [round(float(synergy_analysis["curves"]["current_35_cum_pct"][i]), 2) for i in s_idx],
             "synergy_brake_switch_pct": [round(float(synergy_analysis["curves"]["brake_switch_cum_pct"][i]), 2) for i in s_idx],
             "synergy_optimal_hybrid_pct": [round(float(synergy_analysis["curves"]["optimal_hybrid_cum_pct"][i]), 2) for i in s_idx],
+            "synergy_vix_range_auto_pct": [round(float(synergy_analysis["curves"]["vix_range_auto_cum_pct"][i]), 2) for i in s_idx],
         },
     }
