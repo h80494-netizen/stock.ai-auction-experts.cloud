@@ -116,6 +116,48 @@ class KISOrderExecuteRequest(BaseModel):
     reason: Optional[str] = "Step 5 수동/동시호가 주문 실행"
 
 
+class SupplyContrarianBacktestRequest(BaseModel):
+    start_date: Optional[str] = "2016-01-01"
+    end_date: Optional[str] = "CURRENT"
+    setup_z_threshold: float = 1.5
+    score_entry_threshold: float = 2.0
+    max_hold_days: int = 6
+    atr_stop_mult: float = 1.5
+    restrict_expiry_window: bool = True
+    slippage_pt: float = 0.05
+    point_value_krw: float = 50000.0
+    initial_capital_krw: float = 100000000.0
+    contracts_per_trade: int = 2
+
+
+@router.post("/supply-contrarian-backtest")
+def api_run_supply_contrarian_backtest(req: SupplyContrarianBacktestRequest) -> Dict[str, Any]:
+    """① 공매도잔고(T+2), ② 신용잔고(T+2), ③ 미결제약정(OI), ④ 5일·20일 누적 차익거래 4대 수급 역추세 백테스트(Gate vs Scoring + 6M Walk-Forward)를 실행합니다."""
+    try:
+        from supply_contrarian_simulator import run_4supply_contrarian_backtest
+
+        res = run_4supply_contrarian_backtest(
+            start_date=req.start_date,
+            end_date=req.end_date,
+            setup_z_threshold=req.setup_z_threshold,
+            score_entry_threshold=req.score_entry_threshold,
+            max_hold_days=req.max_hold_days,
+            atr_stop_mult=req.atr_stop_mult,
+            restrict_expiry_window=req.restrict_expiry_window,
+            slippage_pt=req.slippage_pt,
+            point_value_krw=req.point_value_krw,
+            initial_capital_krw=req.initial_capital_krw,
+            contracts_per_trade=req.contracts_per_trade,
+        )
+        return {"success": bool(res.get("success")), "data": res}
+    except Exception as e:
+        return {
+            "success": False,
+            "error_code": "SUPPLY_CONTRARIAN_ERROR",
+            "message": f"4대 수급 역추세 백테스트 실행 중 오류: {str(e)}",
+        }
+
+
 @router.get("/credit-short-excel")
 def api_download_kospi_credit_short_excel():
     """KOSPI 신용융자잔고 및 공매도잔고 현황 다중 시트 엑셀(.xlsx) 파일을 즉시 생성하여 다운로드합니다."""

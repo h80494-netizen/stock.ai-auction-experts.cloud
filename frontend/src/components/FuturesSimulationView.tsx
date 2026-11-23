@@ -493,6 +493,19 @@ export default function FuturesSimulationView({
   const [kisPrdtInput, setKisPrdtInput] = useState<string>("03");
   const [kisCapInput, setKisCapInput] = useState<number>(10);
   const [kisAutoExecInput, setKisAutoExecInput] = useState<boolean>(false);
+
+  // Step 7: 4대 핵심 수급(① 공매도잔고 T+2, ② 신용잔고 T+2, ③ 미결제약정 OI, ④ 5일·20일 누적 차익거래) 역추세 시뮬레이션 상태
+  const [scStartDate, setScStartDate] = useState<string>("2016-01-04");
+  const [scSetupZ, setScSetupZ] = useState<number>(1.5);
+  const [scScoreThresh, setScScoreThresh] = useState<number>(2.0);
+  const [scMaxHoldDays, setScMaxHoldDays] = useState<number>(6);
+  const [scAtrStopMult, setScAtrStopMult] = useState<number>(1.5);
+  const [scRestrictExpiry, setScRestrictExpiry] = useState<boolean>(true);
+  const [scSlippagePt, setScSlippagePt] = useState<number>(0.05);
+  const [scContracts, setScContracts] = useState<number>(2);
+  const [scBacktestData, setScBacktestData] = useState<any>(null);
+  const [scLoading, setScLoading] = useState<boolean>(false);
+  const [scTradeTab, setScTradeTab] = useState<"GATE" | "SCORING">("GATE");
   const [kisOrdDvsnInput, setKisOrdDvsnInput] = useState<string>("02");
   const [kisOrderLoading, setKisOrderLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
@@ -723,6 +736,51 @@ export default function FuturesSimulationView({
       console.error(e);
     }
   }, [callApi]);
+
+  const fetchSupplyContrarianBacktest = useCallback(
+    async (overrideStart?: string) => {
+      setScLoading(true);
+      try {
+        const res = await callApi("/supply-contrarian-backtest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start_date: overrideStart ?? scStartDate,
+            end_date: "CURRENT",
+            setup_z_threshold: scSetupZ,
+            score_entry_threshold: scScoreThresh,
+            max_hold_days: scMaxHoldDays,
+            atr_stop_mult: scAtrStopMult,
+            restrict_expiry_window: scRestrictExpiry,
+            slippage_pt: scSlippagePt,
+            point_value_krw: pointValueKrw,
+            initial_capital_krw: initialCapitalKrw,
+            contracts_per_trade: scContracts,
+          }),
+        });
+        if (res?.success && res.data) {
+          setScBacktestData(res.data);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setScLoading(false);
+      }
+    },
+    [
+      callApi,
+      scStartDate,
+      scSetupZ,
+      scScoreThresh,
+      scMaxHoldDays,
+      scAtrStopMult,
+      scRestrictExpiry,
+      scSlippagePt,
+      pointValueKrw,
+      initialCapitalKrw,
+      scContracts,
+    ]
+  );
 
   const handleSaveKisConfig = async (overrideMode?: string) => {
     setKisOrderLoading(true);
@@ -2269,9 +2327,10 @@ export default function FuturesSimulationView({
           </div>
         )}
 
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-1.5 sm:gap-2">
+        <div className="grid grid-cols-2 lg:grid-cols-7 gap-1.5 sm:gap-2">
           {[
             { id: 6, title: "🏆 실전 종합 & KOSPI200 비교", sub: "운용성과·모델별성과·매매원장 통합" },
+            { id: 7, title: "🧪 4대수급 역추세 & 12모델 매뉴얼", sub: "공매도·신용·OI·차익 Gate vs Score" },
             { id: 1, title: "Step 1. 추세·에너지 수급합산", sub: "신고신저×외인 + 차익·OI·PCR 회귀" },
             { id: 2, title: "Step 2. 구간 평가 & 모델 선택", sub: "모델별 운용성과 차트 & 선택" },
             { id: 3, title: "Step 3. 후속 구간 일관성 검증", sub: "포워드(3M/6M) 연속성 & 후보편입" },
@@ -2280,7 +2339,12 @@ export default function FuturesSimulationView({
           ].map((m) => (
             <button
               key={m.id}
-              onClick={() => setStep(m.id)}
+              onClick={() => {
+                setStep(m.id);
+                if (m.id === 7 && !scBacktestData && !scLoading) {
+                  fetchSupplyContrarianBacktest();
+                }
+              }}
               className={`p-2 sm:p-3 rounded-xl text-left border transition cursor-pointer ${
                 step === m.id
                   ? "bg-indigo-600/30 border-indigo-400 text-white shadow-lg"
@@ -5510,6 +5574,560 @@ export default function FuturesSimulationView({
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* STEP 7: 4대 핵심 수급(공매도·신용·OI·차익) 역추세 백테스트 & 모델1~13 수급결합 상세 매뉴얼 */}
+      {/* =================================================================== */}
+      {step === 7 && (
+        <div className="space-y-5 text-xs">
+          {/* 상단 백테스트 파라미터 컨트롤 바 */}
+          <div className="bg-slate-900/95 border border-emerald-500/40 rounded-xl p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-extrabold text-emerald-300">
+                  🧪 4대 핵심 수급 지표(① 공매도잔고 T+2 · ② 신용잔고 T+2 · ③ 미결제약정 OI · ④ 5일/20일 누적 차익거래) 역추세 선물 시뮬레이션 &amp; 모델 1~13 수급결합 매뉴얼
+                </h2>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  시총/거래대금 대비 120일 롤링 Z-Score 표준화 · 공매도/신용 T+2 shift(2) 시점 보정 · 동시만기일(D-3~D+2) 진입제한 및 누적차익 리셋 · 3단계 Gate 방식 vs 가중합산 Scoring 방식 비교 및 6개월 슬라이딩 Walk-Forward 검증
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { label: "최근 10년 (2016~현재)", dt: "2016-01-04" },
+                  { label: "최근 3년 (2023~현재)", dt: "2023-01-02" },
+                  { label: "최근 1년 (2025~현재)", dt: "2025-01-02" },
+                  { label: "2026년 YTD", dt: "2026-01-02" },
+                ].map((b) => (
+                  <button
+                    key={b.dt}
+                    type="button"
+                    onClick={() => {
+                      setScStartDate(b.dt);
+                      fetchSupplyContrarianBacktest(b.dt);
+                    }}
+                    className={`px-2.5 py-1 rounded font-bold cursor-pointer border ${
+                      scStartDate === b.dt
+                        ? "bg-emerald-600 text-white border-emerald-400"
+                        : "bg-slate-950 text-slate-300 border-slate-700 hover:text-white"
+                    }`}
+                  >
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-end justify-between gap-3 pt-2 border-t border-slate-800">
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">백테스트 시작일</label>
+                  <input
+                    type="date"
+                    value={scStartDate}
+                    onChange={(e) => setScStartDate(e.target.value)}
+                    className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">1단계 Gate 과열(|Z|≥)</label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={0.8}
+                    max={3.0}
+                    value={scSetupZ}
+                    onChange={(e) => setScSetupZ(Number(e.target.value) || 1.5)}
+                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-emerald-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Scoring 진입점수(±)</label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={1.0}
+                    max={3.5}
+                    value={scScoreThresh}
+                    onChange={(e) => setScScoreThresh(Number(e.target.value) || 2.0)}
+                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-sky-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Time-Stop (영업일)</label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={15}
+                    value={scMaxHoldDays}
+                    onChange={(e) => setScMaxHoldDays(Number(e.target.value) || 6)}
+                    className="w-18 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Hard-Stop (ATR배수)</label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={0.8}
+                    max={3.5}
+                    value={scAtrStopMult}
+                    onChange={(e) => setScAtrStopMult(Number(e.target.value) || 1.5)}
+                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-rose-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">진입 계약수</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={scContracts}
+                    onChange={(e) => setScContracts(Number(e.target.value) || 2)}
+                    className="w-16 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-amber-300 font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">슬리피지(pt)</label>
+                  <input
+                    type="number"
+                    step={0.01}
+                    min={0}
+                    max={0.3}
+                    value={scSlippagePt}
+                    onChange={(e) => setScSlippagePt(Number(e.target.value) || 0.05)}
+                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-slate-300 font-mono"
+                  />
+                </div>
+                <label className="flex items-center gap-1.5 text-amber-300 font-bold cursor-pointer pb-1.5">
+                  <input
+                    type="checkbox"
+                    checked={scRestrictExpiry}
+                    onChange={(e) => setScRestrictExpiry(e.target.checked)}
+                  />
+                  동시만기주간(D-3~D+2) 진입제한
+                </label>
+              </div>
+              <button
+                type="button"
+                disabled={scLoading}
+                onClick={() => fetchSupplyContrarianBacktest()}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold cursor-pointer shadow"
+              >
+                {scLoading ? "⚡ 백테스트 실행 중..." : "🚀 4대 수급 역추세 백테스트 실행"}
+              </button>
+            </div>
+          </div>
+
+          {scBacktestData && (
+            <>
+              {/* 당일 4대 수급 지표 Z-Score 실시간 진단 카드 */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+                  <div className="text-[11px] text-slate-400">① 공매도잔고 (T+2 shift(2) 보정)</div>
+                  <div className="text-lg font-extrabold font-mono text-emerald-400 mt-1">
+                    Short_Z: {scBacktestData.latest_indicators?.short_z >= 0 ? "+" : ""}
+                    {scBacktestData.latest_indicators?.short_z}σ
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1 font-mono">
+                    잔고 {Number(scBacktestData.latest_indicators?.short_balance_eok || 0).toLocaleString()}억 (시총비{" "}
+                    {scBacktestData.latest_indicators?.short_cap_ratio_pct}% · 20일증감{" "}
+                    {scBacktestData.latest_indicators?.short_roc_20d_pct}%)
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+                  <div className="text-[11px] text-slate-400">② 신용융자잔고 (T+2 shift(2) 보정)</div>
+                  <div className="text-lg font-extrabold font-mono text-rose-400 mt-1">
+                    Credit_Z: {scBacktestData.latest_indicators?.credit_z >= 0 ? "+" : ""}
+                    {scBacktestData.latest_indicators?.credit_z}σ
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1 font-mono">
+                    잔고 {Number(scBacktestData.latest_indicators?.credit_balance_eok || 0).toLocaleString()}억 (시총비{" "}
+                    {scBacktestData.latest_indicators?.credit_cap_ratio_pct}% · 20일증감{" "}
+                    {scBacktestData.latest_indicators?.credit_roc_20d_pct}%)
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+                  <div className="text-[11px] text-slate-400">③ 미결제약정계약수 (OI &amp; ΔOI)</div>
+                  <div className="text-lg font-extrabold font-mono text-sky-400 mt-1">
+                    OI_Z: {scBacktestData.latest_indicators?.oi_z >= 0 ? "+" : ""}
+                    {scBacktestData.latest_indicators?.oi_z}σ (ΔOI:{" "}
+                    {scBacktestData.latest_indicators?.delta_oi >= 0 ? "+" : ""}
+                    {Number(scBacktestData.latest_indicators?.delta_oi || 0).toLocaleString()})
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1 font-mono">
+                    총 {Number(scBacktestData.latest_indicators?.open_interest || 0).toLocaleString()}계약 | 레짐:{" "}
+                    {scBacktestData.latest_indicators?.oi_regime > 0
+                      ? "신규 롱 누적(ΔP>0, ΔOI>0)"
+                      : scBacktestData.latest_indicators?.oi_regime < 0
+                      ? "신규 숏 누적(ΔP<0, ΔOI>0)"
+                      : "기존 포지션 청산(ΔOI<0)"}
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+                  <div className="text-[11px] text-slate-400">④ 5일·20일 누적 차익거래 &amp; 종합과열</div>
+                  <div className="text-lg font-extrabold font-mono text-amber-300 mt-1">
+                    Arb20_Z: {scBacktestData.latest_indicators?.cum_arb_20_z}σ / Arb5_Z:{" "}
+                    {scBacktestData.latest_indicators?.cum_arb_5_z}σ
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1 font-mono">
+                    종합과열점수: <strong className="text-white">{scBacktestData.latest_indicators?.composite_overheat_score}</strong> | 만기주간:{" "}
+                    {scBacktestData.latest_indicators?.in_expiry_window ? "제한중(D-3~D+2)" : "정상거래"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Gate 방식 vs Scoring 방식 비교 테이블 */}
+              <div className="bg-slate-900/90 border border-indigo-500/40 rounded-xl p-4 overflow-x-auto">
+                <h3 className="text-xs font-extrabold text-white mb-2.5">
+                  📊 [3단계 순차 게이트(Gate) 방식] vs [4대 지표 가중합산 스코어링(Scoring) 방식] 백테스트 정밀 비교 (
+                  {scBacktestData.params?.start_date} ~ {scBacktestData.params?.end_date}, {scBacktestData.params?.total_trading_days}거래일)
+                </h3>
+                <table className="w-full text-xs text-left border-collapse font-mono">
+                  <thead>
+                    <tr className="border-b border-slate-700 bg-slate-950 text-slate-300">
+                      <th className="p-2">시뮬레이션 방식</th>
+                      <th className="p-2 text-right text-emerald-300">누적수익률</th>
+                      <th className="p-2 text-right">누적손익(원)</th>
+                      <th className="p-2 text-right">연환산</th>
+                      <th className="p-2 text-right">총 매매횟수</th>
+                      <th className="p-2 text-right text-yellow-300">건별 승률</th>
+                      <th className="p-2 text-right">평균 보유일</th>
+                      <th className="p-2 text-right text-amber-300">MDD</th>
+                      <th className="p-2 text-right">P/L Factor</th>
+                      <th className="p-2 text-right text-sky-300">Sharpe</th>
+                      <th className="p-2 text-right">Sortino</th>
+                      <th className="p-2 text-right">Calmar</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {[
+                      {
+                        label: "① 3단계 순차 게이트 (Gate: 과열Setup → 5일차익Filter → ΔOI<0 Trigger)",
+                        m: scBacktestData.gate_result?.metrics || {},
+                        cls: "bg-emerald-950/20 text-emerald-200 font-bold",
+                      },
+                      {
+                        label: "② 4대 수급 가중합산 스코어링 (Scoring: 종합과열 ±2.0 돌파 후 피크아웃)",
+                        m: scBacktestData.scoring_result?.metrics || {},
+                        cls: "bg-sky-950/20 text-sky-200 font-bold",
+                      },
+                    ].map((row, idx) => (
+                      <tr key={idx} className={row.cls}>
+                        <td className="p-2 font-sans">{row.label}</td>
+                        <td className="p-2 text-right text-emerald-400 font-extrabold">
+                          {(row.m.cum_return_pct ?? 0) >= 0 ? "+" : ""}
+                          {row.m.cum_return_pct}%
+                        </td>
+                        <td className="p-2 text-right">
+                          {(row.m.total_pnl_krw ?? 0) >= 0 ? "+" : ""}
+                          {Number(row.m.total_pnl_krw || 0).toLocaleString()}원
+                        </td>
+                        <td className="p-2 text-right">{row.m.annual_return_pct}%</td>
+                        <td className="p-2 text-right">
+                          {row.m.total_trades}회 ({row.m.win_trades}승 {row.m.loss_trades}패)
+                        </td>
+                        <td className="p-2 text-right text-yellow-300 font-extrabold">{row.m.trade_win_rate_pct}%</td>
+                        <td className="p-2 text-right">{row.m.avg_holding_days}일</td>
+                        <td className="p-2 text-right text-amber-300 font-extrabold">-{row.m.mdd_pct}%</td>
+                        <td className="p-2 text-right">{row.m.profit_loss_factor}</td>
+                        <td className="p-2 text-right text-sky-300 font-extrabold">{row.m.sharpe_ratio}</td>
+                        <td className="p-2 text-right">{row.m.sortino_ratio}</td>
+                        <td className="p-2 text-right">{row.m.calmar_ratio}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* 누적수익률 비교 차트 & 4대 수급 Z-Score 추이 차트 */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
+                  <h4 className="text-xs font-extrabold text-white mb-2">
+                    📈 [Gate 방식] vs [Scoring 방식] vs [KOSPI200] 누적수익률(%) 비교 차트
+                  </h4>
+                  <SvgMultiLineChart
+                    dates={scBacktestData.chart_series?.dates || []}
+                    seriesList={[
+                      {
+                        label: "3단계 Gate 방식 (저MDD 정밀타점)",
+                        data: scBacktestData.chart_series?.gate_cum_return_pct || [],
+                        color: "#10b981",
+                        width: 2.6,
+                      },
+                      {
+                        label: "종합과열 Scoring 방식 (고빈도 수익형)",
+                        data: scBacktestData.chart_series?.scoring_cum_return_pct || [],
+                        color: "#38bdf8",
+                        width: 2.4,
+                      },
+                      {
+                        label: "KOSPI200 지수",
+                        data: scBacktestData.chart_series?.k200_cum_return_pct || [],
+                        color: "#f59e0b",
+                        dashed: true,
+                        width: 1.8,
+                      },
+                    ]}
+                  />
+                </div>
+
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
+                  <h4 className="text-xs font-extrabold text-white mb-2">
+                    📊 4대 수급 지표 120일 롤링 Z-Score(Short_Z · Credit_Z · CumArb20_Z) 추이 차트
+                  </h4>
+                  <SvgMultiLineChart
+                    dates={scBacktestData.chart_series?.dates || []}
+                    seriesList={[
+                      {
+                        label: "① 공매도잔고 Z-Score (T+2)",
+                        data: scBacktestData.chart_series?.short_z_series || [],
+                        color: "#10b981",
+                        width: 2.0,
+                      },
+                      {
+                        label: "② 신용잔고 Z-Score (T+2)",
+                        data: scBacktestData.chart_series?.credit_z_series || [],
+                        color: "#f43f5e",
+                        width: 2.0,
+                      },
+                      {
+                        label: "④ 20일 누적차익 Z-Score",
+                        data: scBacktestData.chart_series?.arb20_z_series || [],
+                        color: "#38bdf8",
+                        width: 2.0,
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+
+              {/* 6개월 단위 Walk-Forward 슬라이딩 검증 테이블 & 최근 매매타점 내역 */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 overflow-x-auto max-h-96">
+                  <h4 className="text-xs font-extrabold text-amber-300 mb-2">
+                    🔄 6개월(126영업일) 슬라이딩 Walk-Forward 전진 분석 (상승장·하락장·횡보장 편중 여부 검증)
+                  </h4>
+                  <table className="w-full text-[11px] text-left border-collapse font-mono">
+                    <thead className="sticky top-0 bg-slate-950 border-b border-slate-700 text-slate-300">
+                      <tr>
+                        <th className="p-1.5">6개월 구간</th>
+                        <th className="p-1.5">장세(KOSPI200)</th>
+                        <th className="p-1.5 text-right text-emerald-300">Gate 수익(MDD)</th>
+                        <th className="p-1.5 text-right text-sky-300">Scoring 수익(MDD)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {(scBacktestData.walk_forward_6m || []).map((w: any, i: number) => (
+                        <tr key={i} className="hover:bg-slate-800/40">
+                          <td className="p-1.5 text-slate-200">{w.period}</td>
+                          <td className="p-1.5">
+                            <span className="font-sans font-bold text-amber-300">{w.market_regime}</span> ({w.k200_return_pct >= 0 ? "+" : ""}
+                            {w.k200_return_pct}%)
+                          </td>
+                          <td className="p-1.5 text-right text-emerald-300 font-bold">
+                            {w.gate_return_pct >= 0 ? "+" : ""}
+                            {w.gate_return_pct}% (-{w.gate_mdd_pct}% · {w.gate_trades}회)
+                          </td>
+                          <td className="p-1.5 text-right text-sky-300 font-bold">
+                            {w.scoring_return_pct >= 0 ? "+" : ""}
+                            {w.scoring_return_pct}% (-{w.scoring_mdd_pct}% · {w.scoring_trades}회)
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 overflow-x-auto max-h-96">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-extrabold text-emerald-300">
+                      🎯 최근 수급 역추세 진입·청산 상세 매매기록 (수급회귀 익절 / Time-Stop / ATR Hard-Stop)
+                    </h4>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setScTradeTab("GATE")}
+                        className={`px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer ${
+                          scTradeTab === "GATE" ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        Gate 매매내역
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setScTradeTab("SCORING")}
+                        className={`px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer ${
+                          scTradeTab === "SCORING" ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        Scoring 매매내역
+                      </button>
+                    </div>
+                  </div>
+                  <table className="w-full text-[11px] text-left border-collapse font-mono">
+                    <thead className="sticky top-0 bg-slate-950 border-b border-slate-700 text-slate-300">
+                      <tr>
+                        <th className="p-1.5">진입~청산일</th>
+                        <th className="p-1.5">방향(보유)</th>
+                        <th className="p-1.5 text-right">진입→청산가</th>
+                        <th className="p-1.5 text-right">순손익(수익률)</th>
+                        <th className="p-1.5">진입/청산 사유</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {((scTradeTab === "GATE"
+                        ? scBacktestData.gate_result?.recent_trades
+                        : scBacktestData.scoring_result?.recent_trades) || []
+                      ).map((tr: any, i: number) => (
+                        <tr key={i} className="hover:bg-slate-800/40">
+                          <td className="p-1.5 text-slate-200">
+                            {tr.entry_date} → {tr.exit_date}
+                          </td>
+                          <td className="p-1.5 font-sans font-bold text-white">
+                            {tr.direction} ({tr.hold_days}일)
+                          </td>
+                          <td className="p-1.5 text-right">
+                            {tr.entry_price} → {tr.exit_price} ({tr.point_gain >= 0 ? "+" : ""}
+                            {tr.point_gain}pt)
+                          </td>
+                          <td
+                            className={`p-1.5 text-right font-bold ${
+                              tr.net_pnl_krw >= 0 ? "text-emerald-400" : "text-rose-400"
+                            }`}
+                          >
+                            {tr.net_pnl_krw >= 0 ? "+" : ""}
+                            {Number(tr.net_pnl_krw).toLocaleString()}원 ({tr.return_pct >= 0 ? "+" : ""}
+                            {tr.return_pct}%)
+                          </td>
+                          <td className="p-1.5 font-sans text-[10px] text-slate-300">
+                            <div>진입: {tr.entry_reason}</div>
+                            <div className="text-amber-300">청산: {tr.exit_reason}</div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* 모델 1 ~ 모델 13 (10대 주력 운영풀 + 3대 후보모델) 수급비중 35% 결합 공식 상세 매뉴얼 보드 */}
+          <div className="bg-slate-900/95 border border-amber-500/40 rounded-xl p-4 space-y-3 overflow-x-auto">
+            <div>
+              <h3 className="text-sm font-extrabold text-amber-300">
+                📘 현재 적용 중인 모델 1 ~ 모델 12+1 (M01~M10 &amp; C01~C03) 수급비중(디폴트 35%) 결합 공식 정밀 매뉴얼
+              </h3>
+              <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                현재 적용 중인 모든 모델은 <strong>① 고유 기술/수급 순수 시그널(pure_s ∈ -1, 0, +1)</strong>을 산출한 뒤, <strong>수급비중 35%(디폴트, 10%~65% 실시간 조정 가능)</strong>로 <strong>축 ① 추세 수급 동력(52주 신고신저 45% + 외국인 선물·현물 55% + 동조 시너지 30%)</strong>과 <strong>축 ② 횡보·평균회귀 에너지 동력(프로그램 차익 90일 Rank/Z-Score + 미결제약정 OI Z-Score + 옵션 PCR Z-Score/이론가괴리)</strong>을 결합하여 최종 시그널을 확정합니다.
+              </p>
+            </div>
+
+            <table className="w-full text-xs text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-700 bg-slate-950 text-slate-200">
+                  <th className="p-2">모델 번호 / ID</th>
+                  <th className="p-2">분류 / 수급결합 모드</th>
+                  <th className="p-2">고유 순수 시그널(pure_s) 산출 공식 (65% 주 동력)</th>
+                  <th className="p-2">수급비중 35%(디폴트) 결합 시 매매신호 보정·확증 작동 공식</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 text-slate-300">
+                {[
+                  {
+                    id: "모델 1 · M01_MA_Trend (채택 주력 #1)",
+                    cat: "추세형 (mode='trend')",
+                    pure: "선물 3/5/10/20/60MA 정배열 가중합: C>MA5(25%) + MA3>MA5(25%) + MA5>MA10(20%) + MA5>MA20(15%) + MA20>MA60(15%). 점수 ≥+0.30이면 매수(+1), ≤-0.30이면 매도(-1)",
+                    comb: "정배열 매수(+1) 중이라도 미결제 과열 피크아웃(oi_z>0.90 & 차익/PCR 과열) 또는 외인·신고저 하락추세+미결제 누적(oi_z>0.30) 시 0(관망)으로 차단. 역배열 매도(-1) 중 외인 상승추세(trend_up)나 하방 에너지 반등 시 0으로 차단",
+                  },
+                  {
+                    id: "모델 2 · M02_Breakthrough (10대풀 대기)",
+                    cat: "추세형 (mode='trend')",
+                    pure: "전일 변동폭 R = High(t-1)-Low(t-1). 당일 종가 > Close(t-1)+0.5*R 상향돌파 시 +1, < Close(t-1)-0.5*R 하향이탈 시 -1 (돌파 전까지 직전 신호 유지)",
+                    comb: "변동성 하향 돌파(-1) 시 외국인 선물·신고저 상승 동조(trend_up) 또는 차익·PCR 하방과열 반등(energy_rebound_up)이 켜지면 속임수 하방돌파(Whip-saw)로 판정하여 0(중립)으로 방어",
+                  },
+                  {
+                    id: "모델 3 · M03_TnT_Channel (채택 주력 #2)",
+                    cat: "추세형 (mode='trend')",
+                    pure: "선물 5MA의 직전 11일 최고(ch_high)·최저(ch_low) 채널 산출. 단기 3MA > ch_high 돌파 시 +1, 3MA < ch_low 이탈 시 -1",
+                    comb: "11일 채널 상향 돌파(+1) 직후 미결제약정·차익거래 에너지가 상방 과열 피크아웃(energy_exhaust_top)되거나 수급이 역회전할 때 고점 추격매수를 즉시 0(관망)으로 제어",
+                  },
+                  {
+                    id: "모델 4 · M04_Double_Stochastic (10대풀 대기)",
+                    cat: "반추세형 (mode='reversion')",
+                    pure: "14-10-14-10-3 더블 스토캐스틱(DSlow%K, %D). 침체권(%K<30 & %K≥%D) 골든크로스 또는 %K>55 시 +1, 과열권(%K>70 & %K≤%D) 데드크로스 또는 %K<45 시 -1",
+                    comb: "mode='reversion' 적용: 스토캐스틱 중립(0) 구간에서도 하방 에너지 과열 후 반등(energy_rebound_up & trend_up) 시 +1 매수 진입, 상방 과열 피크아웃(energy_exhaust_top & trend_dn) 시 -1 매도 진입 보강",
+                  },
+                  {
+                    id: "모델 5 · M05_Gap_Reversion (채택 주력 #3)",
+                    cat: "반추세형 (mode='reversion')",
+                    pure: "시가 갭 Gap = Open(t)/Close(t-1)-1. 하락갭(<-0.5%) 후 양봉(C>O) 또는 C<MA5*0.985 과매도 시 +1, 상승갭(>+0.5%) 후 음봉(C<O) 또는 C>MA5*1.015 과열 시 -1",
+                    comb: "시가 갭 역추세 진입 시 외국인·신고저의 강한 추세와 충돌하는 역풍 진입을 0으로 차단하고, 차익·PCR·미결제 평균회귀 에너지(rev_supply_score)와 일치할 때만 고승률 반전 타점 진입",
+                  },
+                  {
+                    id: "모델 6 · M06_ETF_Spread (10대풀 대기)",
+                    cat: "횡보형 (mode='reversion')",
+                    pure: "(선물종가*500,000)/KODEX레버리지 비율의 50일 볼린저 밴드(±1.5σ). 하단밴드 이탈 시 +1, 상단밴드 돌파 시 -1 (평균 ±0.35σ 이내는 0)",
+                    comb: "선물-레버리지ETF 가격 괴리 평균회귀 신호에 차익거래·미결제·PCR 평균회귀 수급 필터(35%)를 결합하여 추세 폭락·폭등장의 성급한 반대매매 손실 차단",
+                  },
+                  {
+                    id: "모델 7 · M07_Popular_Energy (10대풀 대기)",
+                    cat: "횡보/추세형 (mode='trend')",
+                    pure: "장중 매수 에너지 Energy(H-O)와 하단 지지 인기도 Popular(O-L) 차이(E-P)의 20일 평균이 60일 표준편차×0.25 초과 시 +1, 미만 시 -1",
+                    comb: "캔들 꼬리 에너지(E-P) 신호에 추세 수급 게이트(신고신저×외인 + 미결제 과열 필터 35%)를 결합하여 수급 뒷받침 없는 단기 캔들 착시 필터링",
+                  },
+                  {
+                    id: "모델 8 · M08_Foreign_Program_Flow (채택 주력 #4)",
+                    cat: "수급전담형 (mode='self_supply')",
+                    pure: "4대 수급 종합 스코어(trend_supply_score = 신고외인 50% + 프로그램차익 90일 Rank/Z 20% + 미결제약정 15% + PCR 15%) ≥+0.25이면 +1, ≤-0.25이면 -1",
+                    comb: "포트폴리오 내 전담 수급 모델: 수급 자체가 주 동력(100%)이며, 미결제·차익 극단 과열 시 피크아웃 청산(0) 및 에너지 평균회귀 반전 타점(w≥15% 시 중립→진입)을 동시에 수행",
+                  },
+                  {
+                    id: "모델 9 · M09_Option_Investor_Flow (10대풀 대기)",
+                    cat: "심리·수급형 (mode='self_supply')",
+                    pure: "Black-76 콜/풋 이론가 괴리율 스프레드(30%) + 옵션 하락강도 AF 3MA(25%) + 등가격 PCR<5MA(20%) + 옵션 외국인 3일 순매수(15%) + 옵션 개인 역발상(10%) ≥+0.25 시 +1, ≤-0.25 시 -1",
+                    comb: "옵션 시장의 이론가 괴리·PCR 심리 신호와 선물 시장의 외국인·차익·미결제 수급(35%)을 교차 검증하여 옵션 단독 허수 신호 차단",
+                  },
+                  {
+                    id: "모델 10 · M10_Breadth_HPI_Sentiment (채택 주력 #5)",
+                    cat: "종합·심리형 (mode='trend')",
+                    pure: "ADR 상승-하락 종목차 5MA(±20 기준, 40%) + 52주 신고-신저가 5MA(±2 기준, 30%) + 미결제약정 누적·가격 90일 Rank 결합 HPI(30%) ≥+0.25 시 +1, ≤-0.25 시 -1",
+                    comb: "시장 내부 폭(Breadth) 및 미결제 HPI 에너지에 35% 수급 게이트를 결합하여 대형주 몇 종목만 오르고 수급이 이탈하는 베이시스·미결제 다이버전스 구간 방어",
+                  },
+                  {
+                    id: "모델 11 · C01_KTB_FX_Macro_Trend (후보모델 #1)",
+                    cat: "매크로 추세형 (mode='trend')",
+                    pure: "원/달러 환율 < 20MA 원화강세(50%) + 선물 종가 > 20MA(35%) + 국채선물 ≥ 20MA(15%) 합산 ≥+0.20 시 +1, ≤-0.20 시 -1",
+                    comb: "환율·국채 매크로 추세에 외국인 선물·현물 및 미결제 수급 게이트(35%)를 결합하여 외국인 환차익 패시브 자금 유출입과 동기화",
+                  },
+                  {
+                    id: "모델 12 · C02_Basis_Arbitrage_Flow (후보모델 #2)",
+                    cat: "베이시스 수급형 (mode='self_supply')",
+                    pure: "선물-현물 베이시스(Basis ≥ 10MA) & 현물(외인-개인) 5MA > 0 동시 만족 시 +1(콘탱고 차익매수), 반대 시 -1(백워데이션 차익매도)",
+                    comb: "베이시스 수급 신호에 미결제·차익 과열 피크아웃 및 평균회귀 에너지(35%)를 결합하여 만기 전후 베이시스 급변 리스크 제어",
+                  },
+                  {
+                    id: "모델 13 · C03_Multi_Stoch_Momentum (후보모델 #3 / Logic10 Tech2)",
+                    cat: "다중오실레이터 (mode='reversion')",
+                    pure: "C>MA5(20) + MA3>MA5(20) + MA5>MA10(8) + Stoch(5,3)(20) + Stoch(10,6)(5) + Stoch(20,12)(5) + ADR>0(10) / 88점 만점 SUM_P ≥+0.30 시 +1, ≤-0.30 시 -1",
+                    comb: "단·중·장기 스토캐스틱 가중합(SUM_P)에 역추세 수급·에너지 회귀 필터(rev_supply_sig 35%)를 결합하여 횡보·변곡점 타점 정밀화",
+                  },
+                ].map((m, idx) => (
+                  <tr key={idx} className="hover:bg-slate-800/40">
+                    <td className="p-2 font-bold text-emerald-300">{m.id}</td>
+                    <td className="p-2 font-mono text-sky-300">{m.cat}</td>
+                    <td className="p-2 leading-relaxed">{m.pure}</td>
+                    <td className="p-2 leading-relaxed text-amber-200">{m.comb}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
