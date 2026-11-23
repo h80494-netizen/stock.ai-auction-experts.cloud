@@ -1168,13 +1168,26 @@ export default function FuturesSimulationView({
     const liveFut = Number(liveRawData.fut_close) > 0 ? Number(liveRawData.fut_close) : Number(r.futures_close || 0);
     const prevFut = Number(prevRow?.futures_close ?? liveRawData.prev_fut_close ?? liveFut);
     const prevContracts = Number(r.prev_contracts ?? prevRow?.target_contracts ?? livePosCheck?.prev_contracts ?? 0);
+    const prevPrevContracts = Number(prevRow?.prev_contracts ?? 0);
     const prevDelta = Number(prevRow?.order_delta_contracts ?? 0);
+    const todayTargetContracts =
+      livePosCheck?.today_target_contracts !== undefined
+        ? Number(livePosCheck.today_target_contracts)
+        : Number(r.target_contracts ?? 0);
+    const todayDelta =
+      livePosCheck?.order_delta_contracts !== undefined
+        ? Number(livePosCheck.order_delta_contracts)
+        : todayTargetContracts - prevContracts;
     const feeRate = 0.00003;
 
-    const grossPnlKrw = prevContracts * (liveFut - prevFut) * pointValueKrw;
-    const feeKrw = Math.abs(prevDelta) * prevFut * pointValueKrw * feeRate;
-    const netPnlKrw = Math.round(grossPnlKrw - feeKrw);
-    const dailyRetPct = Number(((netPnlKrw / initialCapitalKrw) * 100).toFixed(3));
+    let netPnlKrw = 0;
+    if (prevContracts !== 0) {
+      const grossPnlKrw = prevContracts * (liveFut - prevFut) * pointValueKrw;
+      const entryFeeKrw = prevPrevContracts === 0 ? Math.abs(prevDelta) * prevFut * pointValueKrw * feeRate : 0;
+      const exitRebalFeeKrw = todayDelta !== 0 ? Math.abs(todayDelta) * liveFut * pointValueKrw * feeRate : 0;
+      netPnlKrw = Math.round(grossPnlKrw - entryFeeKrw - exitRebalFeeKrw);
+    }
+    const dailyRetPct = prevContracts !== 0 ? Number(((netPnlKrw / initialCapitalKrw) * 100).toFixed(3)) : 0;
     const prevEqIdx = Number(prevRow?.equity_index ?? 100);
     const newEqIdx = Number((prevEqIdx + dailyRetPct).toFixed(2));
     const newCumRetPct = Number((newEqIdx - 100).toFixed(2));
@@ -1190,14 +1203,8 @@ export default function FuturesSimulationView({
           ? Number(livePosCheck.today_base_position_sum)
           : r.base_position_sum,
       prev_contracts: prevContracts,
-      target_contracts:
-        livePosCheck?.today_target_contracts !== undefined
-          ? Number(livePosCheck.today_target_contracts)
-          : r.target_contracts,
-      order_delta_contracts:
-        livePosCheck?.order_delta_contracts !== undefined
-          ? Number(livePosCheck.order_delta_contracts)
-          : r.order_delta_contracts,
+      target_contracts: todayTargetContracts,
+      order_delta_contracts: todayDelta,
       order_action: livePosCheck?.order_action || r.order_action,
       daily_return_pct: dailyRetPct,
       daily_pnl_krw: netPnlKrw,

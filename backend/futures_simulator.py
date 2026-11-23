@@ -1061,17 +1061,22 @@ def run_futures_simulation(
     sim_active_set: List[str] = list(initial_active_snapshot)
 
     for i in range(n_days):
-        # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션에 대한 수익 반영 (투자원금 1억원 및 선택 승수 기준)
+        # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션(prev_contracts)에 대한 수익 반영
+        #    전일계약(prev_contracts)이 0계약이면 장중 보유 포지션이 없으므로 당일 손익/수익률은 0원(0.000%)
         if i > 0:
-            prev_base_pos = base_positions[i - 1]
             prev_contracts = target_contracts[i - 1]
-            # 원화 환산 일별 손익 (계약수 * 포인트변화 * 승수(5만원/25만원) - 수수료)
-            gross_krw = prev_contracts * fut_pt_diff[i] * contract_mult_krw
-            fee_krw = abs(delta_contracts[i - 1]) * fut_close[i - 1] * contract_mult_krw * fee_rate
-            net_pnl_krw = gross_krw - fee_krw
+            if prev_contracts != 0:
+                gross_krw = prev_contracts * fut_pt_diff[i] * contract_mult_krw
+                prev_prev_contracts = target_contracts[i - 2] if i >= 2 else 0
+                entry_fee_krw = (
+                    abs(delta_contracts[i - 1]) * fut_close[i - 1] * contract_mult_krw * fee_rate
+                    if prev_prev_contracts == 0
+                    else 0.0
+                )
+                net_pnl_krw = gross_krw - entry_fee_krw
+            else:
+                net_pnl_krw = 0.0
             portfolio_daily_pnl_krw[i] = net_pnl_krw
-
-            # 투자원금(1억원 = 100,000,000원) 대비 일별 수익률 및 누적수익지수(100.0 + 누적손익/1억원*100)
             net_ret = net_pnl_krw / base_capital_krw
             portfolio_daily_ret[i] = net_ret
             equity_curve[i] = equity_curve[i - 1] + (net_ret * 100.0)
@@ -1258,6 +1263,11 @@ def run_futures_simulation(
         target_contracts[i] = sum_sig * mult
         prev_pos = target_contracts[i - 1] if i > 0 else 0
         delta_contracts[i] = target_contracts[i] - prev_pos
+        if i > 0 and prev_pos != 0 and delta_contracts[i] != 0:
+            exit_rebal_fee = abs(delta_contracts[i]) * fut_close[i] * contract_mult_krw * fee_rate
+            portfolio_daily_pnl_krw[i] -= exit_rebal_fee
+            portfolio_daily_ret[i] = portfolio_daily_pnl_krw[i] / base_capital_krw
+            equity_curve[i] = equity_curve[i - 1] + (portfolio_daily_ret[i] * 100.0)
 
     # =================================================================================
     # 3대 MDD 위험관리 기준(① 개별모델 교체 / ② 포트폴리오 위험축소 / ③ 실전 운용중지 Hard-Stop)
@@ -1283,11 +1293,19 @@ def run_futures_simulation(
         hard_stop_events: List[Dict[str, Any]] = []
 
         for idx in range(n_days):
+            prev_c = int(p_target[idx - 1]) if idx > 0 else 0
             if idx > 0:
-                prev_c = int(p_target[idx - 1])
-                gross_k = prev_c * fut_pt_diff[idx] * contract_mult_krw
-                fee_k = abs(int(p_delta[idx - 1])) * fut_close[idx - 1] * contract_mult_krw * fee_rate
-                net_k = gross_k - fee_k
+                if prev_c != 0:
+                    gross_k = prev_c * fut_pt_diff[idx] * contract_mult_krw
+                    prev_prev_c = int(p_target[idx - 2]) if idx >= 2 else 0
+                    entry_fee_k = (
+                        abs(int(p_delta[idx - 1])) * fut_close[idx - 1] * contract_mult_krw * fee_rate
+                        if prev_prev_c == 0
+                        else 0.0
+                    )
+                    net_k = gross_k - entry_fee_k
+                else:
+                    net_k = 0.0
                 p_pnl[idx] = net_k
                 r_val = net_k / base_capital_krw
                 p_ret[idx] = r_val
@@ -1354,7 +1372,21 @@ def run_futures_simulation(
                         eff_c = raw_c
 
             p_target[idx] = eff_c
-            p_delta[idx] = eff_c - (int(p_target[idx - 1]) if idx > 0 else 0)
+            p_delta[idx] = eff_c - prev_c
+
+            # 당일 장중 보유 포지션(prev_c != 0)이 있었던 상태에서 15:35~15:45 동시호가 청산/리밸런싱 발생 시 당일 손익에서 수수료 정산
+            if idx > 0 and prev_c != 0 and p_delta[idx] != 0:
+                exit_rebal_fee_k = abs(int(p_delta[idx])) * fut_close[idx] * contract_mult_krw * fee_rate
+                p_pnl[idx] -= exit_rebal_fee_k
+                p_ret[idx] = p_pnl[idx] / base_capital_krw
+                p_eq[idx] = p_eq[idx - 1] + (p_ret[idx] * 100.0)
+                if p_eq[idx] > running_peak:
+                    running_peak = float(p_eq[idx])
+                p_dd_series[idx] = (
+                    ((running_peak - float(p_eq[idx])) / max(100.0, running_peak)) * 100.0
+                    if running_peak > 0
+                    else 0.0
+                )
 
         p_metrics = calculate_series_metrics(pd.Series(p_ret[1:]), annual_days=annual_days, rf_annual=rf_annual)
         return {
