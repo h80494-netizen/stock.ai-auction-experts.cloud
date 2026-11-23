@@ -171,6 +171,19 @@ def api_download_kospi_credit_short_excel():
     )
 
 
+@router.get("/manual-docx")
+def api_download_futures_overnight_manual_docx():
+    """선물오버나잇자동매매 13대 모델 구성 및 기술·기존수급·신규4대수급 결합 상세 매뉴얼 워드(.docx) 파일을 즉시 생성하여 다운로드합니다."""
+    from futures_manual_docx_exporter import generate_futures_overnight_manual_docx
+
+    docx_path = generate_futures_overnight_manual_docx()
+    return FileResponse(
+        path=docx_path,
+        filename="선물오버나잇자동매매_모델구성_및_수급결합_상세매뉴얼.docx",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+
 @router.get("/data-status")
 def api_get_data_status() -> Dict[str, Any]:
     """기초데이터(rawdata.xlsx 및 futures_simulation.db) 최신 적재 상태를 반환합니다."""

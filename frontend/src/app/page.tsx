@@ -336,7 +336,7 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-2 gap-1.5 max-h-[60vh] overflow-y-auto">
               {[
-                { id: 'futures_sim', label: '🚀 선물 10대모델 시뮬레이션', accent: 'border-emerald-500/60 text-emerald-200' },
+                { id: 'futures_sim', label: '🚀 선물오버나잇자동매매', accent: 'border-emerald-500/60 text-emerald-200' },
                 { id: 'order', label: '🚨 매수주문 (Orders)', accent: 'border-red-500/60 text-red-300' },
                 { id: 'etf_strategy', label: '⚡ ETF 투자전략', accent: 'border-sky-500/50 text-sky-200' },
                 { id: 'etf_history', label: '📜 ETF 시뮬레이션 히스토리', accent: 'border-sky-500/50 text-sky-200' },
@@ -385,7 +385,7 @@ export default function Home() {
                 : 'bg-emerald-950/30 border-emerald-800/60 text-emerald-400 hover:text-emerald-200'
             }`}
           >
-            🚀 선물 10대모델 시뮬레이션
+            🚀 선물오버나잇자동매매
           </button>
           <button
             onClick={() => setActiveTab('order')}

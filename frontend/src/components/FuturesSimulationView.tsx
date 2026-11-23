@@ -2147,16 +2147,25 @@ export default function FuturesSimulationView({
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div>
             <span className="text-[10px] sm:text-xs font-mono text-indigo-400 font-bold">
-              STOCK.AI-AUCTION-EXPERTS.CLOUD · KOSPI200 FUTURES 10-MODEL ENGINE
+              STOCK.AI-AUCTION-EXPERTS.CLOUD · KOSPI200 OVERNIGHT AUTO-TRADING ENGINE
             </span>
             <h1 className="text-base sm:text-lg font-extrabold text-white leading-snug">
-              KOSPI200 선물 10대 매매모델 실전 트레이딩 &amp; KOSPI200 비교 운용 시스템
+              🚀 선물오버나잇자동매매 (KOSPI200 선물 10대 주력·3대 후보모델 15:30 시그널 확정 &amp; 동시호가 리밸런싱 시스템)
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs">
             <span className="px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-emerald-300 font-mono font-bold text-[11px] sm:text-xs">
               채택 ({selectedModelIds.length}개): {selectedModelIds.join(", ")}
             </span>
+            <button
+              type="button"
+              onClick={() => {
+                window.open(`${apiBaseUrl}/manual-docx`, "_blank");
+              }}
+              className="px-2.5 py-1.5 sm:px-3 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-extrabold cursor-pointer text-[11px] sm:text-xs shadow"
+            >
+              📘 선물오버나잇자동매매 워드(.docx) 매뉴얼 다운로드
+            </button>
             <button
               type="button"
               onClick={() => {
