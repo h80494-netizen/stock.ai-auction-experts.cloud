@@ -430,6 +430,238 @@ function SvgBarAndLineChart({
   );
 }
 
+function SvgDualAxisMarketChart({
+  dates,
+  futuresCloses,
+  k200Closes,
+  rightSeries,
+  rightLabel,
+  rightUnit = "",
+  rightColor = "#38bdf8",
+  rightIsBar = false,
+  height = 245,
+}: {
+  dates: string[];
+  futuresCloses: number[];
+  k200Closes: number[];
+  rightSeries?: number[];
+  rightLabel?: string;
+  rightUnit?: string;
+  rightColor?: string;
+  rightIsBar?: boolean;
+  height?: number;
+}) {
+  if (!dates || dates.length < 2 || (!futuresCloses.length && !k200Closes.length)) {
+    return (
+      <div className="flex items-center justify-center h-56 text-xs text-slate-500">
+        시장지표 차트 데이터를 불러오는 중입니다...
+      </div>
+    );
+  }
+
+  const W = 940;
+  const H = height;
+  const padL = 62;
+  const padR = rightSeries && rightSeries.length ? 76 : 24;
+  const padT = 18;
+  const padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const leftVals = [
+    ...futuresCloses.filter((v) => Number(v) > 0),
+    ...k200Closes.filter((v) => Number(v) > 0),
+  ];
+  const lMinRaw = leftVals.length ? Math.min(...leftVals) : 300;
+  const lMaxRaw = leftVals.length ? Math.max(...leftVals) : 400;
+  const lSpan = Math.max(1.0, lMaxRaw - lMinRaw);
+  const lMin = lMinRaw - lSpan * 0.08;
+  const lMax = lMaxRaw + lSpan * 0.08;
+  const lRange = Math.max(1e-6, lMax - lMin);
+
+  const hasRight = Boolean(rightSeries && rightSeries.length);
+  const rVals = hasRight
+    ? rightIsBar
+      ? [0, ...(rightSeries || []).map((v) => Number(v) || 0)]
+      : (rightSeries || []).map((v) => Number(v) || 0)
+    : [0, 1];
+  const rMinRaw = Math.min(...rVals);
+  const rMaxRaw = Math.max(...rVals);
+  const rSpan = Math.max(1e-4, rMaxRaw - rMinRaw);
+  const rMin = rMinRaw - rSpan * 0.1;
+  const rMax = rMaxRaw + rSpan * 0.1;
+  const rRange = Math.max(1e-6, rMax - rMin);
+
+  const n = dates.length;
+  const toX = (i: number) => padL + (i / Math.max(1, n - 1)) * plotW;
+  const toLeftY = (v: number) => padT + plotH - ((v - lMin) / lRange) * plotH;
+  const toRightY = (v: number) => padT + plotH - ((v - rMin) / rRange) * plotH;
+  const zeroRightY = toRightY(0);
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+  const xTickIndices = [
+    0,
+    Math.floor((n - 1) * 0.25),
+    Math.floor((n - 1) * 0.5),
+    Math.floor((n - 1) * 0.75),
+    n - 1,
+  ];
+  const barWidth = Math.max(1.5, Math.min(10, (plotW / Math.max(1, n)) * 0.65));
+
+  const lastFut = futuresCloses.length ? futuresCloses[futuresCloses.length - 1] : 0;
+  const lastK200 = k200Closes.length ? k200Closes[k200Closes.length - 1] : 0;
+  const lastRight = hasRight && rightSeries ? rightSeries[rightSeries.length - 1] : null;
+
+  return (
+    <div className="w-full">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-xs">
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-3.5 h-1 rounded bg-emerald-400" />
+            <span className="text-slate-200 font-bold">[좌축 디폴트] KOSPI200 선물종가</span>
+            <span className="font-mono font-extrabold text-emerald-400">({Number(lastFut).toFixed(2)}pt)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-3.5 h-1 rounded bg-amber-400"
+              style={{ borderBottom: "2px dashed #f59e0b" }}
+            />
+            <span className="text-slate-200 font-bold">[좌축 디폴트] KOSPI200 현물지수</span>
+            <span className="font-mono font-extrabold text-amber-300">({Number(lastK200).toFixed(2)}pt)</span>
+          </div>
+        </div>
+        {hasRight && rightLabel && lastRight !== null && (
+          <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-slate-900 border border-slate-700">
+            <span className="inline-block w-3.5 h-2 rounded" style={{ backgroundColor: rightColor }} />
+            <span className="text-white font-extrabold">[우축 선택지표] {rightLabel}</span>
+            <span className="font-mono font-extrabold" style={{ color: rightColor }}>
+              ({Number(lastRight).toLocaleString()}
+              {rightUnit})
+            </span>
+          </div>
+        )}
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto bg-slate-950/80 rounded-xl border border-slate-800">
+        {yTicks.map((t, idx) => {
+          const lv = lMin + t * lRange;
+          const y = toLeftY(lv);
+          const rv = rMin + t * rRange;
+          return (
+            <g key={idx}>
+              <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="rgba(51,65,85,0.38)" strokeWidth="1" />
+              <text x={padL - 6} y={y + 4} textAnchor="end" fill="#34d399" fontSize="10" fontFamily="monospace">
+                {lv.toFixed(1)}pt
+              </text>
+              {hasRight && (
+                <text
+                  x={W - padR + 6}
+                  y={y + 4}
+                  textAnchor="start"
+                  fill={rightColor}
+                  fontSize="10"
+                  fontFamily="monospace"
+                >
+                  {Math.abs(rv) >= 100
+                    ? Math.round(rv).toLocaleString()
+                    : rv.toFixed(rightUnit === "배" || rightUnit === "pt" ? 2 : 1)}
+                  {rightUnit}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {hasRight && rightIsBar && rMin <= 0 && rMax >= 0 && (
+          <line
+            x1={padL}
+            y1={zeroRightY}
+            x2={W - padR}
+            y2={zeroRightY}
+            stroke="rgba(148,163,184,0.45)"
+            strokeWidth="1"
+            strokeDasharray="3,3"
+          />
+        )}
+
+        {/* 우측 축 선택 시장지표 (막대 또는 선) */}
+        {hasRight &&
+          rightIsBar &&
+          (rightSeries || []).map((rawV, i) => {
+            const v = Number(rawV) || 0;
+            const x = toX(i) - barWidth / 2;
+            const y = v >= 0 ? toRightY(v) : zeroRightY;
+            const h = Math.max(1.2, Math.abs(toRightY(v) - zeroRightY));
+            return (
+              <rect
+                key={i}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={h}
+                fill={v >= 0 ? rightColor : "#f43f5e"}
+                opacity={0.45}
+              />
+            );
+          })}
+
+        {hasRight && !rightIsBar && (rightSeries || []).length > 1 && (
+          <polyline
+            fill="none"
+            stroke={rightColor}
+            strokeWidth="2.4"
+            points={(rightSeries || [])
+              .map((v, i) => `${toX(i).toFixed(1)},${toRightY(Number(v) || 0).toFixed(1)}`)
+              .join(" ")}
+          />
+        )}
+
+        {/* 좌측 축 디폴트 1: KOSPI200 현물지수 (점선) */}
+        {k200Closes.length > 1 && (
+          <polyline
+            fill="none"
+            stroke="#f59e0b"
+            strokeWidth="2.0"
+            strokeDasharray="5,3"
+            points={k200Closes
+              .map((v, i) => `${toX(i).toFixed(1)},${toLeftY(Number(v) || lMin).toFixed(1)}`)
+              .join(" ")}
+          />
+        )}
+
+        {/* 좌측 축 디폴트 2: KOSPI200 선물종가 (실선) */}
+        {futuresCloses.length > 1 && (
+          <polyline
+            fill="none"
+            stroke="#10b981"
+            strokeWidth="2.5"
+            points={futuresCloses
+              .map((v, i) => `${toX(i).toFixed(1)},${toLeftY(Number(v) || lMin).toFixed(1)}`)
+              .join(" ")}
+          />
+        )}
+
+        {xTickIndices.map((xi, idx) => {
+          const x = toX(xi);
+          return (
+            <text
+              key={idx}
+              x={x}
+              y={H - 8}
+              textAnchor={idx === 0 ? "start" : idx === xTickIndices.length - 1 ? "end" : "middle"}
+              fill="#94a3b8"
+              fontSize="10"
+              fontFamily="monospace"
+            >
+              {dates[xi]}
+            </text>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 export default function FuturesSimulationView({
   apiBaseUrl = "/api/futures-sim",
 }: FuturesSimulationViewProps) {
@@ -506,6 +738,7 @@ export default function FuturesSimulationView({
   const [scBacktestData, setScBacktestData] = useState<any>(null);
   const [scLoading, setScLoading] = useState<boolean>(false);
   const [scTradeTab, setScTradeTab] = useState<"GATE" | "SCORING">("GATE");
+  const [step5SelectedIndicator, setStep5SelectedIndicator] = useState<string>("open_interest");
   const [kisOrdDvsnInput, setKisOrdDvsnInput] = useState<string>("02");
   const [kisOrderLoading, setKisOrderLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
@@ -1270,6 +1503,18 @@ export default function FuturesSimulationView({
       is_market_closed: isMarketClosedLocked,
       k200_close: liveK200,
       futures_close: liveFut,
+      basis: Number((liveFut - liveK200).toFixed(2)),
+      open_interest: Number(liveRawData.open_interest ?? r.open_interest ?? 0),
+      oi_change: Number(liveRawData.oi_change ?? r.oi_change ?? 0),
+      pcr_ratio: Number(liveRawData.pcr_ratio ?? r.pcr_ratio ?? 1.0),
+      fut_foreign_net: Number(liveRawData.fut_foreign_net ?? r.fut_foreign_net ?? 0),
+      spot_foreign_net: Number(liveRawData.spot_foreign_net ?? r.spot_foreign_net ?? 0),
+      spot_personal_net: Number(liveRawData.spot_personal_net ?? r.spot_personal_net ?? 0),
+      program_arb_net: Number(liveRawData.program_arb_net ?? r.program_arb_net ?? 0),
+      fx_close: Number(liveRawData.fx_close ?? r.fx_close ?? 0),
+      kodex_leverage: Number(liveRawData.kodex_leverage ?? r.kodex_leverage ?? 0),
+      up_down_diff: Number(liveRawData.up_down_diff ?? r.up_down_diff ?? 0),
+      new_high_low_diff: Number(liveRawData.new_high_low_diff ?? r.new_high_low_diff ?? 0),
       base_position_sum:
         livePosCheck?.today_base_position_sum !== undefined
           ? Number(livePosCheck.today_base_position_sum)
@@ -1309,6 +1554,19 @@ export default function FuturesSimulationView({
   const baseLedgerK200 =
     ledgerChronological.length > 0 ? Number(ledgerChronological[0]?.k200_close || 0) : 0;
   const ledgerK200Closes: number[] = ledgerChronological.map((r: any) => Number(r.k200_close) || 0);
+  const ledgerFutCloses: number[] = ledgerChronological.map((r: any) => Number(r.futures_close) || 0);
+  const ledgerBasisSeries: number[] = ledgerChronological.map((r: any) =>
+    r.basis !== undefined ? Number(r.basis) : Number(((Number(r.futures_close) || 0) - (Number(r.k200_close) || 0)).toFixed(2))
+  );
+  const ledgerOiSeries: number[] = ledgerChronological.map((r: any) => Number(r.open_interest) || 0);
+  const ledgerPcrSeries: number[] = ledgerChronological.map((r: any) => Number(r.pcr_ratio) || 1.0);
+  const ledgerFutForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.fut_foreign_net) || 0);
+  const ledgerSpotForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.spot_foreign_net) || 0);
+  const ledgerProgramArbSeries: number[] = ledgerChronological.map((r: any) => Number(r.program_arb_net) || 0);
+  const ledgerFxSeries: number[] = ledgerChronological.map((r: any) => Number(r.fx_close) || 0);
+  const ledgerKodexSeries: number[] = ledgerChronological.map((r: any) => Number(r.kodex_leverage) || 0);
+  const ledgerUpDownSeries: number[] = ledgerChronological.map((r: any) => Number(r.up_down_diff) || 0);
+  const ledgerNewHighLowSeries: number[] = ledgerChronological.map((r: any) => Number(r.new_high_low_diff) || 0);
   const ledgerK200CumRetPct: number[] = ledgerChronological.map((r: any) => {
     const kVal = Number(r.k200_close) || baseLedgerK200;
     if (baseLedgerK200 <= 0) return 0;
@@ -4835,25 +5093,135 @@ export default function FuturesSimulationView({
               </div>
             </div>
 
-            {/* 2) 당일 rawdata.xlsx 실시간 가격 & 4대 수급 현황판 */}
+            {/* 2) 당일 rawdata.xlsx 실시간 가격 & 4대 수급 현황판 (지표 클릭 시 하단 이중축 차트 즉시 전환) */}
             {(() => {
               const raw = lockStatus?.today_rawdata || {};
               const futUp = (raw.fut_change_pt ?? 0) >= 0;
               const k200Up = (raw.k200_change_pt ?? 0) >= 0;
               const basisVal = raw.basis ?? 0;
+
+              const indicatorMetaMap: Record<
+                string,
+                {
+                  label: string;
+                  unit: string;
+                  color: string;
+                  isBar: boolean;
+                  series: number[];
+                }
+              > = {
+                index_only: {
+                  label: "KOSPI200 현·선물 지수 단독 비교",
+                  unit: "pt",
+                  color: "#10b981",
+                  isBar: false,
+                  series: [],
+                },
+                open_interest: {
+                  label: "선물 미결제약정 (Open Interest)",
+                  unit: "계약",
+                  color: "#38bdf8",
+                  isBar: false,
+                  series: ledgerOiSeries,
+                },
+                basis: {
+                  label: "선물-현물 베이시스 (Basis)",
+                  unit: "pt",
+                  color: "#38bdf8",
+                  isBar: true,
+                  series: ledgerBasisSeries,
+                },
+                pcr_ratio: {
+                  label: "등가격 옵션 Put/Call 비율 (PCR)",
+                  unit: "배",
+                  color: "#c084fc",
+                  isBar: false,
+                  series: ledgerPcrSeries,
+                },
+                program_arb_net: {
+                  label: "프로그램 차익순매수",
+                  unit: "억",
+                  color: "#10b981",
+                  isBar: true,
+                  series: ledgerProgramArbSeries,
+                },
+                fut_foreign_net: {
+                  label: "외국인 선물 순매수",
+                  unit: "계약",
+                  color: "#34d399",
+                  isBar: true,
+                  series: ledgerFutForeignSeries,
+                },
+                spot_foreign_net: {
+                  label: "외국인 현물 순매수",
+                  unit: "억",
+                  color: "#2dd4bf",
+                  isBar: true,
+                  series: ledgerSpotForeignSeries,
+                },
+                fx_close: {
+                  label: "원/달러 환율 (USD/KRW)",
+                  unit: "원",
+                  color: "#fb923c",
+                  isBar: false,
+                  series: ledgerFxSeries,
+                },
+                kodex_leverage: {
+                  label: "KODEX 레버리지 ETF",
+                  unit: "원",
+                  color: "#818cf8",
+                  isBar: false,
+                  series: ledgerKodexSeries,
+                },
+                up_down_diff: {
+                  label: "ADR 상승-하락 종목수 차이",
+                  unit: "종목",
+                  color: "#f472b6",
+                  isBar: true,
+                  series: ledgerUpDownSeries,
+                },
+                new_high_low_diff: {
+                  label: "52주 신고가-신저가 종목수 차이",
+                  unit: "종목",
+                  color: "#facc15",
+                  isBar: true,
+                  series: ledgerNewHighLowSeries,
+                },
+              };
+
+              const activeIndMeta =
+                indicatorMetaMap[step5SelectedIndicator] || indicatorMetaMap.open_interest;
+
               return (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-extrabold text-emerald-300">
-                      📊 당일({raw.date || lockStatus?.trading_date || "2026-11-09"}) rawdata.xlsx 실시간 가격 및 수급 데이터 현황
-                    </h4>
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-xs font-extrabold text-emerald-300">
+                        📊 당일({raw.date || lockStatus?.trading_date || "2026-11-09"}) rawdata.xlsx 실시간 가격 및 수급 데이터 현황
+                      </h4>
+                      <span className="px-2 py-0.5 rounded bg-sky-500/20 border border-sky-400/50 text-sky-200 text-[10px] font-extrabold">
+                        👆 아래 시장지표 카드 또는 지표를 클릭하면 설정된 기간({ledgerDates[0] || ledgerStartDate} ~ {ledgerDates[ledgerDates.length - 1] || ledgerEndDate})의 이중축 차트가 즉시 표시됩니다
+                      </span>
+                    </div>
                     <span className="text-[11px] text-slate-400 font-mono">
                       전일({raw.prev_date || "-"}) 선물종가 {raw.prev_fut_close ?? "-"}pt / KOSPI200 {raw.prev_k200_close ?? "-"}pt 기준
                     </span>
                   </div>
+
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2.5">
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">KOSPI200 선물 현재가(종가)</div>
+                    {/* 카드 1: KOSPI200 선물 현재가 (클릭 시 현·선물 지수 기본 차트) */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("index_only")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        step5SelectedIndicator === "index_only"
+                          ? "border-emerald-400 ring-1 ring-emerald-400/50 bg-emerald-950/20"
+                          : "border-slate-800 hover:border-emerald-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>KOSPI200 선물 현재가</span>
+                        <span className="text-[10px] text-emerald-300 font-bold">📈 디폴트 좌축</span>
+                      </div>
                       <div className={`text-lg font-extrabold font-mono mt-0.5 ${futUp ? "text-emerald-400" : "text-rose-400"}`}>
                         {raw.fut_close ?? lt?.futures_close ?? "-"} <span className="text-xs">pt</span>
                       </div>
@@ -4867,8 +5235,19 @@ export default function FuturesSimulationView({
                       </div>
                     </div>
 
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">KOSPI200 현물지수 현재가</div>
+                    {/* 카드 2: KOSPI200 현물지수 현재가 (클릭 시 현·선물 지수 기본 차트) */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("index_only")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        step5SelectedIndicator === "index_only"
+                          ? "border-amber-400 ring-1 ring-amber-400/50 bg-amber-950/20"
+                          : "border-slate-800 hover:border-amber-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>KOSPI200 현물지수</span>
+                        <span className="text-[10px] text-amber-300 font-bold">📈 디폴트 좌축</span>
+                      </div>
                       <div className={`text-lg font-extrabold font-mono mt-0.5 ${k200Up ? "text-amber-300" : "text-rose-400"}`}>
                         {raw.k200_close ?? lt?.k200_close ?? "-"} <span className="text-xs">pt</span>
                       </div>
@@ -4882,39 +5261,93 @@ export default function FuturesSimulationView({
                       </div>
                     </div>
 
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">실시간 베이시스 &amp; 환율</div>
-                      <div className={`text-base font-extrabold font-mono mt-0.5 ${basisVal >= 0 ? "text-sky-300" : "text-rose-300"}`}>
+                    {/* 카드 3: 실시간 베이시스 & 환율 & KODEX레버리지 (개별 항목 클릭 지원) */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("basis")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        ["basis", "fx_close", "kodex_leverage"].includes(step5SelectedIndicator)
+                          ? "border-sky-400 ring-1 ring-sky-400/50 bg-sky-950/20"
+                          : "border-slate-800 hover:border-sky-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>실시간 베이시스 &amp; 환율</span>
+                        <span className="text-[10px] text-sky-300 font-bold">👆 차트보기</span>
+                      </div>
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("basis");
+                        }}
+                        className={`text-base font-extrabold font-mono mt-0.5 hover:underline ${
+                          basisVal >= 0 ? "text-sky-300" : "text-rose-300"
+                        }`}
+                      >
                         {basisVal >= 0 ? "+" : ""}
                         {basisVal}pt{" "}
                         <span className="text-[11px] font-sans">
                           ({basisVal >= 0 ? "콘탱고" : "백워데이션"})
                         </span>
                       </div>
-                      <div className="text-[11px] text-slate-300 font-mono mt-1">
-                        원/달러: {raw.fx_close ?? "-"}원
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("fx_close");
+                        }}
+                        className={`text-[11px] font-mono mt-1 hover:underline ${
+                          step5SelectedIndicator === "fx_close" ? "text-amber-300 font-bold" : "text-slate-300"
+                        }`}
+                      >
+                        📊 원/달러: {raw.fx_close ?? "-"}원
                       </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        KODEX레버리지: {(raw.kodex_leverage ?? 0).toLocaleString()}원
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("kodex_leverage");
+                        }}
+                        className={`text-[10px] font-mono mt-0.5 hover:underline ${
+                          step5SelectedIndicator === "kodex_leverage" ? "text-indigo-300 font-bold" : "text-slate-400"
+                        }`}
+                      >
+                        📊 KODEX레버리지: {(raw.kodex_leverage ?? 0).toLocaleString()}원
                       </div>
                     </div>
 
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">외국인 선물·현물 실시간 수급</div>
+                    {/* 카드 4: 외국인 선물·현물 실시간 수급 */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("fut_foreign_net")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        ["fut_foreign_net", "spot_foreign_net"].includes(step5SelectedIndicator)
+                          ? "border-emerald-400 ring-1 ring-emerald-400/50 bg-emerald-950/20"
+                          : "border-slate-800 hover:border-emerald-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>외국인 선물·현물 수급</span>
+                        <span className="text-[10px] text-emerald-300 font-bold">👆 차트보기</span>
+                      </div>
                       <div
-                        className={`text-sm font-extrabold font-mono mt-0.5 ${
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("fut_foreign_net");
+                        }}
+                        className={`text-sm font-extrabold font-mono mt-0.5 hover:underline ${
                           (raw.fut_foreign_net ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
                         }`}
                       >
-                        선물외인: {(raw.fut_foreign_net ?? 0) >= 0 ? "+" : ""}
+                        📊 선물외인: {(raw.fut_foreign_net ?? 0) >= 0 ? "+" : ""}
                         {Number(raw.fut_foreign_net ?? 0).toLocaleString()}계약
                       </div>
                       <div
-                        className={`text-[11px] font-mono font-bold mt-1 ${
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("spot_foreign_net");
+                        }}
+                        className={`text-[11px] font-mono font-bold mt-1 hover:underline ${
                           (raw.spot_foreign_net ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
                         }`}
                       >
-                        현물외인: {(raw.spot_foreign_net ?? 0) >= 0 ? "+" : ""}
+                        📊 현물외인: {(raw.spot_foreign_net ?? 0) >= 0 ? "+" : ""}
                         {Number(raw.spot_foreign_net ?? 0).toLocaleString()}억
                       </div>
                       <div className="text-[10px] text-slate-400 font-mono mt-0.5">
@@ -4922,18 +5355,39 @@ export default function FuturesSimulationView({
                       </div>
                     </div>
 
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">프로그램 차익 &amp; 미결제약정</div>
+                    {/* 카드 5: 프로그램 차익 & 미결제약정 */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("open_interest")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        ["open_interest", "program_arb_net"].includes(step5SelectedIndicator)
+                          ? "border-sky-400 ring-1 ring-sky-400/50 bg-sky-950/20"
+                          : "border-slate-800 hover:border-sky-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>프로그램 차익 &amp; 미결제</span>
+                        <span className="text-[10px] text-sky-300 font-bold">👆 차트보기</span>
+                      </div>
                       <div
-                        className={`text-sm font-extrabold font-mono mt-0.5 ${
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("program_arb_net");
+                        }}
+                        className={`text-sm font-extrabold font-mono mt-0.5 hover:underline ${
                           (raw.program_arb_net ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
                         }`}
                       >
-                        차익: {(raw.program_arb_net ?? 0) >= 0 ? "+" : ""}
+                        📊 차익: {(raw.program_arb_net ?? 0) >= 0 ? "+" : ""}
                         {Number(raw.program_arb_net ?? 0).toLocaleString()}억
                       </div>
-                      <div className="text-[11px] text-sky-300 font-mono font-bold mt-1">
-                        미결제: {Number(raw.open_interest ?? 0).toLocaleString()}계약
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("open_interest");
+                        }}
+                        className="text-[11px] text-sky-300 font-mono font-bold mt-1 hover:underline"
+                      >
+                        📊 미결제: {Number(raw.open_interest ?? 0).toLocaleString()}계약
                       </div>
                       <div className="text-[10px] text-slate-400 font-mono mt-0.5">
                         전일비: {(raw.oi_change ?? 0) >= 0 ? "+" : ""}
@@ -4941,18 +5395,107 @@ export default function FuturesSimulationView({
                       </div>
                     </div>
 
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3">
-                      <div className="text-[11px] text-slate-400">심리(등락/신고) &amp; 옵션 PCR</div>
-                      <div className="text-sm font-extrabold font-mono text-purple-300 mt-0.5">
-                        PCR: {raw.pcr_ratio ?? "-"}배
+                    {/* 카드 6: 심리(등락/신고) & 옵션 PCR */}
+                    <div
+                      onClick={() => setStep5SelectedIndicator("pcr_ratio")}
+                      className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
+                        ["pcr_ratio", "up_down_diff", "new_high_low_diff"].includes(step5SelectedIndicator)
+                          ? "border-purple-400 ring-1 ring-purple-400/50 bg-purple-950/20"
+                          : "border-slate-800 hover:border-purple-500/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>심리(등락/신고) &amp; PCR</span>
+                        <span className="text-[10px] text-purple-300 font-bold">👆 차트보기</span>
+                      </div>
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setStep5SelectedIndicator("pcr_ratio");
+                        }}
+                        className="text-sm font-extrabold font-mono text-purple-300 mt-0.5 hover:underline"
+                      >
+                        📊 PCR: {raw.pcr_ratio ?? "-"}배
                       </div>
                       <div className="text-[11px] text-slate-300 font-mono mt-1">
                         Call {raw.call_close ?? "-"} / Put {raw.put_close ?? "-"}
                       </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        등락가감 {raw.up_down_diff ?? 0} / 신고신저 {raw.new_high_low_diff ?? 0}
+                      <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono mt-0.5">
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("up_down_diff");
+                          }}
+                          className="hover:underline hover:text-pink-300"
+                        >
+                          📊 등락 {raw.up_down_diff ?? 0}
+                        </span>
+                        <span>/</span>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("new_high_low_diff");
+                          }}
+                          className="hover:underline hover:text-yellow-300"
+                        >
+                          📊 신고저 {raw.new_high_low_diff ?? 0}
+                        </span>
                       </div>
                     </div>
+                  </div>
+
+                  {/* 클릭한 시장지표와 KOSPI200 현·선물 지수(디폴트 좌축)를 결합한 이중축(Dual-Axis) 인터랙티브 차트 보드 */}
+                  <div className="bg-slate-950/90 border border-sky-500/40 rounded-xl p-3.5 space-y-2.5 shadow-lg">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                      <div>
+                        <h5 className="text-xs font-extrabold text-white">
+                          📈 [디폴트 좌축: KOSPI200 선물·현물지수] + [우축 별도 스케일: {activeIndMeta.label}] 기간 동기화 차트 ({ledgerDates[0] || ledgerStartDate} ~ {ledgerDates[ledgerDates.length - 1] || ledgerEndDate} · {ledgerDates.length}거래일)
+                        </h5>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          rawdata.xlsx 기초데이터 기준 · 아래 설정된 매매원장 기간과 100% 동일하게 연동되며, 좌측 축에는 항상 KOSPI200 선물/현물 지수가 기본 표시되고 우측 독립 축 스케일로 선택한 시장지표가 겹쳐 표시됩니다.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {[
+                          { key: "open_interest", label: "미결제약정(OI)" },
+                          { key: "basis", label: "베이시스(Basis)" },
+                          { key: "pcr_ratio", label: "PC비율(PCR)" },
+                          { key: "program_arb_net", label: "프로그램차익" },
+                          { key: "fut_foreign_net", label: "선물외국인" },
+                          { key: "spot_foreign_net", label: "현물외국인" },
+                          { key: "fx_close", label: "원/달러환율" },
+                          { key: "kodex_leverage", label: "KODEX레버리지" },
+                          { key: "up_down_diff", label: "등락종목차(ADR)" },
+                          { key: "new_high_low_diff", label: "52주신고신저" },
+                          { key: "index_only", label: "현·선물지수만" },
+                        ].map((btn) => (
+                          <button
+                            key={btn.key}
+                            type="button"
+                            onClick={() => setStep5SelectedIndicator(btn.key)}
+                            className={`px-2 py-1 rounded text-[11px] font-bold cursor-pointer border transition ${
+                              step5SelectedIndicator === btn.key
+                                ? "bg-sky-600 text-white border-sky-400 shadow"
+                                : "bg-slate-900 text-slate-300 border-slate-700 hover:text-white"
+                            }`}
+                          >
+                            {btn.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <SvgDualAxisMarketChart
+                      dates={ledgerDates}
+                      futuresCloses={ledgerFutCloses}
+                      k200Closes={ledgerK200Closes}
+                      rightSeries={step5SelectedIndicator === "index_only" ? undefined : activeIndMeta.series}
+                      rightLabel={step5SelectedIndicator === "index_only" ? undefined : activeIndMeta.label}
+                      rightUnit={activeIndMeta.unit}
+                      rightColor={activeIndMeta.color}
+                      rightIsBar={activeIndMeta.isBar}
+                      height={250}
+                    />
                   </div>
                 </div>
               );

@@ -1544,20 +1544,53 @@ def run_futures_simulation(
             }
         )
 
-    # 지정 구간 전체 매매 원장 (15:35~15:45 동시호가 포지션 조정 내역 + 일간/누적 매매수익률 포함)
+    # 지정 구간 전체 매매 원장 (15:35~15:45 동시호가 포지션 조정 내역 + 일간/누적 매매수익률 + Step 5 클릭형 시장지표 시계열 포함)
     k200_base_for_ledger = float(k200_close[0]) if float(k200_close[0]) > 0 else 1.0
+    oi_arr = df["open_interest"].values
+    fut_for_arr = df["fut_foreign_net"].values
+    spot_for_arr = df["spot_foreign_net"].values
+    spot_per_arr = df["spot_personal_net"].values
+    prog_arb_arr = df["program_arb_net"].values
+    call_c_arr = df["call_close"].values
+    put_c_arr = df["put_close"].values
+    fx_c_arr = df["fx_close"].values
+    kodex_arr = df["kodex_leverage"].values
+    up_dn_arr = df["up_down_diff"].values
+    nh_nl_arr = df["new_high_low_diff"].values
+
     recent_ledger: List[Dict[str, Any]] = []
     start_ledger_idx = 0
     for idx in range(start_ledger_idx, n_days):
         delta = int(delta_contracts[idx])
         action_label = "매수 진입/추가" if delta > 0 else ("매도 진입/청산" if delta < 0 else "포지션 유지(0)")
+        f_val = float(fut_close[idx])
+        k_val = float(k200_close[idx])
+        c_val = float(call_c_arr[idx])
+        p_val = float(put_c_arr[idx])
+        pcr_v = round(p_val / max(0.01, c_val), 3) if c_val > 0 else 1.0
+        oi_v = float(oi_arr[idx])
+        oi_prev_v = float(oi_arr[idx - 1]) if idx > 0 else oi_v
         recent_ledger.append(
             {
                 "date": dates[idx],
                 "signal_locked_at": "15:30:00 시그널 확정",
                 "execution_window": "15:35 ~ 15:45 동시호가",
-                "k200_close": round(float(k200_close[idx]), 2),
-                "futures_close": round(float(fut_close[idx]), 2),
+                "k200_close": round(k_val, 2),
+                "futures_close": round(f_val, 2),
+                "basis": round(f_val - k_val, 2),
+                "open_interest": round(oi_v, 0),
+                "oi_change": round(oi_v - oi_prev_v, 0),
+                "pcr_ratio": pcr_v,
+                "call_close": round(c_val, 2),
+                "put_close": round(p_val, 2),
+                "fut_foreign_net": round(float(fut_for_arr[idx]), 0),
+                "spot_foreign_net": round(float(spot_for_arr[idx]) / 10.0, 1),
+                "spot_personal_net": round(float(spot_per_arr[idx]) / 10.0, 1),
+                "program_arb_net": round(float(prog_arb_arr[idx]) / 100.0, 1),
+                "fx_close": round(float(fx_c_arr[idx]), 2),
+                "kodex_leverage": round(float(kodex_arr[idx]), 0),
+                "up_down_diff": round(float(up_dn_arr[idx]), 0),
+                "new_high_low_diff": round(float(nh_nl_arr[idx]), 0),
                 "base_position_sum": int(base_positions[idx]),
                 "multiplier": mult,
                 "prev_contracts": int(target_contracts[idx - 1]) if idx > 0 else 0,
@@ -1566,7 +1599,7 @@ def run_futures_simulation(
                 "order_action": action_label,
                 "daily_return_pct": round(float(portfolio_daily_ret[idx] * 100.0), 3),
                 "cum_return_pct": round(float(equity_curve[idx] - 100.0), 2),
-                "k200_cum_return_pct": round(float((k200_close[idx] / k200_base_for_ledger - 1.0) * 100.0), 2),
+                "k200_cum_return_pct": round(float((k_val / k200_base_for_ledger - 1.0) * 100.0), 2),
                 "daily_pnl_krw": round(float(portfolio_daily_pnl_krw[idx]), 0),
                 "equity_index": round(float(equity_curve[idx]), 2),
             }
