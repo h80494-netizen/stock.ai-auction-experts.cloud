@@ -593,6 +593,69 @@ def compute_all_model_signals(
     pure_c03 = np.where(sum_p >= 0.3, 1, np.where(sum_p <= -0.3, -1, 0))
     _register_model_signal("C03_Multi_Stoch_Momentum", pure_c03, mode="reversion")
 
+    # ------------------------------------------------------------------
+    # ★ [실전 채택: 5대 복합 박스권 자동 감지(Range-Bound Detector) 및 역추세 비중 리밸런싱 시그널]
+    # ① 20일 이평 VIX (vix_20ma <= 16.0pt: 선물 20일 연율화 실현변동성 65% + 등가격 Call/Put 내재변동성 35%)
+    # ② 변동성 × 거래량 결합 에너지 (vol_volume_energy <= 1.35: 일간 변동폭% × 60일 거래량비율의 10MA)
+    # ③ 미결제약정(OI) 절대수준 (open_interest <= 240,000계약 또는 120일 이평 대비 <= 1.02)
+    # ④ 등가격 옵션 PCR 중립·평균회귀 밴드 (0.70 <= PCR <= 2.60 또는 |pcr_z| <= 1.15)
+    # ⑤ 히스테리시스(Hysteresis: 2일 연속 감지 시 박스권 진입, VIX 20MA > 16.5pt 또는 점수 < 50% 시 추세장 즉시 복귀)
+    # ------------------------------------------------------------------
+    hv20_series = fut_c.pct_change().rolling(20, min_periods=5).std() * np.sqrt(250.0) * 100.0
+    atm_iv_series = ((df["call_close"] + df["put_close"]) / fut_c.replace(0, np.nan)) * 100.0 * 6.5
+    vix_daily_s = (hv20_series * 0.65 + atm_iv_series.fillna(hv20_series) * 0.35).bfill().fillna(16.0)
+    vix_20ma_s = vix_daily_s.rolling(20, min_periods=5).mean().bfill().fillna(16.0)
+
+    intra_rng_pct = ((fut_h - fut_l) / fut_c.replace(0, np.nan)).fillna(0.01) * 100.0
+    vol_r60 = (vol / vol.rolling(60, min_periods=10).mean().replace(0, 1.0)).clip(0.2, 4.0)
+    vv_energy_s = (intra_rng_pct * vol_r60).rolling(10, min_periods=3).mean().bfill().fillna(1.25)
+    oi_ma120_s = oi_series.rolling(120, min_periods=20).mean().bfill().fillna(150000.0)
+    oi_ratio_s = oi_series / oi_ma120_s.replace(0, 1.0)
+
+    c_vix_arr = vix_20ma_s.values <= 16.0
+    c_vix_soft = vix_20ma_s.values <= 17.92
+    c_eng_arr = vv_energy_s.values <= 1.35
+    c_oi_arr = (oi_series.values <= 240000.0) | (oi_ratio_s.values <= 1.02)
+    c_pcr_arr = ((pcr_val.values >= 0.70) & (pcr_val.values <= 2.60)) | (np.abs(pcr_z) <= 1.15)
+
+    raw_box_score = (
+        np.where(c_vix_arr, 0.45, np.where(c_vix_soft, 0.20, 0.0))
+        + np.where(c_eng_arr, 0.25, 0.0)
+        + np.where(c_oi_arr, 0.15, 0.0)
+        + np.where(c_pcr_arr, 0.15, 0.0)
+    )
+    # 2거래일 히스테리시스 적용으로 경계선 잦은 스위칭 방지
+    is_box_regime = np.zeros(len(df), dtype=bool)
+    in_box = False
+    for idx_b in range(len(df)):
+        sc_b = raw_box_score[idx_b]
+        prev_sc_b = raw_box_score[idx_b - 1] if idx_b > 0 else sc_b
+        if not in_box:
+            if sc_b >= 0.60 and prev_sc_b >= 0.60:
+                in_box = True
+        else:
+            if sc_b < 0.50 or vix_20ma_s.values[idx_b] > 16.5:
+                in_box = False
+        is_box_regime[idx_b] = in_box
+
+    sig_df["VIX_DAILY"] = vix_daily_s.round(2)
+    sig_df["VIX_20MA"] = vix_20ma_s.round(2)
+    sig_df["VOL_VOLUME_ENERGY"] = vv_energy_s.round(3)
+    sig_df["RANGE_CONFIDENCE_PCT"] = np.round(raw_box_score * 100.0, 1)
+    sig_df["IS_RANGE_REGIME"] = is_box_regime.astype(int)
+
+    # 박스권 장세 감지 시 가동될 역추세·횡보 특화 합산 포지션 (-5 ~ +5)
+    box_contrarian_pos = np.clip(
+        sig_df["M04_Double_Stochastic"].values * 2
+        + sig_df["M05_Gap_Reversion"].values * 1
+        + sig_df["M07_Popular_Energy"].values * 1
+        + sig_df["C01_KTB_FX_Macro_Trend"].values * 1
+        + sig_df["FACTOR_ENERGY_REVERSION"].values * 1,
+        -5,
+        5,
+    ).astype(int)
+    sig_df["BOX_CONTRARIAN_BASE_POS"] = box_contrarian_pos
+
     return sig_df
 
 
@@ -1080,6 +1143,32 @@ def run_futures_simulation(
     last_periodic_check_idx = 0
     sim_active_set: List[str] = list(initial_active_snapshot)
 
+    is_range_arr = (
+        sig_df["IS_RANGE_REGIME"].values.astype(int)
+        if "IS_RANGE_REGIME" in sig_df.columns
+        else np.zeros(n_days, dtype=int)
+    )
+    box_contrarian_arr = (
+        sig_df["BOX_CONTRARIAN_BASE_POS"].values.astype(int)
+        if "BOX_CONTRARIAN_BASE_POS" in sig_df.columns
+        else np.zeros(n_days, dtype=int)
+    )
+    vix_20ma_arr = (
+        sig_df["VIX_20MA"].values.astype(float)
+        if "VIX_20MA" in sig_df.columns
+        else np.ones(n_days, dtype=float) * 18.0
+    )
+    vv_energy_arr = (
+        sig_df["VOL_VOLUME_ENERGY"].values.astype(float)
+        if "VOL_VOLUME_ENERGY" in sig_df.columns
+        else np.ones(n_days, dtype=float) * 1.5
+    )
+    range_conf_arr = (
+        sig_df["RANGE_CONFIDENCE_PCT"].values.astype(float)
+        if "RANGE_CONFIDENCE_PCT" in sig_df.columns
+        else np.zeros(n_days, dtype=float)
+    )
+
     for i in range(n_days):
         # 1. t일 장중/종가 정산: t-1일 동시호가로 구축된 포지션(prev_contracts)에 대한 수익 반영
         #    전일계약(prev_contracts)이 0계약이면 장중 보유 포지션이 없으므로 당일 손익/수익률은 0원(0.000%)
@@ -1276,8 +1365,16 @@ def run_futures_simulation(
                         }
                         swap_events.append(swap_info)
 
-        # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출 (사용자가 선택한 현재 채택 5개 모델 시그널 합산 일관 유지)
-        sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in active_set))
+        # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출:
+        #    ★ 실전 채택된 [5대 복합 박스권 자동 감지 역추세 비중 리밸런싱 엔진] 적용:
+        #    - 당일 IS_RANGE_REGIME == 1 (VIX 20MA ≤ 16.0pt & 변동×거래량 에너지 ≤ 1.35 & OI·PCR 박스권 2일 연속 확정)일 때:
+        #      추세 모델의 고점물림(Whip-saw)을 차단하고 박스권 역추세 특화 조합(M04×2 + M05 + M07 + C01 + 에너지회귀)으로 자동 리밸런싱
+        #    - 당일 IS_RANGE_REGIME == 0 (추세장)일 때:
+        #      사용자가 선택한 채택 5개 주력 모델 시그널 합산을 그대로 가동
+        if combine_supply and int(is_range_arr[i]) == 1:
+            sum_sig = int(box_contrarian_arr[i])
+        else:
+            sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
         target_contracts[i] = sum_sig * mult
@@ -1591,6 +1688,11 @@ def run_futures_simulation(
                 "kodex_leverage": round(float(kodex_arr[idx]), 0),
                 "up_down_diff": round(float(up_dn_arr[idx]), 0),
                 "new_high_low_diff": round(float(nh_nl_arr[idx]), 0),
+                "vix_20ma": round(float(vix_20ma_arr[idx]), 2),
+                "vol_volume_energy": round(float(vv_energy_arr[idx]), 3),
+                "is_range_regime": bool(int(is_range_arr[idx]) == 1),
+                "regime_mode_label": "📦 박스권 역추세" if int(is_range_arr[idx]) == 1 else "🚀 추세+수급",
+                "range_confidence_pct": round(float(range_conf_arr[idx]), 1),
                 "base_position_sum": int(base_positions[idx]),
                 "multiplier": mult,
                 "prev_contracts": int(target_contracts[idx - 1]) if idx > 0 else 0,
@@ -1647,6 +1749,21 @@ def run_futures_simulation(
             comb_port_metrics["cum_return_pct"] - k200_benchmark_metrics["cum_return_pct"], 2
         ),
         "total_pnl_krw": round(float(np.sum(portfolio_daily_pnl_krw)), 0),
+        "active_regime_detector": {
+            "enabled": True,
+            "engine_name": "5대 복합 박스권 자동 감지 역추세 비중 리밸런싱 엔진 (실전 주력 채택)",
+            "current_is_range_regime": bool(int(is_range_arr[-1]) == 1) if n_days > 0 else False,
+            "current_regime_label": (
+                "📦 박스권 장세 (역추세 비중 자동 리밸런싱: M04×2·M05·M07·C01·에너지회귀)"
+                if (n_days > 0 and int(is_range_arr[-1]) == 1)
+                else "🚀 추세 장세 (주력 5대 모델 + 35% 수급게이트 가동)"
+            ),
+            "current_vix_20ma": round(float(vix_20ma_arr[-1]), 2) if n_days > 0 else 16.0,
+            "current_vol_volume_energy": round(float(vv_energy_arr[-1]), 3) if n_days > 0 else 1.25,
+            "current_range_confidence_pct": round(float(range_conf_arr[-1]), 1) if n_days > 0 else 0.0,
+            "total_range_days_in_period": int(np.sum(is_range_arr)),
+            "total_trend_days_in_period": int(n_days - int(np.sum(is_range_arr))),
+        },
     }
 
     # 차트 시각화용 샘플링/시계열 데이터
@@ -2587,6 +2704,21 @@ def get_intraday_and_1530_lock_status(
                 "sharpe_ratio": m.get("sharpe_ratio", 0.0),
                 "mdd_pct": m.get("mdd_pct", 0.0),
             }
+        )
+
+    if not sig_tail.empty and "IS_RANGE_REGIME" in sig_tail.columns and len(sig_tail) >= 2:
+        if int(sig_tail["IS_RANGE_REGIME"].iloc[-2]) == 1:
+            prev_base_pos = int(sig_tail["BOX_CONTRARIAN_BASE_POS"].iloc[-2])
+        if int(sig_tail["IS_RANGE_REGIME"].iloc[-1]) == 1:
+            today_base_pos = int(sig_tail["BOX_CONTRARIAN_BASE_POS"].iloc[-1])
+        today_rawdata["vix_20ma"] = float(sig_tail["VIX_20MA"].iloc[-1])
+        today_rawdata["vol_volume_energy"] = float(sig_tail["VOL_VOLUME_ENERGY"].iloc[-1])
+        today_rawdata["is_range_regime"] = bool(int(sig_tail["IS_RANGE_REGIME"].iloc[-1]) == 1)
+        today_rawdata["range_confidence_pct"] = float(sig_tail["RANGE_CONFIDENCE_PCT"].iloc[-1])
+        today_rawdata["regime_mode_label"] = (
+            "📦 박스권 역추세 리밸런싱 가동"
+            if int(sig_tail["IS_RANGE_REGIME"].iloc[-1]) == 1
+            else "🚀 추세+수급 5대모델 가동"
         )
 
     prev_base_pos = max(-5, min(5, prev_base_pos))

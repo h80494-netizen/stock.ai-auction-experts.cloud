@@ -2413,10 +2413,15 @@ export default function FuturesSimulationView({
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 sm:p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div>
-            <span className="text-[10px] sm:text-xs font-mono text-indigo-400 font-bold">
-              STOCK.AI-AUCTION-EXPERTS.CLOUD · KOSPI200 OVERNIGHT AUTO-TRADING ENGINE
-            </span>
-            <h1 className="text-base sm:text-lg font-extrabold text-white leading-snug">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] sm:text-xs font-mono text-indigo-400 font-bold">
+                STOCK.AI-AUCTION-EXPERTS.CLOUD · KOSPI200 OVERNIGHT AUTO-TRADING ENGINE
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400 text-emerald-300 text-[10px] font-extrabold">
+                ★ 실전 주력 채택: 5대 복합 박스권 자동 감지(VIX 20MA·에너지·OI·PCR) 역추세 비중 리밸런싱 엔진 가동중
+              </span>
+            </div>
+            <h1 className="text-base sm:text-lg font-extrabold text-white leading-snug mt-0.5">
               🚀 선물오버나잇자동매매 (KOSPI200 선물 10대 주력·3대 후보모델 15:30 시그널 확정 &amp; 동시호가 리밸런싱 시스템)
             </h1>
           </div>
@@ -2675,6 +2680,32 @@ export default function FuturesSimulationView({
               </div>
               {renderQuickSimPeriodButtons()}
             </div>
+
+            {lt?.active_regime_detector && (
+              <div className="bg-slate-950/90 border border-emerald-500/40 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-emerald-600 text-white font-extrabold">
+                    ★ 실전 채택 운용엔진
+                  </span>
+                  <span className="font-bold text-emerald-300">
+                    {lt.active_regime_detector.current_regime_label}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 font-mono text-slate-300">
+                  <span>
+                    20일 이평 VIX: <strong className="text-amber-300">{lt.active_regime_detector.current_vix_20ma}pt</strong> (≤16pt 박스권)
+                  </span>
+                  <span>
+                    변동×거래량 에너지: <strong className="text-sky-300">{lt.active_regime_detector.current_vol_volume_energy}</strong> (≤1.35 박스권)
+                  </span>
+                  <span>
+                    구간 내 박스권 리밸런싱:{" "}
+                    <strong className="text-emerald-300">{lt.active_regime_detector.total_range_days_in_period}일</strong> / 추세장:{" "}
+                    <strong className="text-indigo-300">{lt.active_regime_detector.total_trend_days_in_period}일</strong>
+                  </span>
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-wrap items-end justify-between gap-3 pt-2 border-t border-slate-800/80">
               <div className="flex flex-wrap items-end gap-3">
@@ -3935,6 +3966,32 @@ export default function FuturesSimulationView({
               </div>
               {renderQuickSimPeriodButtons()}
             </div>
+
+            {lt?.active_regime_detector && (
+              <div className="bg-slate-950/90 border border-emerald-500/40 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-emerald-600 text-white font-extrabold">
+                    ★ 실전 채택 운용엔진
+                  </span>
+                  <span className="font-bold text-emerald-300">
+                    {lt.active_regime_detector.current_regime_label}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 font-mono text-slate-300">
+                  <span>
+                    20일 이평 VIX: <strong className="text-amber-300">{lt.active_regime_detector.current_vix_20ma}pt</strong> (≤16pt 박스권)
+                  </span>
+                  <span>
+                    변동×거래량 에너지: <strong className="text-sky-300">{lt.active_regime_detector.current_vol_volume_energy}</strong> (≤1.35 박스권)
+                  </span>
+                  <span>
+                    구간 내 박스권 리밸런싱:{" "}
+                    <strong className="text-emerald-300">{lt.active_regime_detector.total_range_days_in_period}일</strong> / 추세장:{" "}
+                    <strong className="text-indigo-300">{lt.active_regime_detector.total_trend_days_in_period}일</strong>
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
               <div className="flex flex-wrap items-end gap-3">
                 <div>
@@ -4612,6 +4669,32 @@ export default function FuturesSimulationView({
               </div>
               {renderQuickSimPeriodButtons()}
             </div>
+
+            {lt?.active_regime_detector && (
+              <div className="bg-slate-950/90 border border-emerald-500/40 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-emerald-600 text-white font-extrabold">
+                    ★ 실전 채택 운용엔진
+                  </span>
+                  <span className="font-bold text-emerald-300">
+                    {lt.active_regime_detector.current_regime_label}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 font-mono text-slate-300">
+                  <span>
+                    20일 이평 VIX: <strong className="text-amber-300">{lt.active_regime_detector.current_vix_20ma}pt</strong> (≤16pt 박스권)
+                  </span>
+                  <span>
+                    변동×거래량 에너지: <strong className="text-sky-300">{lt.active_regime_detector.current_vol_volume_energy}</strong> (≤1.35 박스권)
+                  </span>
+                  <span>
+                    구간 내 박스권 리밸런싱:{" "}
+                    <strong className="text-emerald-300">{lt.active_regime_detector.total_range_days_in_period}일</strong> / 추세장:{" "}
+                    <strong className="text-indigo-300">{lt.active_regime_detector.total_trend_days_in_period}일</strong>
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap items-end justify-between gap-3 pt-2 border-t border-slate-800">
               <div className="flex flex-wrap items-end gap-3">
                 <div>
@@ -5063,6 +5146,11 @@ export default function FuturesSimulationView({
                   </span>
                   <span className="px-2.5 py-1 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs font-bold">
                     {lockStatus?.phase_label || lockStatus?.lock_status || "실시간 연동 중"}
+                  </span>
+                  <span className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-extrabold">
+                    {lockStatus?.today_rawdata?.regime_mode_label || "🚀 추세+수급 5대모델 가동"} (VIX 20MA:{" "}
+                    {lockStatus?.today_rawdata?.vix_20ma ?? lt?.active_regime_detector?.current_vix_20ma ?? "-"}pt · 에너지:{" "}
+                    {lockStatus?.today_rawdata?.vol_volume_energy ?? lt?.active_regime_detector?.current_vol_volume_energy ?? "-"})
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400">
