@@ -374,25 +374,41 @@ def compute_all_model_signals(
 
     def _register_model_signal(m_id: str, pure_arr: np.ndarray, mode: str = "trend") -> None:
         pure_s = np.asarray(pure_arr, dtype=int)
-        sup_s = trend_supply_sig if mode in ("trend", "self_supply") else rev_supply_sig
+        sup_s = np.asarray(trend_supply_sig if mode in ("trend", "self_supply") else rev_supply_sig, dtype=int)
 
         # [축 ① 추세 동력(신고/신저 × 외인) + 축 ② 횡보·평균회귀 에너지(미결제·PCR·차익 과열 되돌림) 결합]
-        # 1) 하방 매도(-1) 신호 보정: 추세 상승 동력(trend_up)이거나 에너지 하방과열 후 반등 회귀(energy_rebound_up)일 때 역풍 매도 차단(0)
-        # 2) 상방 매수(+1) 신호 보정: 미결제·차익·PCR 에너지가 과도하게 커져 다시 내려가는 피크아웃(energy_exhaust_top) 또는 하락 추세+미결제 누적일 때 추격 매수 차단(0)
-        # 3) 중립(0) 타점 보강: 역추세·수급 모델에서 에너지 평균회귀와 추세 동력이 일치할 때 고승률 회귀 타점 진입
+        # - 순수 시그널(pure_s)과 수급 시그널(sup_s)이 같은 방향이면 절대 0으로 상쇄하지 않음
+        # - 추세형(trend) 모델은 강한 반대 추세+반대 수급이 동시에 확인될 때만 역풍 진입을 필터링하고,
+        #   역추세(reversion) 및 자체수급(self_supply) 모델은 고유 타점(과매도 반등 +1 / 과열 매도 -1 / 수급 방향)을 그대로 유지
         if w > 0.05:
             comb_s = pure_s.copy()
-            comb_s = np.where((comb_s == -1) & (trend_up | energy_rebound_up), 0, comb_s)
-            comb_s = np.where((comb_s == 1) & (energy_exhaust_top | (trend_dn & (oi_z > 0.30))), 0, comb_s)
-            if mode in ("reversion", "self_supply") and w >= 0.15:
-                comb_s = np.where((comb_s == 0) & (energy_rebound_up & trend_up), 1, comb_s)
-                comb_s = np.where((comb_s == 0) & (energy_exhaust_top & trend_dn), -1, comb_s)
+            if mode == "trend":
+                # 추세형 모델: 강한 상승추세(trend_up & sup_s == 1 & score >= 0.45)일 때만 역방향 매도(-1) 억제
+                block_short = (comb_s == -1) & trend_up & (sup_s == 1) & (trend_supply_score >= 0.45)
+                # 추세형 모델: 강한 하락추세(trend_dn & sup_s == -1 & score <= -0.45)일 때만 역방향 매수(+1) 억제
+                block_long = (comb_s == 1) & trend_dn & (sup_s == -1) & (trend_supply_score <= -0.45)
+                comb_s = np.where(block_short | block_long, 0, comb_s)
+                if w >= 0.25:
+                    comb_s = np.where((comb_s == 0) & (trend_supply_score >= 0.40), 1, comb_s)
+                    comb_s = np.where((comb_s == 0) & (trend_supply_score <= -0.40), -1, comb_s)
+            elif mode == "reversion":
+                # 역추세/횡보형 모델: 하락장 과매도 반등(+1)이나 상승장 과열 되돌림(-1)이 본래 목적이므로 trend_dn/trend_up으로 차단하지 않음
+                comb_s = np.where((comb_s == 1) & energy_exhaust_top & (rev_supply_score <= -0.30), 0, comb_s)
+                comb_s = np.where((comb_s == -1) & energy_rebound_up & (rev_supply_score >= 0.30), 0, comb_s)
+                if w >= 0.15:
+                    comb_s = np.where((comb_s == 0) & energy_rebound_up, 1, comb_s)
+                    comb_s = np.where((comb_s == 0) & energy_exhaust_top, -1, comb_s)
+            else:
+                # 자체 수급/옵션/베이시스 전담 모델(M08, M09, C02): 자체 산출 시그널 유지 (중립일 때만 강한 수급 동력 보강)
+                if w >= 0.20:
+                    comb_s = np.where((comb_s == 0) & (trend_supply_score >= 0.40), 1, comb_s)
+                    comb_s = np.where((comb_s == 0) & (trend_supply_score <= -0.40), -1, comb_s)
             comb_s = comb_s.astype(int)
         else:
             comb_s = pure_s.copy()
 
         sig_df[f"{m_id}__pure"] = pure_s
-        sig_df[f"{m_id}__supply"] = np.asarray(sup_s, dtype=int)
+        sig_df[f"{m_id}__supply"] = sup_s
         sig_df[f"{m_id}__combined"] = comb_s
         sig_df[m_id] = comb_s if combine_supply else pure_s
 

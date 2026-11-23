@@ -1613,7 +1613,16 @@ export default function OrderWindow({
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <div className="bg-[#111] border border-gray-700 rounded-xl w-full max-w-5xl max-h-[85vh] flex flex-col shadow-2xl">
               <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-[#1a1a1a] rounded-t-xl">
-                <h3 className="text-xl font-bold text-gray-200">상세 거래원장 (일별 정산 및 종목별 체결 내역)</h3>
+                <div className="flex items-center gap-3">
+                  <h3 className="text-xl font-bold text-gray-200">상세 거래원장 (일별 정산 및 종목별 체결 내역)</h3>
+                  <button
+                    type="button"
+                    onClick={() => fetchLedger()}
+                    className="px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold cursor-pointer shadow"
+                  >
+                    🔄 원장 새로고침
+                  </button>
+                </div>
                 <button onClick={() => setShowLedger(false)} className="text-gray-400 hover:text-white transition-colors">
                   <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

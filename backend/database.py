@@ -724,7 +724,10 @@ def get_dart_screener_results(conditions: dict):
 def _norm_uid(user_id: str = "admin") -> str:
     if not user_id or not str(user_id).strip():
         return "admin"
-    return str(user_id).strip()
+    u = str(user_id).strip()
+    if u in ("user_1", "황의춘", "주인장", "관리자", "주인장(관리자)", "h80494", "guest"):
+        return "admin"
+    return u
 
 
 def _ensure_trading_ledger_columns(c):
@@ -1258,13 +1261,38 @@ def record_trading_sell_all(trade_date: str, sell_items: list, user_id: str = "a
 
 
 def get_ledger_history(user_id: str = "admin"):
+    from trading_config import calculate_settlement_metrics
     uid = _norm_uid(user_id)
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT * FROM trade_ledger WHERE user_id = ? ORDER BY date DESC', (uid,))
-    rows = c.fetchall()
+    rows = [dict(row) for row in c.fetchall()]
+
+    # trading_ledger에는 내역이 있으나 trade_ledger에 아직 일자별 집계가 없는 날짜가 있다면 즉시 동기화 보강
+    existing_dates = {r.get("date") for r in rows}
+    c.execute('SELECT DISTINCT trade_date FROM trading_ledger WHERE user_id = ? ORDER BY trade_date DESC', (uid,))
+    tl_dates = [r[0] for r in c.fetchall() if r[0]]
+    for td in tl_dates:
+        if td not in existing_dates:
+            c.execute('SELECT buy_price, sell_price, qty, status FROM trading_ledger WHERE user_id = ? AND trade_date = ?', (uid, td))
+            d_rows = c.fetchall()
+            if d_rows:
+                tot_b = sum(float(dr["buy_price"] or 0) * int(dr["qty"] or 0) for dr in d_rows)
+                tot_s = sum(float(dr["sell_price"] or dr["buy_price"] or 0) * int(dr["qty"] or 0) for dr in d_rows)
+                m = calculate_settlement_metrics(tot_b, tot_s)
+                rows.append({
+                    "user_id": uid,
+                    "date": td,
+                    "total_buy": tot_b,
+                    "total_sell": tot_s,
+                    "fees": m["fees"],
+                    "tax": m["tax"],
+                    "net_pnl": m["net_pnl"],
+                    "return_rate": m["return_rate"],
+                })
     conn.close()
-    return [dict(row) for row in rows]
+    rows.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+    return rows
 
 
 def get_detailed_trading_ledger(date_str: str = None, user_id: str = "admin"):
@@ -1610,9 +1638,9 @@ def create_user_request(name: str, phone: str, email: str, requested_password: s
             raise ValueError(f"이미 가입된 이메일({clean_email})입니다.")
 
     created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 이메일 인증을 완료한 가입자는 즉시 승인(approved) 처리하여 ID/PW로 바로 로그인 가능
-    status_val = 'approved' if email_verified else 'pending'
-    approved_at = created_at if email_verified else None
+    # 이메일 인증을 완료하더라도 반드시 관리자(주인장)가 승인해야만 로그인할 수 있도록 항상 'pending'(승인 대기) 상태로 등록
+    status_val = 'pending'
+    approved_at = None
 
     c.execute('''
         INSERT INTO user_access_requests (login_id, name, phone, email, requested_password, email_verified, status, created_at, approved_at)
@@ -1649,8 +1677,8 @@ def verify_user_password(password: str, login_id: str = ""):
     clean_id = (login_id or "").strip()
     clean_pw = (password or "").strip()
 
-    # 마스터 관리자 비밀번호 (주인장): ID가 비어있거나 admin/주인장/관리자일 때 마스터 비밀번호 일치 시 로그인
-    if clean_pw == admin_master and clean_id.lower() in ("", "admin", "주인장", "관리자"):
+    # 마스터 관리자 비밀번호 (주인장): ID가 비어있거나 admin/주인장/관리자/황의춘/h80494일 때 마스터 비밀번호 일치 시 로그인
+    if clean_pw == admin_master and clean_id.lower() in ("", "admin", "주인장", "관리자", "황의춘", "h80494", "h80494@gmail.com"):
         return {
             "authenticated": True,
             "is_admin": True,
@@ -1678,6 +1706,16 @@ def verify_user_password(password: str, login_id: str = ""):
     conn.close()
 
     if row:
+        # 1번 계정(황의춘 / h80494@gmail.com)은 주인장(관리자) 본인이므로 user_id='admin'으로 통합 매핑
+        if int(row["id"]) == 1 or (row["email"] or "").strip().lower() == "h80494@gmail.com":
+            return {
+                "authenticated": True,
+                "is_admin": True,
+                "user_id": "admin",
+                "login_id": "admin",
+                "request_id": row["id"],
+                "name": "주인장(관리자)",
+            }
         uid = f"user_{row['id']}"
         return {
             "authenticated": True,

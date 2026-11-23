@@ -402,7 +402,7 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
               </button>
             </div>
             <p className="text-xs text-gray-300 leading-relaxed">
-              사용하실 <strong className="text-purple-300">아이디(ID)</strong>와 <strong className="text-purple-300">비밀번호</strong>를 입력하고, <strong className="text-cyan-300">본인 이메일 인증</strong>을 완료하면 즉시 가입됩니다.
+              사용하실 <strong className="text-purple-300">아이디(ID)</strong>와 <strong className="text-purple-300">비밀번호</strong>를 입력하고 <strong className="text-cyan-300">본인 이메일 인증</strong>을 완료하면 가입 신청이 접수되며, <strong className="text-amber-300">관리자 승인 후 로그인</strong>하실 수 있습니다.
             </p>
 
             <form onSubmit={handleSignupSubmit} className="space-y-3 pt-1">
@@ -551,7 +551,7 @@ export default function PrivateAccessGate({ onAuthenticate }: PrivateAccessGateP
                   disabled={signupSubmitting}
                   className="w-2/3 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white font-bold py-2.5 rounded-xl text-xs transition-all shadow-lg cursor-pointer"
                 >
-                  {signupSubmitting ? '가입 처리 중...' : '✅ 이메일 인증 회원가입 완료'}
+                  {signupSubmitting ? '신청 처리 중...' : '📨 이메일 인증 가입 승인 신청'}
                 </button>
               </div>
             </form>

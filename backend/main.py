@@ -3257,10 +3257,11 @@ def register_access_request(req: RegisterRequestModel):
 
     return {
         "status": "success",
-        "message": f"✅ 이메일 인증 및 회원가입이 완료되었습니다! 이제 아이디 [{clean_id}]와 비밀번호로 즉시 로그인하실 수 있습니다.",
+        "message": f"✅ 이메일 인증 및 회원가입 신청이 접수되었습니다! 관리자(주인장) 승인 후 아이디 [{clean_id}]와 비밀번호로 로그인하실 수 있습니다.",
         "id": req_id,
         "login_id": clean_id,
         "email_verified": True,
+        "approval_status": "pending",
     }
 
 
