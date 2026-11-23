@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +114,19 @@ class KISOrderExecuteRequest(BaseModel):
     ord_dvsn: Optional[str] = "02"
     limit_price: float = 0.0
     reason: Optional[str] = "Step 5 수동/동시호가 주문 실행"
+
+
+@router.get("/credit-short-excel")
+def api_download_kospi_credit_short_excel():
+    """KOSPI 신용융자잔고 및 공매도잔고 현황 다중 시트 엑셀(.xlsx) 파일을 즉시 생성하여 다운로드합니다."""
+    from credit_short_exporter import export_kospi_credit_and_short_excel
+
+    xlsx_path = export_kospi_credit_and_short_excel()
+    return FileResponse(
+        path=xlsx_path,
+        filename="KOSPI_신용잔고_공매도잔고_현황.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.get("/data-status")

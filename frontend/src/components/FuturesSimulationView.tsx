@@ -538,12 +538,22 @@ export default function FuturesSimulationView({
 
   // Step 5 매매원장 전용 독립 조회 함수 (Step 1~4, 6의 시뮬레이션 구간과 완전 분리)
   const fetchLedgerOnly = useCallback(
-    async (opts?: { start?: string; end?: string; current?: boolean; models?: string[]; pointVal?: number }) => {
+    async (opts?: {
+      start?: string;
+      end?: string;
+      current?: boolean;
+      models?: string[];
+      pointVal?: number;
+      simWeight?: number;
+      simCombineSupply?: boolean;
+    }) => {
       const targetStart = opts?.start ?? ledgerStartDate;
       const targetCurrent = opts?.current ?? ledgerUseCurrent;
       const targetEnd = targetCurrent ? "CURRENT" : opts?.end ?? ledgerEndDate;
       const targetModels = opts?.models ?? selectedModelIds;
       const targetPointVal = opts?.pointVal ?? pointValueKrw;
+      const targetSupplyWeight = opts?.simWeight ?? supplyWeight;
+      const targetCombineSupply = opts?.simCombineSupply ?? combineSupply;
 
       setLedgerLoading(true);
       try {
@@ -559,8 +569,8 @@ export default function FuturesSimulationView({
             mdd_threshold_pct: mddThreshold,
             initial_selected_ids: targetModels,
             enable_auto_mdd_swap: replacementMode !== "MANUAL_FIXED" && enableAutoSwap,
-            combine_supply: combineSupply,
-            supply_weight: supplyWeight / 100.0,
+            combine_supply: targetCombineSupply,
+            supply_weight: targetSupplyWeight / 100.0,
             sharpe_lookback_days: sharpeLookbackDays > 0 ? sharpeLookbackDays : null,
             record_swaps_to_db: false,
             replacement_mode: replacementMode,
@@ -614,6 +624,8 @@ export default function FuturesSimulationView({
       pointVal?: number;
       riskMode?: string;
       portMddLimit?: number;
+      simWeight?: number;
+      simCombineSupply?: boolean;
     }) => {
       const targetStart = opts?.start ?? startDate;
       const targetCurrent = opts?.current ?? useCurrent;
@@ -626,6 +638,8 @@ export default function FuturesSimulationView({
       const targetPointVal = opts?.pointVal ?? pointValueKrw;
       const targetRiskMode = opts?.riskMode ?? portfolioRiskMode;
       const targetPortMddLimit = opts?.portMddLimit ?? portfolioMddLimit;
+      const targetSupplyWeight = opts?.simWeight ?? supplyWeight;
+      const targetCombineSupply = opts?.simCombineSupply ?? combineSupply;
 
       setLoading(true);
       try {
@@ -641,8 +655,8 @@ export default function FuturesSimulationView({
             mdd_threshold_pct: mddThreshold,
             initial_selected_ids: targetModels,
             enable_auto_mdd_swap: targetRepMode !== "MANUAL_FIXED" && enableAutoSwap,
-            combine_supply: combineSupply,
-            supply_weight: supplyWeight / 100.0,
+            combine_supply: targetCombineSupply,
+            supply_weight: targetSupplyWeight / 100.0,
             sharpe_lookback_days: targetLookback > 0 ? targetLookback : null,
             record_swaps_to_db: false,
             replacement_mode: targetRepMode,
@@ -2086,6 +2100,15 @@ export default function FuturesSimulationView({
               채택 ({selectedModelIds.length}개): {selectedModelIds.join(", ")}
             </span>
             <button
+              type="button"
+              onClick={() => {
+                window.open(`${apiBaseUrl}/credit-short-excel`, "_blank");
+              }}
+              className="px-2.5 py-1.5 sm:px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold cursor-pointer text-[11px] sm:text-xs shadow"
+            >
+              📥 KOSPI 신용·공매도잔고 엑셀 다운로드
+            </button>
+            <button
               onClick={() => setShowManual((v) => !v)}
               className="px-2.5 py-1.5 sm:px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-extrabold cursor-pointer text-[11px] sm:text-xs"
             >
@@ -2414,6 +2437,40 @@ export default function FuturesSimulationView({
                     <option value={126}>최근 6개월 (126영업일) 샤프지수</option>
                     <option value={0}>조회구간 전체 누적 샤프지수</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block text-emerald-300 font-bold mb-1">
+                    수급비중 ({supplyWeight}% {supplyWeight === 35 ? "· 디폴트" : "· 사용자조정"})
+                  </label>
+                  <div className="flex items-center gap-2 bg-slate-950 border border-emerald-500/50 rounded px-2.5 py-1">
+                    <input
+                      type="range"
+                      min={10}
+                      max={65}
+                      step={5}
+                      value={supplyWeight}
+                      onChange={(e) => {
+                        const nw = Number(e.target.value);
+                        setSupplyWeight(nw);
+                        fetchSimulation({ simWeight: nw });
+                        fetchLedgerOnly({ simWeight: nw });
+                      }}
+                      className="w-24 accent-emerald-400 cursor-pointer"
+                    />
+                    <span className="font-mono font-extrabold text-emerald-300 text-xs">{supplyWeight}%</span>
+                    {supplyWeight !== 35 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSupplyWeight(35);
+                          fetchSimulation({ simWeight: 35 });
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-amber-300 font-bold cursor-pointer"
+                      >
+                        35%복원
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
               <button
@@ -3362,7 +3419,11 @@ export default function FuturesSimulationView({
               <label className="block text-slate-400 mb-1">수급 합산 모드</label>
               <select
                 value={combineSupply ? "true" : "false"}
-                onChange={(e) => setCombineSupply(e.target.value === "true")}
+                onChange={(e) => {
+                  const nextComb = e.target.value === "true";
+                  setCombineSupply(nextComb);
+                  fetchSimulation({ simCombineSupply: nextComb });
+                }}
                 className="bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-white"
               >
                 <option value="true">✅ 추세(신고신저×외인) + 횡보에너지(차익·OI·PCR) 합산</option>
@@ -3370,15 +3431,36 @@ export default function FuturesSimulationView({
               </select>
             </div>
             <div>
-              <label className="block text-slate-400 mb-1">수급 가중치 ({supplyWeight}%)</label>
-              <input
-                type="range"
-                min={10}
-                max={65}
-                step={5}
-                value={supplyWeight}
-                onChange={(e) => setSupplyWeight(Number(e.target.value))}
-              />
+              <label className="block text-slate-400 mb-1">
+                수급 가중치 ({supplyWeight}% {supplyWeight === 35 ? "· 디폴트" : "· 조정됨"})
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={10}
+                  max={65}
+                  step={5}
+                  value={supplyWeight}
+                  onChange={(e) => {
+                    const nw = Number(e.target.value);
+                    setSupplyWeight(nw);
+                    fetchSimulation({ simWeight: nw });
+                  }}
+                  className="cursor-pointer accent-emerald-400"
+                />
+                {supplyWeight !== 35 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSupplyWeight(35);
+                      fetchSimulation({ simWeight: 35 });
+                    }}
+                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-amber-300 font-bold cursor-pointer"
+                  >
+                    35% 디폴트 복원
+                  </button>
+                )}
+              </div>
             </div>
             <button
               onClick={() => fetchSimulation()}

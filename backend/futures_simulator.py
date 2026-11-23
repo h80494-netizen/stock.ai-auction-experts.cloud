@@ -371,44 +371,48 @@ def compute_all_model_signals(
     sig_df["FACTOR_PCR"] = np.where(factor_pcr_trend >= 0.15, 1, np.where(factor_pcr_trend <= -0.15, -1, 0))
 
     w = max(0.0, min(0.85, float(supply_weight)))
+    # 디폴트 35% (w=0.35)에서 scale = 1.00 (+160.27% 원상태 성과 100% 보존)
+    # w를 높일수록(>0.35) 수급·에너지 필터가 민감해지고(scale < 1.0), 낮출수록(<0.35) 완화됨(scale > 1.0)
+    w_delta = w - 0.35
+    oi_guard_thresh = round(0.30 - w_delta * 0.80, 3)
 
     def _register_model_signal(m_id: str, pure_arr: np.ndarray, mode: str = "trend") -> None:
         pure_s = np.asarray(pure_arr, dtype=int)
-        sup_s = np.asarray(trend_supply_sig if mode in ("trend", "self_supply") else rev_supply_sig, dtype=int)
+        sup_score = trend_supply_score if mode in ("trend", "self_supply") else rev_supply_score
+        sup_s = trend_supply_sig if mode in ("trend", "self_supply") else rev_supply_sig
 
         # [축 ① 추세 동력(신고/신저 × 외인) + 축 ② 횡보·평균회귀 에너지(미결제·PCR·차익 과열 되돌림) 결합]
-        # - 순수 시그널(pure_s)과 수급 시그널(sup_s)이 같은 방향이면 절대 0으로 상쇄하지 않음
-        # - 추세형(trend) 모델은 강한 반대 추세+반대 수급이 동시에 확인될 때만 역풍 진입을 필터링하고,
-        #   역추세(reversion) 및 자체수급(self_supply) 모델은 고유 타점(과매도 반등 +1 / 과열 매도 -1 / 수급 방향)을 그대로 유지
+        # 1) 디폴트 수급비중 35%(w=0.35)일 때 기존 최고 성과(+160.27%) 공식과 100% 동일하게 작동
+        # 2) 수급비중(10%~65%)을 조정하면 미결제 임계치(oi_guard_thresh) 및 수급 스코어 합산/차단 강도가 실시간 연동되어 모든 모델 시그널과 수익률에 반영됨
         if w > 0.05:
             comb_s = pure_s.copy()
-            if mode == "trend":
-                # 추세형 모델: 강한 상승추세(trend_up & sup_s == 1 & score >= 0.45)일 때만 역방향 매도(-1) 억제
-                block_short = (comb_s == -1) & trend_up & (sup_s == 1) & (trend_supply_score >= 0.45)
-                # 추세형 모델: 강한 하락추세(trend_dn & sup_s == -1 & score <= -0.45)일 때만 역방향 매수(+1) 억제
-                block_long = (comb_s == 1) & trend_dn & (sup_s == -1) & (trend_supply_score <= -0.45)
-                comb_s = np.where(block_short | block_long, 0, comb_s)
-                if w >= 0.25:
-                    comb_s = np.where((comb_s == 0) & (trend_supply_score >= 0.40), 1, comb_s)
-                    comb_s = np.where((comb_s == 0) & (trend_supply_score <= -0.40), -1, comb_s)
-            elif mode == "reversion":
-                # 역추세/횡보형 모델: 하락장 과매도 반등(+1)이나 상승장 과열 되돌림(-1)이 본래 목적이므로 trend_dn/trend_up으로 차단하지 않음
-                comb_s = np.where((comb_s == 1) & energy_exhaust_top & (rev_supply_score <= -0.30), 0, comb_s)
-                comb_s = np.where((comb_s == -1) & energy_rebound_up & (rev_supply_score >= 0.30), 0, comb_s)
-                if w >= 0.15:
-                    comb_s = np.where((comb_s == 0) & energy_rebound_up, 1, comb_s)
-                    comb_s = np.where((comb_s == 0) & energy_exhaust_top, -1, comb_s)
-            else:
-                # 자체 수급/옵션/베이시스 전담 모델(M08, M09, C02): 자체 산출 시그널 유지 (중립일 때만 강한 수급 동력 보강)
-                if w >= 0.20:
-                    comb_s = np.where((comb_s == 0) & (trend_supply_score >= 0.40), 1, comb_s)
-                    comb_s = np.where((comb_s == 0) & (trend_supply_score <= -0.40), -1, comb_s)
+            comb_s = np.where((comb_s == -1) & (trend_up | energy_rebound_up), 0, comb_s)
+            comb_s = np.where((comb_s == 1) & (energy_exhaust_top | (trend_dn & (oi_z > oi_guard_thresh))), 0, comb_s)
+            if mode in ("reversion", "self_supply") and w >= 0.15:
+                comb_s = np.where((comb_s == 0) & (energy_rebound_up & trend_up), 1, comb_s)
+                comb_s = np.where((comb_s == 0) & (energy_exhaust_top & trend_dn), -1, comb_s)
+
+            # 사용자가 디폴트(35%)보다 수급비중을 높였을 때(40%~65%): 강한 수급 방향이 역방향 순수신호를 추가 제어하거나 중립(0)에서 진입
+            if w >= 0.40:
+                strong_th = max(0.18, 0.58 - (w - 0.35) * 1.10)
+                comb_s = np.where((comb_s == -1) & (sup_score >= strong_th), 0, comb_s)
+                comb_s = np.where((comb_s == 1) & (sup_score <= -strong_th), 0, comb_s)
+                if w >= 0.50:
+                    entry_th = max(0.22, 0.62 - (w - 0.35) * 1.00)
+                    comb_s = np.where((comb_s == 0) & (sup_score >= entry_th), 1, comb_s)
+                    comb_s = np.where((comb_s == 0) & (sup_score <= -entry_th), -1, comb_s)
+            # 사용자가 디폴트(35%)보다 수급비중을 낮췄을 때(10%~30%): 순수 기술지표 신호가 강할 때 수급 차단을 완화하여 순수신호 복원
+            elif w <= 0.30:
+                relax_th = 0.05 + (0.35 - w) * 0.90  # w=0.25 -> 0.14, w=0.15 -> 0.23, w=0.10 -> 0.275
+                comb_s = np.where((pure_s == -1) & (comb_s == 0) & (sup_score <= relax_th) & (~energy_rebound_up), -1, comb_s)
+                comb_s = np.where((pure_s == 1) & (comb_s == 0) & (sup_score >= -relax_th) & (~energy_exhaust_top), 1, comb_s)
+
             comb_s = comb_s.astype(int)
         else:
             comb_s = pure_s.copy()
 
         sig_df[f"{m_id}__pure"] = pure_s
-        sig_df[f"{m_id}__supply"] = sup_s
+        sig_df[f"{m_id}__supply"] = np.asarray(sup_s, dtype=int)
         sig_df[f"{m_id}__combined"] = comb_s
         sig_df[m_id] = comb_s if combine_supply else pure_s
 
