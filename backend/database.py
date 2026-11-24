@@ -81,6 +81,40 @@ def init_db():
             UNIQUE(ticker, year, quarter)
         )
     ''')
+
+    # 테트리스 ROE / PBR / PER 및 전분기 대비(QoQ) 개선 스크리너 전용 테이블 (전 상장사 2,577개 종목)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS tetris_roe_pbr_screener (
+            ticker TEXT PRIMARY KEY,
+            name TEXT,
+            market TEXT,
+            sector TEXT,
+            style TEXT,
+            price REAL,
+            market_cap_eok REAL,
+            roe REAL,
+            prev_q_roe REAL,
+            qoq_roe_diff REAL,
+            roe_2312 REAL,
+            roe_2403 REAL,
+            roe_2406 REAL,
+            roe_2412_est REAL,
+            pbr REAL,
+            prev_q_pbr REAL,
+            qoq_pbr_diff REAL,
+            qoq_pbr_growth_pct REAL,
+            per REAL,
+            prev_q_per REAL,
+            bps REAL,
+            prev_q_bps REAL,
+            eps REAL,
+            div_yield REAL,
+            roe_pbr_ratio REAL,
+            qoq_price_growth_pct REAL,
+            yoy_price_growth_pct REAL,
+            quarter_label TEXT
+        )
+    ''')
     
     # 동적 컬럼 덧붙이기 (기존 테이블 마이그레이션)
     ttm_cols = [
@@ -568,156 +602,447 @@ def get_dart_financials(ticker):
     conn.close()
     return [dict(row) for row in rows]
     
-def get_dart_screener_results(conditions: dict):
+def ensure_tetris_roe_pbr_seeded():
+    """
+    테트리스U7_240808_decrypted.xlsm (테트리스U 및 분기 시트)에서 전 상장사(2,577개 종목)의
+    ROE, 전분기 ROE, 전분기 대비 ROE 증감(QoQ ΔROE), PBR, 전분기 PBR, 전분기 대비 PBR 증감(QoQ ΔPBR),
+    PER, ROE/PBR 가성비 비율, 분기 주가 상승률 데이터를 추출하여 tetris_roe_pbr_screener 테이블에 적재합니다.
+    """
     conn = get_db_connection()
     c = conn.cursor()
-    
-    # 1. 모든 dart_financials 데이터를 ticker별로 조회하여 최신 TTM과 전년 동분기 TTM 매칭
-    c.execute("SELECT * FROM dart_financials ORDER BY ticker ASC, year DESC, quarter DESC")
-    all_rows = [dict(r) for r in c.fetchall()]
-    
-    # 만약 dart_financials 데이터가 부족할 경우 기존 financials 및 stocks 테이블에서 fallback 조회
-    if not all_rows:
-        c.execute('''
-            SELECT f.ticker, f.period as year, '11011' as quarter,
-                   (f.net_profit * 100000000) as net_profit,
-                   (f.operating_profit * 100000000) as operating_profit,
-                   (f.equity * 100000000) as equity,
-                   (f.net_profit * 100000000) as net_profit_ttm,
-                   (f.operating_profit * 100000000) as operating_profit_ttm,
-                   (f.net_profit * 10) as revenue_ttm,
-                   f.roe as roe_ttm,
-                   ((f.operating_profit / NULLIF(f.net_profit*10, 0))*100) as op_margin_ttm
-            FROM financials f
-            ORDER BY f.ticker ASC, f.id DESC
-        ''')
-        all_rows = [dict(r) for r in c.fetchall()]
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS tetris_roe_pbr_screener (
+            ticker TEXT PRIMARY KEY,
+            name TEXT,
+            market TEXT,
+            sector TEXT,
+            style TEXT,
+            price REAL,
+            market_cap_eok REAL,
+            roe REAL,
+            prev_q_roe REAL,
+            qoq_roe_diff REAL,
+            roe_2312 REAL,
+            roe_2403 REAL,
+            roe_2406 REAL,
+            roe_2412_est REAL,
+            pbr REAL,
+            prev_q_pbr REAL,
+            qoq_pbr_diff REAL,
+            qoq_pbr_growth_pct REAL,
+            per REAL,
+            prev_q_per REAL,
+            bps REAL,
+            prev_q_bps REAL,
+            eps REAL,
+            div_yield REAL,
+            roe_pbr_ratio REAL,
+            qoq_price_growth_pct REAL,
+            yoy_price_growth_pct REAL,
+            quarter_label TEXT
+        )
+    ''')
+    c.execute("SELECT COUNT(*) FROM tetris_roe_pbr_screener")
+    cnt = c.fetchone()[0]
+    if cnt >= 1500:
+        conn.close()
+        return
 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "테트리스U7_240808_decrypted.xlsm"),
+        os.path.join(base_dir, "data", "테트리스U7_240808_decrypted.xlsm"),
+    ]
+    excel_path = next((p for p in candidates if os.path.exists(p)), None)
+    if not excel_path:
+        conn.close()
+        return
+
+    try:
+        import openpyxl
+
+        def _f(v, default=None):
+            if v is None:
+                return default
+            try:
+                val = float(v)
+                if val != val or abs(val) > 1e15:
+                    return default
+                return val
+            except Exception:
+                return default
+
+        wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+        ws_u = wb["테트리스U"] if "테트리스U" in wb.sheetnames else wb.active
+        ws_q = wb["분기"] if "분기" in wb.sheetnames else None
+
+        q_map = {}
+        if ws_q is not None:
+            for qr in ws_q.iter_rows(min_row=2, values_only=True):
+                if not qr or not qr[1]:
+                    continue
+                raw_tk = str(qr[1]).strip()
+                tk = raw_tk[1:] if raw_tk.startswith("A") else raw_tk
+                q_map[tk] = qr
+
+        records = []
+        for r in ws_u.iter_rows(min_row=2, values_only=True):
+            if not r or not r[0]:
+                continue
+            raw_tk = str(r[0]).strip()
+            if not raw_tk.startswith("A") or len(raw_tk) < 7:
+                continue
+            tk = raw_tk[1:]
+            name = str(r[1] or tk).strip()
+            market = str(r[3] or "코스피").strip()
+            style = str(r[4] or "").strip()
+            sector = str(r[5] or "기타").strip()
+
+            price_now = _f(r[8], 0.0) or _f(r[197], 0.0) or 0.0
+            if price_now <= 0:
+                continue
+
+            mcap_eok = _f(r[29], 0.0) or 0.0
+            dy_pct = _f(r[10], 0.0) or 0.0
+            bps_now = _f(r[14], 0.0) or _f(r[87], 0.0) or _f(r[86], 0.0) or 0.0
+            eps_now = _f(r[15], 0.0) or 0.0
+
+            # 테트리스U 분기별 ROE (소수 -> % 변환: 75=2312, 76=2403, 77=2406, 78=2412E)
+            u_roe_2309 = (_f(r[74], None) * 100.0) if _f(r[74], None) is not None else None
+            u_roe_2312 = (_f(r[75], None) * 100.0) if _f(r[75], None) is not None else None
+            u_roe_2403 = (_f(r[76], None) * 100.0) if _f(r[76], None) is not None else None
+            u_roe_2406 = (_f(r[77], None) * 100.0) if _f(r[77], None) is not None else None
+            u_roe_2412 = (_f(r[78], None) * 100.0) if _f(r[78], None) is not None else None
+            u_roe_main = (_f(r[9], None) * 100.0) if _f(r[9], None) is not None else None
+
+            # 테트리스U 분기별 BPS (85=2312, 86=2403, 87=2406) 및 분기말 주가 (197=현재, 198=2406, 199=2403, 200=2312, 202=2306)
+            u_bps_2312 = _f(r[85], None)
+            u_bps_2403 = _f(r[86], None)
+            u_bps_2406 = _f(r[87], None)
+
+            p_2406 = _f(r[198], price_now) or price_now
+            p_2403 = _f(r[199], p_2406) or p_2406
+            p_2312 = _f(r[200], p_2403) or p_2403
+            p_2306 = _f(r[202], p_2312) or p_2312
+
+            qr = q_map.get(tk)
+            # 분기 시트: 177=23Q3 ROE, 178=23Q4 ROE, 179=24Q1 ROE / 217=23Q3 PBR, 218=23Q4 PBR, 219=24Q1 PBR / 207=23Q4 PER, 208=24Q1 PER
+            q_roe_23q4 = _f(qr[178], None) if qr else None
+            q_roe_24q1 = _f(qr[179], None) if qr else None
+            q_pbr_23q4 = _f(qr[218], None) if qr else None
+            q_pbr_24q1 = _f(qr[219], None) if qr else None
+            q_per_23q4 = _f(qr[207], None) if qr else None
+            q_per_24q1 = _f(qr[208], None) if qr else None
+
+            # 최신 분기 ROE (cur_roe) vs 직전 분기 ROE (prev_q_roe) 결정
+            # 2406(2Q) 및 2403(1Q) 유효 시 우선 사용, 아니면 분기 시트 24Q1 vs 23Q4 사용
+            if u_roe_2406 is not None and u_roe_2403 is not None and abs(u_roe_2406 - u_roe_2403) > 1e-4:
+                cur_roe = u_roe_2406
+                prev_q_roe = u_roe_2403
+                q_label = "24.1Q → 24.2Q"
+            elif q_roe_24q1 is not None and q_roe_23q4 is not None:
+                cur_roe = q_roe_24q1
+                prev_q_roe = q_roe_23q4
+                q_label = "23.4Q → 24.1Q"
+            else:
+                cur_roe = u_roe_main if u_roe_main is not None else (u_roe_2406 or u_roe_2403 or 0.0)
+                prev_q_roe = u_roe_2312 if u_roe_2312 is not None else (u_roe_2309 or cur_roe)
+                q_label = "직전분기 → 최신분기"
+
+            # 연간/컨센서스 ROE(u_roe_main)가 최신 분기보다 더 최신 특성을 반영할 경우 병행 제공
+            qoq_roe_diff = cur_roe - prev_q_roe
+
+            # 최신 PBR 및 직전 분기 PBR 산출
+            u_pbr_now = _f(r[11], None)
+            pbr_2406 = (p_2406 / u_bps_2406) if (u_bps_2406 and u_bps_2406 > 0) else None
+            pbr_2403 = (p_2403 / u_bps_2403) if (u_bps_2403 and u_bps_2403 > 0) else None
+            pbr_2312 = (p_2312 / u_bps_2312) if (u_bps_2312 and u_bps_2312 > 0) else None
+
+            if u_pbr_now is not None and u_pbr_now > 0:
+                cur_pbr = u_pbr_now
+            elif pbr_2406 is not None and pbr_2406 > 0:
+                cur_pbr = pbr_2406
+            elif q_pbr_24q1 is not None and q_pbr_24q1 > 0:
+                cur_pbr = q_pbr_24q1
+            else:
+                cur_pbr = 0.0
+
+            if pbr_2403 is not None and pbr_2403 > 0 and abs(cur_pbr - pbr_2403) > 1e-4:
+                prev_q_pbr = pbr_2403
+            elif q_pbr_23q4 is not None and q_pbr_23q4 > 0:
+                prev_q_pbr = q_pbr_23q4
+            elif pbr_2312 is not None and pbr_2312 > 0:
+                prev_q_pbr = pbr_2312
+            else:
+                prev_q_pbr = cur_pbr
+
+            if cur_pbr <= 0:
+                continue
+
+            qoq_pbr_diff = cur_pbr - prev_q_pbr
+            qoq_pbr_growth_pct = ((cur_pbr - prev_q_pbr) / prev_q_pbr * 100.0) if prev_q_pbr > 0 else 0.0
+
+            # 최신 PER 및 직전 분기 PER
+            u_per_now = _f(r[12], None)
+            if q_per_24q1 is not None and 0 < q_per_24q1 < 500:
+                cur_per = q_per_24q1
+            elif u_per_now is not None and 0 < u_per_now < 500:
+                cur_per = u_per_now
+            elif eps_now > 0:
+                cur_per = price_now / eps_now
+            else:
+                cur_per = 0.0
+
+            prev_q_per = q_per_23q4 if (q_per_23q4 is not None and q_per_23q4 > 0) else cur_per
+
+            # ROE / PBR 가성비 비율 (PBR 1배당 창출 ROE %, 높을수록 저PBR·고ROE 핵심 우량주)
+            roe_pbr_ratio = (cur_roe / cur_pbr) if cur_pbr >= 0.05 else 0.0
+
+            # 분기 주가 상승률 (QoQ) 및 전년동기 대비 주가 상승률 (YoY)
+            qoq_price_growth_pct = ((p_2406 - p_2403) / p_2403 * 100.0) if p_2403 > 0 else 0.0
+            yoy_price_growth_pct = ((price_now - p_2306) / p_2306 * 100.0) if p_2306 > 0 else 0.0
+
+            records.append((
+                tk,
+                name,
+                market,
+                sector,
+                style,
+                round(price_now, 0),
+                round(mcap_eok, 1),
+                round(cur_roe, 2),
+                round(prev_q_roe, 2),
+                round(qoq_roe_diff, 2),
+                round(u_roe_2312 if u_roe_2312 is not None else prev_q_roe, 2),
+                round(u_roe_2403 if u_roe_2403 is not None else prev_q_roe, 2),
+                round(u_roe_2406 if u_roe_2406 is not None else cur_roe, 2),
+                round(u_roe_2412 if u_roe_2412 is not None else cur_roe, 2),
+                round(cur_pbr, 2),
+                round(prev_q_pbr, 2),
+                round(qoq_pbr_diff, 2),
+                round(qoq_pbr_growth_pct, 2),
+                round(cur_per, 2),
+                round(prev_q_per, 2),
+                round(bps_now, 0),
+                round(u_bps_2403 or bps_now, 0),
+                round(eps_now, 0),
+                round(dy_pct, 2),
+                round(roe_pbr_ratio, 2),
+                round(qoq_price_growth_pct, 2),
+                round(yoy_price_growth_pct, 2),
+                q_label,
+            ))
+        wb.close()
+
+        if records:
+            c.executemany(
+                '''
+                INSERT OR REPLACE INTO tetris_roe_pbr_screener VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ''',
+                records,
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"[Tetris Screener Seed Error]: {e}")
+    finally:
+        conn.close()
+
+
+def get_dart_screener_results(conditions: dict):
+    """
+    ROE / PBR / PER 관점의 핵심 종목 필터링 엔진:
+    - ROE가 높은 수준(예: ROE >= 8~12%)이거나 전분기 대비 증가(QoQ ΔROE >= +0.5~+2.0%p)하는 상황에서
+    - PBR이 낮고(예: PBR <= 1.0~1.5배) 전분기 대비 PBR이 크게 늘어나지 않은(QoQ ΔPBR <= +0.10~+0.20배)
+      저평가·고효율(High ROE/PBR Ratio) 종목을 선별합니다.
+    """
+    ensure_tetris_roe_pbr_seeded()
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM tetris_roe_pbr_screener")
+    rows = [dict(r) for r in c.fetchall()]
     conn.close()
-    
-    # ticker별 그룹화
-    ticker_map = {}
-    for r in all_rows:
-        tk = r['ticker']
-        if tk not in ticker_map:
-            ticker_map[tk] = []
-        ticker_map[tk].append(r)
-        
+
+    # 필터 파라미터 파싱
+    # 1) ROE 및 전분기 대비 ROE 개선 결합 모드:
+    #    - "HIGH_OR_UP" (디폴트 추천): (현재 ROE >= min_roe) OR (전분기 대비 ROE 증감 >= min_qoq_roe_diff & 현재 ROE >= floor_roe)
+    #    - "HIGH_AND_UP": (현재 ROE >= min_roe) AND (전분기 대비 ROE 증감 >= min_qoq_roe_diff)
+    #    - "HIGH_ONLY": 현재 ROE 범위만 체크
+    #    - "UP_ONLY": 전분기 대비 ROE 증가만 체크
+    roe_mode = str(conditions.get("roe_filter_mode", "HIGH_OR_UP")).upper()
+
+    use_roe = bool(conditions.get("use_roe", True))
+    min_roe = float(conditions.get("min_roe", 8.0))
+    max_roe = float(conditions.get("max_roe", 100.0))
+
+    use_qoq_roe = bool(conditions.get("use_qoq_roe", True))
+    min_qoq_roe_diff = float(conditions.get("min_qoq_roe_diff", 1.0))
+    min_roe_floor_for_qoq = float(conditions.get("min_roe_floor_for_qoq", 3.0))
+
+    # 하위 호환: 기존 프론트엔드가 use_yoy_roe_up으로 보낸 경우에도 지원
+    if "use_qoq_roe" not in conditions and conditions.get("use_yoy_roe_up", False):
+        use_qoq_roe = True
+        min_qoq_roe_diff = float(conditions.get("min_yoy_roe_diff", 0.0))
+
+    # 2) PBR 절대 수준 필터 (저PBR)
+    use_pbr = bool(conditions.get("use_pbr", True))
+    min_pbr = float(conditions.get("min_pbr", 0.1))
+    max_pbr = float(conditions.get("max_pbr", 1.5))
+
+    # 3) 전분기 대비 PBR 상승폭 제한 필터 (PBR이 크게 늘어나지 않은 종목)
+    use_qoq_pbr_limit = bool(conditions.get("use_qoq_pbr_limit", True))
+    max_qoq_pbr_diff = float(conditions.get("max_qoq_pbr_diff", 0.15))
+    max_qoq_pbr_growth_pct = float(conditions.get("max_qoq_pbr_growth_pct", 20.0))
+
+    # 4) PER 필터 (적자 기업 제외 또는 저PER 필터)
+    use_per = bool(conditions.get("use_per", False))
+    min_per = float(conditions.get("min_per", 0.5))
+    max_per = float(conditions.get("max_per", 25.0))
+
+    # 5) ROE / PBR 가성비 비율 (PBR 1배당 ROE %)
+    use_roe_pbr_ratio = bool(conditions.get("use_roe_pbr_ratio", False))
+    min_roe_pbr_ratio = float(conditions.get("min_roe_pbr_ratio", 10.0))
+
+    # 6) 주가 상승률 및 시장/시총 보조 필터
+    use_price_change = bool(conditions.get("use_price_change", False)) or bool(conditions.get("use_yoy_price_up", False))
+    min_price_change = float(conditions.get("min_price_change", conditions.get("min_yoy_price_growth", -30.0)))
+    max_price_change = float(conditions.get("max_price_change", 50.0))
+
+    use_mcap = bool(conditions.get("use_mcap", False))
+    min_mcap_eok = float(conditions.get("min_mcap_eok", 500.0))
+
+    market_filter = str(conditions.get("market_filter", "ALL")).upper()
+    sort_by = str(conditions.get("sort_by", "ROE_PBR_RATIO")).upper()
+
     results = []
-    for tk, list_rows in ticker_map.items():
-        if not list_rows:
+    for r in rows:
+        roe = float(r.get("roe") or 0.0)
+        prev_q_roe = float(r.get("prev_q_roe") or 0.0)
+        qoq_roe_diff = float(r.get("qoq_roe_diff") or 0.0)
+        pbr = float(r.get("pbr") or 0.0)
+        prev_q_pbr = float(r.get("prev_q_pbr") or 0.0)
+        qoq_pbr_diff = float(r.get("qoq_pbr_diff") or 0.0)
+        qoq_pbr_growth_pct = float(r.get("qoq_pbr_growth_pct") or 0.0)
+        per = float(r.get("per") or 0.0)
+        roe_pbr_ratio = float(r.get("roe_pbr_ratio") or 0.0)
+        qoq_price_g = float(r.get("qoq_price_growth_pct") or 0.0)
+        yoy_price_g = float(r.get("yoy_price_growth_pct") or 0.0)
+        mcap_eok = float(r.get("market_cap_eok") or 0.0)
+        mkt = str(r.get("market") or "")
+
+        if market_filter == "KOSPI" and "코스피" not in mkt:
             continue
-            
-        latest = list_rows[0] # 최신 TTM 레코드
-        cur_year = int(latest['year']) if str(latest['year']).isdigit() else 2024
-        cur_q = latest['quarter']
-        
-        # 1년 전 동일 분기 레코드 찾기 (예: 2024_11014 -> 2023_11014)
-        prev_year_str = str(cur_year - 1)
-        prev_item = next((x for x in list_rows if str(x['year']) == prev_year_str and x['quarter'] == cur_q), None)
-        if not prev_item and len(list_rows) >= 4:
-            prev_item = list_rows[min(4, len(list_rows)-1)]
+        if market_filter == "KOSDAQ" and "코스닥" not in mkt:
+            continue
 
-        # 현재 TTM 실적
-        rev_ttm = latest.get('revenue_ttm') or (latest.get('revenue') or 0) * (1.0 if cur_q == '11011' else 4.0)
-        op_ttm = latest.get('operating_profit_ttm') or (latest.get('operating_profit') or 0) * (1.0 if cur_q == '11011' else 4.0)
-        np_ttm = latest.get('net_profit_ttm') or (latest.get('net_profit') or 0) * (1.0 if cur_q == '11011' else 4.0)
-        equity = latest.get('equity') or 0
-        assets = latest.get('assets') or 0
-        
-        roe = latest.get('roe_ttm') or ((np_ttm / equity * 100.0) if equity > 0 else 0)
-        op_margin = latest.get('op_margin_ttm') or ((op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0)
-        
-        rev_eok = rev_ttm / 100000000.0
-        op_eok = op_ttm / 100000000.0
-        np_eok = np_ttm / 100000000.0
-        
-        # 전년 동분기 TTM 실적
-        prev_roe = 0
-        prev_rev_ttm = 0
-        prev_op_ttm = 0
-        prev_np_ttm = 0
-        
-        if prev_item:
-            p_q = prev_item['quarter']
-            p_mult = 1.0 if p_q == '11011' else 4.0
-            prev_rev_ttm = prev_item.get('revenue_ttm') or (prev_item.get('revenue') or 0) * p_mult
-            prev_op_ttm = prev_item.get('operating_profit_ttm') or (prev_item.get('operating_profit') or 0) * p_mult
-            prev_np_ttm = prev_item.get('net_profit_ttm') or (prev_item.get('net_profit') or 0) * p_mult
-            p_eq = prev_item.get('equity') or 0
-            prev_roe = prev_item.get('roe_ttm') or ((prev_np_ttm / p_eq * 100.0) if p_eq > 0 else 0)
-            
-        # YoY 변화량 계산
-        yoy_roe_diff = roe - prev_roe if prev_item else 0
-        yoy_rev_growth = ((rev_ttm - prev_rev_ttm) / abs(prev_rev_ttm) * 100.0) if (prev_item and prev_rev_ttm != 0) else 0
-        yoy_op_growth = ((op_ttm - prev_op_ttm) / abs(prev_op_ttm) * 100.0) if (prev_item and prev_op_ttm != 0) else 0
-        yoy_np_growth = ((np_ttm - prev_np_ttm) / abs(prev_np_ttm) * 100.0) if (prev_item and prev_np_ttm != 0) else 0
+        # [핵심 조건 1] ROE 수준 & 전분기 대비 ROE 개선 필터
+        cond_high_roe = (min_roe <= roe <= max_roe)
+        cond_qoq_roe_up = (qoq_roe_diff >= min_qoq_roe_diff) and (roe >= min_roe_floor_for_qoq) and (roe <= max_roe)
 
-        # 절대조건 필터링
-        if conditions.get('use_roe', False):
-            if roe < float(conditions.get('min_roe', -20)) or roe > float(conditions.get('max_roe', 200)):
+        if use_roe and use_qoq_roe:
+            if roe_mode == "HIGH_AND_UP":
+                if not (cond_high_roe and cond_qoq_roe_up):
+                    continue
+            else:
+                # HIGH_OR_UP: ROE가 이미 높은 수준이거나, 전분기 대비 뚜렷하게 증가하는 종목 모두 포착
+                if not (cond_high_roe or cond_qoq_roe_up):
+                    continue
+        elif use_roe:
+            if not cond_high_roe:
                 continue
-        if conditions.get('use_op_margin', False):
-            if op_margin < float(conditions.get('min_op_margin', 0)):
+        elif use_qoq_roe:
+            if not cond_qoq_roe_up:
                 continue
-        if conditions.get('use_revenue', False):
-            if rev_eok < float(conditions.get('min_revenue', 0)):
+
+        # [핵심 조건 2] PBR 절대 수준 필터 (저PBR)
+        if use_pbr:
+            if pbr < min_pbr or pbr > max_pbr:
                 continue
-        if conditions.get('use_op', False):
-            if op_eok < float(conditions.get('min_op', 0)):
+
+        # [핵심 조건 3] 전분기 대비 PBR이 크게 늘어나지 않은 종목 필터
+        if use_qoq_pbr_limit:
+            if qoq_pbr_diff > max_qoq_pbr_diff:
                 continue
-        if conditions.get('use_net_profit', False):
-            if np_eok < float(conditions.get('min_net_profit', 0)):
+            if qoq_pbr_growth_pct > max_qoq_pbr_growth_pct:
                 continue
-                
-        # 전년대비(YoY) 지표 상승 필터링
-        if conditions.get('use_yoy_roe_up', False):
-            min_diff = float(conditions.get('min_yoy_roe_diff', 0))
-            if prev_item and yoy_roe_diff < min_diff:
+
+        # [핵심 조건 4] PER 범위 필터
+        if use_per:
+            if per <= 0 or per < min_per or per > max_per:
                 continue
-            if not prev_item and min_diff > 0:
+
+        # [핵심 조건 5] ROE / PBR 가성비 지수 필터 (ROE ÷ PBR)
+        if use_roe_pbr_ratio:
+            if roe_pbr_ratio < min_roe_pbr_ratio:
                 continue
-                
-        if conditions.get('use_yoy_rev_up', False):
-            min_rev_g = float(conditions.get('min_yoy_rev_growth', 0))
-            if prev_item and yoy_rev_growth < min_rev_g:
+
+        # [보조 조건 6] 분기 주가 등락률 범위 필터 (주가가 아직 과열되지 않았거나 상승 전환 중인 종목)
+        if use_price_change:
+            if qoq_price_g < min_price_change or qoq_price_g > max_price_change:
                 continue
-            if not prev_item and min_rev_g > 0:
+
+        # [보조 조건 7] 최소 시가총액 필터
+        if use_mcap:
+            if mcap_eok < min_mcap_eok:
                 continue
-                
-        if conditions.get('use_yoy_op_up', False):
-            min_op_g = float(conditions.get('min_yoy_op_growth', 0))
-            if prev_item and yoy_op_growth < min_op_g:
-                continue
-            if not prev_item and min_op_g > 0:
-                continue
-                
-        if conditions.get('use_yoy_np_up', False):
-            min_np_g = float(conditions.get('min_yoy_np_growth', 0))
-            if prev_item and yoy_np_growth < min_np_g:
-                continue
-            if not prev_item and min_np_g > 0:
-                continue
+
+        # 선별 사유 태그 생성
+        tags = []
+        if roe >= 12.0:
+            tags.append(f"고ROE({roe:.1f}%)")
+        if qoq_roe_diff >= 1.0:
+            tags.append(f"전분기비 ROE +{qoq_roe_diff:.1f}%p↑")
+        if pbr <= 0.8:
+            tags.append(f"저PBR({pbr:.2f}배)")
+        if qoq_pbr_diff <= 0.0:
+            tags.append(f"PBR 동결/하락({qoq_pbr_diff:+.2f}배)")
+        elif qoq_pbr_diff <= 0.15:
+            tags.append(f"PBR 상승억제({qoq_pbr_diff:+.2f}배)")
 
         results.append({
-            "ticker": tk,
-            "year": latest['year'],
-            "quarter": latest['quarter'],
-            "is_ttm": True,
+            "ticker": r["ticker"],
+            "name": r["name"],
+            "market": mkt,
+            "sector": r["sector"],
+            "style": r["style"],
+            "price": int(r.get("price") or 0),
+            "market_cap_eok": round(mcap_eok, 1),
             "roe": round(roe, 2),
-            "operating_margin": round(op_margin, 2),
-            "revenue_eok": round(rev_eok, 1),
-            "op_profit_eok": round(op_eok, 1),
-            "net_profit_eok": round(np_eok, 1),
-            "assets_eok": round(assets / 100000000.0, 1),
-            "equity_eok": round(equity / 100000000.0, 1),
-            # YoY 전년대비 수치
-            "has_yoy": prev_item is not None,
-            "yoy_roe_diff": round(yoy_roe_diff, 2),
-            "yoy_rev_growth": round(yoy_rev_growth, 1),
-            "yoy_op_growth": round(yoy_op_growth, 1),
-            "yoy_np_growth": round(yoy_np_growth, 1),
+            "prev_q_roe": round(prev_q_roe, 2),
+            "qoq_roe_diff": round(qoq_roe_diff, 2),
+            "yoy_roe_diff": round(qoq_roe_diff, 2),  # 하위 호환
+            "roe_2312": round(float(r.get("roe_2312") or 0.0), 2),
+            "roe_2403": round(float(r.get("roe_2403") or 0.0), 2),
+            "roe_2406": round(float(r.get("roe_2406") or 0.0), 2),
+            "roe_2412_est": round(float(r.get("roe_2412_est") or 0.0), 2),
+            "pbr": round(pbr, 2),
+            "prev_q_pbr": round(prev_q_pbr, 2),
+            "qoq_pbr_diff": round(qoq_pbr_diff, 2),
+            "qoq_pbr_growth_pct": round(qoq_pbr_growth_pct, 1),
+            "per": round(per, 2),
+            "prev_q_per": round(float(r.get("prev_q_per") or 0.0), 2),
+            "bps": int(r.get("bps") or 0),
+            "eps": int(r.get("eps") or 0),
+            "div_yield": round(float(r.get("div_yield") or 0.0), 2),
+            "roe_pbr_ratio": round(roe_pbr_ratio, 2),
+            "qoq_price_growth_pct": round(qoq_price_g, 2),
+            "yoy_price_growth_pct": round(yoy_price_g, 2),
+            "quarter_label": r.get("quarter_label") or "23.4Q → 24.1Q",
+            "selection_tags": tags,
         })
+
+    if sort_by == "QOQ_ROE_DIFF":
+        results.sort(key=lambda x: (x["qoq_roe_diff"], x["roe_pbr_ratio"]), reverse=True)
+    elif sort_by == "ROE_DESC":
+        results.sort(key=lambda x: (x["roe"], -x["pbr"]), reverse=True)
+    elif sort_by == "PBR_ASC":
+        results.sort(key=lambda x: (x["pbr"], -x["roe"]))
+    elif sort_by == "PER_ASC":
+        results.sort(key=lambda x: (x["per"] if x["per"] > 0 else 9999.0, -x["roe"]))
+    else:
+        # 기본: ROE/PBR 가성비 지수 (ROE ÷ PBR) 높은 순 정렬
+        results.sort(key=lambda x: (x["roe_pbr_ratio"], x["qoq_roe_diff"]), reverse=True)
 
     return results
 

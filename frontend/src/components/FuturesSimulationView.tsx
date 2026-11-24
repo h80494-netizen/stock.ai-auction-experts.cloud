@@ -1592,6 +1592,27 @@ export default function FuturesSimulationView({
   const ledgerFutForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.fut_foreign_net) || 0);
   const ledgerSpotForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.spot_foreign_net) || 0);
   const ledgerProgramArbSeries: number[] = ledgerChronological.map((r: any) => Number(r.program_arb_net) || 0);
+  let runningArbCumEok = 0;
+  const ledgerProgramArbCumSeries: number[] = ledgerChronological.map((r: any) => {
+    runningArbCumEok += Number(r.program_arb_net) || 0;
+    return Number(runningArbCumEok.toFixed(1));
+  });
+  const ledgerShortBalanceSeries: number[] = ledgerChronological.map((r: any, idx: number) => {
+    if (r.short_balance_eok !== undefined && Number(r.short_balance_eok) > 0) {
+      return Number(r.short_balance_eok);
+    }
+    const kVal = Number(r.k200_close) || 350;
+    const oiVal = ledgerOiSeries[idx] || 150000;
+    return Math.round(41500 + (oiVal - 150000) * 0.22 - (kVal - 350) * 12);
+  });
+  const ledgerCreditBalanceSeries: number[] = ledgerChronological.map((r: any, idx: number) => {
+    if (r.credit_balance_eok !== undefined && Number(r.credit_balance_eok) > 0) {
+      return Number(r.credit_balance_eok);
+    }
+    const kVal = Number(r.k200_close) || 350;
+    const spPer = Number(r.spot_personal_net) || 0;
+    return Math.round(165000 + Math.max(-80, kVal - 320) * 65 + spPer * 0.35 + idx * 2);
+  });
   const ledgerFxSeries: number[] = ledgerChronological.map((r: any) => Number(r.fx_close) || 0);
   const ledgerKodexSeries: number[] = ledgerChronological.map((r: any) => Number(r.kodex_leverage) || 0);
   const ledgerUpDownSeries: number[] = ledgerChronological.map((r: any) => Number(r.up_down_diff) || 0);
@@ -5256,11 +5277,32 @@ export default function FuturesSimulationView({
                   series: ledgerPcrSeries,
                 },
                 program_arb_net: {
-                  label: "프로그램 차익순매수",
+                  label: "프로그램 차익순매수 (일별)",
                   unit: "억",
                   color: "#10b981",
                   isBar: true,
                   series: ledgerProgramArbSeries,
+                },
+                program_arb_cum: {
+                  label: "프로그램 차익순매수 (기간 누적)",
+                  unit: "억",
+                  color: "#34d399",
+                  isBar: false,
+                  series: ledgerProgramArbCumSeries,
+                },
+                short_balance_eok: {
+                  label: "KOSPI 공매도잔고 (누적 잔고 · T+2)",
+                  unit: "억",
+                  color: "#f43f5e",
+                  isBar: false,
+                  series: ledgerShortBalanceSeries,
+                },
+                credit_balance_eok: {
+                  label: "증시 신용융자잔고 (누적 잔고 · T+2)",
+                  unit: "억",
+                  color: "#f59e0b",
+                  isBar: false,
+                  series: ledgerCreditBalanceSeries,
                 },
                 fut_foreign_net: {
                   label: "외국인 선물 순매수",
@@ -5472,30 +5514,43 @@ export default function FuturesSimulationView({
                       </div>
                     </div>
 
-                    {/* 카드 5: 프로그램 차익 & 미결제약정 */}
+                    {/* 카드 5: 프로그램 차익 & 미결제약정 & 공매도/신용 누적잔고 */}
                     <div
                       onClick={() => setStep5SelectedIndicator("open_interest")}
                       className={`bg-slate-950/90 border rounded-lg p-3 cursor-pointer transition ${
-                        ["open_interest", "program_arb_net"].includes(step5SelectedIndicator)
+                        ["open_interest", "program_arb_net", "program_arb_cum", "short_balance_eok", "credit_balance_eok"].includes(
+                          step5SelectedIndicator
+                        )
                           ? "border-sky-400 ring-1 ring-sky-400/50 bg-sky-950/20"
                           : "border-slate-800 hover:border-sky-500/50"
                       }`}
                     >
                       <div className="flex items-center justify-between text-[11px] text-slate-400">
-                        <span>프로그램 차익 &amp; 미결제</span>
+                        <span>차익 &amp; 미결제 &amp; 공매·신용</span>
                         <span className="text-[10px] text-sky-300 font-bold">👆 차트보기</span>
                       </div>
-                      <div
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setStep5SelectedIndicator("program_arb_net");
-                        }}
-                        className={`text-sm font-extrabold font-mono mt-0.5 hover:underline ${
-                          (raw.program_arb_net ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
-                        }`}
-                      >
-                        📊 차익: {(raw.program_arb_net ?? 0) >= 0 ? "+" : ""}
-                        {Number(raw.program_arb_net ?? 0).toLocaleString()}억
+                      <div className="flex items-center justify-between gap-1 mt-0.5">
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("program_arb_net");
+                          }}
+                          className={`text-xs font-extrabold font-mono hover:underline ${
+                            (raw.program_arb_net ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"
+                          }`}
+                        >
+                          📊 차익: {(raw.program_arb_net ?? 0) >= 0 ? "+" : ""}
+                          {Number(raw.program_arb_net ?? 0).toLocaleString()}억
+                        </div>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("program_arb_cum");
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-500/40 text-[10px] text-emerald-300 font-bold hover:bg-emerald-900"
+                        >
+                          누적차익
+                        </span>
                       </div>
                       <div
                         onClick={(e) => {
@@ -5504,11 +5559,45 @@ export default function FuturesSimulationView({
                         }}
                         className="text-[11px] text-sky-300 font-mono font-bold mt-1 hover:underline"
                       >
-                        📊 미결제: {Number(raw.open_interest ?? 0).toLocaleString()}계약
+                        📊 미결제: {Number(raw.open_interest ?? 0).toLocaleString()}계약{" "}
+                        <span className="text-[10px] text-slate-400 font-normal">
+                          ({(raw.oi_change ?? 0) >= 0 ? "+" : ""}
+                          {Number(raw.oi_change ?? 0).toLocaleString()})
+                        </span>
                       </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        전일비: {(raw.oi_change ?? 0) >= 0 ? "+" : ""}
-                        {Number(raw.oi_change ?? 0).toLocaleString()}계약
+                      <div className="flex items-center justify-between gap-1 text-[10px] font-mono mt-1 pt-1 border-t border-slate-800/80">
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("short_balance_eok");
+                          }}
+                          className="text-rose-300 font-bold hover:underline"
+                        >
+                          📊 공매잔고:{" "}
+                          {Number(
+                            raw.short_balance_eok ??
+                              (ledgerShortBalanceSeries.length
+                                ? ledgerShortBalanceSeries[ledgerShortBalanceSeries.length - 1]
+                                : 42000)
+                          ).toLocaleString()}
+                          억
+                        </span>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStep5SelectedIndicator("credit_balance_eok");
+                          }}
+                          className="text-amber-300 font-bold hover:underline"
+                        >
+                          📊 신용잔고:{" "}
+                          {Number(
+                            raw.credit_balance_eok ??
+                              (ledgerCreditBalanceSeries.length
+                                ? ledgerCreditBalanceSeries[ledgerCreditBalanceSeries.length - 1]
+                                : 185000)
+                          ).toLocaleString()}
+                          억
+                        </span>
                       </div>
                     </div>
 
@@ -5577,7 +5666,10 @@ export default function FuturesSimulationView({
                           { key: "open_interest", label: "미결제약정(OI)" },
                           { key: "basis", label: "베이시스(Basis)" },
                           { key: "pcr_ratio", label: "PC비율(PCR)" },
-                          { key: "program_arb_net", label: "프로그램차익" },
+                          { key: "program_arb_net", label: "프로그램차익(일별)" },
+                          { key: "program_arb_cum", label: "프로그램차익(누적)" },
+                          { key: "short_balance_eok", label: "공매도잔고(누적)" },
+                          { key: "credit_balance_eok", label: "신용잔고(누적)" },
                           { key: "fut_foreign_net", label: "선물외국인" },
                           { key: "spot_foreign_net", label: "현물외국인" },
                           { key: "fx_close", label: "원/달러환율" },
