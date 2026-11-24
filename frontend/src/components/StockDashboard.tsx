@@ -182,13 +182,16 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
 
   const currencyInfo = React.useMemo(() => {
     if (!stockDetails?.stock?.ticker) return { basic: '원', hm: '억원', div: 100000000 };
-    const t = stockDetails.stock.ticker.toUpperCase();
-    if (t.endsWith('.KS') || t.endsWith('.KQ')) return { basic: '원', hm: '억원', div: 100000000 };
+    const t = String(stockDetails.stock.ticker).toUpperCase().trim();
+    const pure = t.replace(/^KRX:/, '').replace(/\.KS$/, '').replace(/\.KQ$/, '');
+    if (/^\d{6}$/.test(pure) || t.endsWith('.KS') || t.endsWith('.KQ') || stockDetails?.stock?.currency === 'KRW') {
+      return { basic: '원', hm: '억원', div: 100000000 };
+    }
     if (t.endsWith('.T')) return { basic: 'YEN', hm: '억엔', div: 100000000 };
     if (t.endsWith('.SS') || t.endsWith('.SZ') || t.endsWith('.CN')) return { basic: 'YUAN', hm: '억위안', div: 100000000 };
     if (t.endsWith('.HK')) return { basic: 'HKD', hm: '억홍콩달러', div: 100000000 };
     return { basic: 'US$', hm: '억달러', div: 100000000 };
-  }, [stockDetails?.stock?.ticker]);
+  }, [stockDetails?.stock?.ticker, stockDetails?.stock?.currency]);
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a] text-gray-200 overflow-y-auto">

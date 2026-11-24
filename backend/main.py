@@ -1338,51 +1338,80 @@ def get_stock_summary(ticker: str):
         except Exception:
             pass
             
-    # If already cached, return immediately
-    if cache_key in profiles:
+    # 이미 유효한 요약이 캐시에 있으면 즉시 반환하되, "사업내용 요약을 찾을 수 없습니다." 실패 메시지는 재조회!
+    if cache_key in profiles and profiles[cache_key] and "찾을 수 없습니다" not in str(profiles[cache_key]):
         return {"summary": profiles[cache_key]}
     
     yf_ticker = to_yf_ticker(ticker)
     
     text = ""
-    try:
-        from utils.yf_util import get_yf_ticker
-        info = get_yf_ticker(yf_ticker).info
-        text = info.get("longBusinessSummary") or info.get("description") or ""
-    except Exception as e:
-        print("YFinance Summary error:", e)
-        
-    if not text and is_kr:
+    if is_kr:
         import requests
         from bs4 import BeautifulSoup
-        url = f"https://finance.naver.com/item/main.naver?code={pure_ticker}"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        # 1순위: 네이버 금융 WiseReport 기업개요 코멘트 (li.dot_cmp)
         try:
-            res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(res.text, "html.parser")
-            summary_div = soup.select_one(".summary_info p")
-            if summary_div:
-                for br in summary_div.find_all("br"):
-                    br.replace_with("\n")
-                text = summary_div.get_text(separator=" ", strip=True)
+            wr_url = f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={pure_ticker}"
+            wr_res = requests.get(wr_url, headers=headers, timeout=5)
+            if wr_res.status_code == 200:
+                wr_soup = BeautifulSoup(wr_res.text, "html.parser")
+                dot_items = [li.get_text(" ", strip=True) for li in wr_soup.select("li.dot_cmp") if li.get_text(strip=True)]
+                if dot_items:
+                    text = "\n• " + "\n• ".join(dot_items)
         except Exception as e:
-            print("Naver Summary error:", e)
-            
+            print("WiseReport Summary error:", e)
+
+        # 2순위: 네이버 금융 기본 summary_info
+        if not text:
+            try:
+                url = f"https://finance.naver.com/item/main.naver?code={pure_ticker}"
+                res = requests.get(url, headers=headers, timeout=5)
+                soup = BeautifulSoup(res.content.decode("euc-kr", "replace"), "html.parser")
+                summary_div = soup.select_one(".summary_info")
+                if summary_div:
+                    ps = [p.get_text(" ", strip=True) for p in summary_div.find_all("p") if p.get_text(strip=True)]
+                    if ps:
+                        text = "\n• " + "\n• ".join(ps)
+            except Exception as e:
+                print("Naver Summary error:", e)
+
+        # 3순위: 테트리스 DB 업종 및 섹터 요약 폴백
+        if not text:
+            try:
+                conn = db.get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT name, market, sector FROM tetris_roe_pbr_screener WHERE ticker = ?", (pure_ticker,))
+                tr = c.fetchone()
+                conn.close()
+                if tr:
+                    text = f"{tr['name']}({pure_ticker})은(는) {tr['market']} 시장의 [{tr['sector']}] 섹터에 속한 상장기업입니다."
+            except Exception:
+                pass
+
+    if not text:
+        try:
+            from utils.yf_util import get_yf_ticker
+            info = get_yf_ticker(yf_ticker).info
+            text = info.get("longBusinessSummary") or info.get("description") or ""
+        except Exception as e:
+            print("YFinance Summary error:", e)
+
     if not text:
         text = "사업내용 요약을 찾을 수 없습니다."
         translated_text = text
+    elif is_kr:
+        translated_text = text.lstrip("\n")
     else:
-        # Translate to Korean
         translated_text = translate_text(text, "ko")
-        
-    # Save to cache
-    profiles[cache_key] = translated_text
-    try:
-        with open(db_path, 'w', encoding='utf-8') as f:
-            json.dump(profiles, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print("Error saving profile cache:", e)
-        
+
+    if "찾을 수 없습니다" not in translated_text:
+        profiles[cache_key] = translated_text
+        try:
+            with open(db_path, 'w', encoding='utf-8') as f:
+                json.dump(profiles, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print("Error saving profile cache:", e)
+
     return {"summary": translated_text}
 
 @app.get("/api/report/{ticker}")
@@ -2882,18 +2911,36 @@ def api_get_fundamentals(ticker: str):
         except:
             pass
 
-        # Add DB Fallback for name and price
+        # Add DB Fallback for name and price (stocks 테이블 및 tetris_roe_pbr_screener 테이블 동시 조회)
         db_fallback_name = None
         db_fallback_price = 0
         try:
-            from database import get_stock
+            from database import get_stock, get_db_connection
             clean_code = yf_ticker.replace('.KS', '').replace('.KQ', '')
             db_s = get_stock(clean_code)
             if db_s:
                 db_fallback_name = db_s.get('name')
                 db_fallback_price = db_s.get('price') or 0
-        except:
+            if not db_fallback_name:
+                _conn = get_db_connection()
+                _cur = _conn.cursor()
+                _cur.execute("SELECT name, price FROM tetris_roe_pbr_screener WHERE ticker = ?", (clean_code,))
+                _tr = _cur.fetchone()
+                _conn.close()
+                if _tr:
+                    db_fallback_name = _tr["name"]
+                    if not db_fallback_price:
+                        db_fallback_price = _tr["price"] or 0
+        except Exception:
             pass
+
+        nv_kor_name = nv_fund.get("name", "") if nv_fund else ""
+        yf_short_name = info.get("shortName") or ""
+        # 한국 주식은 네이버 한글 종목명 또는 DB 한글 종목명을 최우선 사용하여 yfinance의 "154040.KS,0P00011NKI" 깨진 코드명을 차단
+        if is_krx:
+            resolved_name = nv_kor_name or db_fallback_name or (yf_short_name if "," not in yf_short_name and ".KS" not in yf_short_name else "") or pure_ticker
+        else:
+            resolved_name = yf_short_name or db_fallback_name or yf_ticker
 
         import math
         def _sanitize_json(obj):
@@ -2907,7 +2954,7 @@ def api_get_fundamentals(ticker: str):
 
         return _sanitize_json({
             "ticker": pure_ticker if is_krx else ticker,
-            "name": info.get("shortName") or db_fallback_name or (pure_ticker if is_krx else yf_ticker),
+            "name": resolved_name,
             "par_value": nv_fund.get("par_value", 0) if nv_fund else 0,
             "per": nv_fund.get("per", "N/A") if nv_fund and nv_fund.get("per") != "N/A" else round(info.get("trailingPE", 0) or 0, 2),
             "per_next": nv_fund.get("per_next", "N/A"),

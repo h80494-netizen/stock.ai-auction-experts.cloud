@@ -109,6 +109,7 @@ def get_naver_fundamentals(code: str):
         'market_cap': 0,
         'current_price': 0,
         'par_value': 500,
+        'name': '',
         'financials_annual': [], 'financials_quarterly': []
     }
     
@@ -135,10 +136,12 @@ def get_naver_fundamentals(code: str):
             except Exception:
                 return 0.0
 
-        # 1. Integration (Current Valuation, Price, MarketCap, Shares)
+        # 1. Integration (Current Valuation, Price, MarketCap, Shares, StockName)
         res_int = requests.get(f'https://m.stock.naver.com/api/stock/{clean_code}/integration', headers=headers, timeout=5)
         if res_int.status_code == 200:
             int_json = res_int.json()
+            if int_json.get('stockName'):
+                fund_data['name'] = str(int_json['stockName']).strip()
             for info in int_json.get('totalInfos', []):
                 c_key = info.get('code', '')
                 raw_v = str(info.get('value', '')).strip()
@@ -175,12 +178,31 @@ def get_naver_fundamentals(code: str):
         if fund_data['market_cap'] > 0 and fund_data['current_price'] > 0:
             fund_data['shares'] = int(round(fund_data['market_cap'] / fund_data['current_price']))
 
-        # DART 12분기 DB에서 분기별/연간 자본총계(equity), 매출, 영업이익, 순이익 보조 맵 로드
+        # DART 12분기 DB에서 분기별/연간 자본총계(equity), 매출, 영업이익, 순이익 보조 맵 로드 (없으면 실시간 DART 12분기 수집)
         dart_map_by_ym = {}
         latest_dart_equity = 0.0
         try:
             import database as _db
             d_rows = _db.get_dart_financials(clean_code) or []
+            has_2026_3q = any(str(r.get('year')) == '2026' and str(r.get('quarter')) == '11014' for r in d_rows)
+            if len(d_rows) < 8 or not has_2026_3q:
+                try:
+                    from ingestion.scrapers.dart_scraper import dart_scraper
+                    data_12q = dart_scraper.get_financials_12quarters(clean_code)
+                    if data_12q:
+                        for d in data_12q:
+                            _db.insert_dart_financials(
+                                clean_code, d['year'], d['quarter'],
+                                d['assets'], d['equity'], d['liabilities'],
+                                d['revenue'], d['operating_profit'], d['net_profit']
+                            )
+                        try:
+                            _db.calculate_and_save_ttm_financials(clean_code)
+                        except Exception:
+                            pass
+                        d_rows = _db.get_dart_financials(clean_code) or []
+                except Exception:
+                    pass
             q_to_mm = {'11013': '03', '11012': '06', '11014': '09', '11011': '12'}
             for dr in d_rows:
                 ym = f"{dr.get('year')}{q_to_mm.get(str(dr.get('quarter')), '12')}"
@@ -266,14 +288,22 @@ def get_naver_fundamentals(code: str):
                 ym = p_obj.get('raw_ym', '')
                 d_row = dart_map_by_ym.get(ym)
 
-                # DART DB 값으로 누락된 영업이익/순이익/자본총계 보강
+                # DART DB 값(특히 2026년 3분기 202609 등 네이버에서 '-'로 비어있는 확정 공시 분기)으로 영업이익/순이익/자본총계 즉시 보강
                 if d_row:
+                    # DART 테이블의 revenue, operating_profit, net_profit은 (분기순수실적 * 4 연환산)으로 저장되어 있으므로
+                    # 분기 재무제표에서는 1/4(순수 분기 실적)로, 연간에서는 그대로 반영
+                    d_div = 4.0 if is_q else 1.0
+                    if not p_obj.get('revenue') and d_row.get('revenue'):
+                        p_obj['revenue'] = float(d_row['revenue']) / d_div
                     if not p_obj.get('operating_profit') and d_row.get('operating_profit'):
-                        p_obj['operating_profit'] = float(d_row['operating_profit']) / (annual_mult if is_q else 1.0)
+                        p_obj['operating_profit'] = float(d_row['operating_profit']) / d_div
                     if not p_obj.get('net_profit') and d_row.get('net_profit'):
-                        p_obj['net_profit'] = float(d_row['net_profit']) / (annual_mult if is_q else 1.0)
+                        p_obj['net_profit'] = float(d_row['net_profit']) / d_div
                     if not p_obj.get('equity') and d_row.get('equity'):
                         p_obj['equity'] = float(d_row['equity'])
+                    # DART에 실제 공시된 분기(예: 202609 = 2026.3Q)는 추정치(E) 꼬리표 제거
+                    p_obj['is_estimate'] = False
+                    p_obj['period'] = ym
 
                 np_val = float(p_obj.get('net_profit') or 0.0)
                 eq_val = float(p_obj.get('equity') or 0.0)
@@ -362,23 +392,32 @@ def get_naver_fundamentals(code: str):
         fund_data['financials_annual'] = parse_financials('annual')
         fund_data['financials_quarterly'] = parse_financials('quarter')
 
-        # 만약 DART 12분기 데이터는 있는데 네이버 분기 재무제표가 비어있는 종목이면 DART 분기 데이터로 직접 생성
-        if not fund_data['financials_quarterly'] and dart_map_by_ym:
+        # DART DB에는 존재하지만 네이버 분기 리스트(titles)에 없거나 빠져있는 최신 분기(예: 202609 = 2026년 3/4분기 등)를 자동 병합
+        if dart_map_by_ym:
+            existing_q_yms = {str(r.get('raw_ym') or str(r.get('period', ''))[:6]) for r in fund_data['financials_quarterly']}
             shares = float(fund_data.get('shares') or 0)
             cur_price = float(fund_data.get('current_price') or 0)
-            q_fallback = []
             for ym in sorted(dart_map_by_ym.keys())[-6:]:
+                if ym in existing_q_yms:
+                    continue
                 dr = dart_map_by_ym[ym]
-                op_v = float(dr.get('operating_profit') or 0.0)
-                np_v = float(dr.get('net_profit') or 0.0)
+                # DART DB는 분기*4 연환산 저장이므로 분기 단일 실적은 / 4.0
+                rev_v = float(dr.get('revenue') or 0.0) / 4.0
+                op_v = float(dr.get('operating_profit') or 0.0) / 4.0
+                np_v = float(dr.get('net_profit') or 0.0) / 4.0
                 eq_v = float(dr.get('equity') or 0.0)
+                if rev_v == 0 and op_v == 0 and np_v == 0:
+                    continue
                 eps_v = (np_v / shares) if (shares > 0 and np_v != 0) else 0.0
                 bps_v = (eq_v / shares) if (shares > 0 and eq_v > 0) else 0.0
                 pbr_v = (cur_price / bps_v) if (cur_price > 0 and bps_v > 0) else 0.0
                 roe_v = ((np_v * 4.0) / eq_v * 100.0) if (eq_v > 0 and np_v != 0) else 0.0
                 per_v = (cur_price / (eps_v * 4.0)) if (cur_price > 0 and eps_v != 0) else 0.0
-                q_fallback.append({
+                fund_data['financials_quarterly'].append({
+                    'raw_ym': ym,
                     'period': ym,
+                    'is_estimate': False,
+                    'revenue': rev_v,
                     'operating_profit': op_v,
                     'net_profit': np_v,
                     'equity': eq_v,
@@ -388,7 +427,8 @@ def get_naver_fundamentals(code: str):
                     'pbr': round(pbr_v, 2),
                     'roe': round(roe_v, 2),
                 })
-            fund_data['financials_quarterly'] = q_fallback
+            fund_data['financials_quarterly'].sort(key=lambda x: str(x.get('raw_ym') or x.get('period') or ''))
+            fund_data['financials_quarterly'] = fund_data['financials_quarterly'][-6:]
 
         # 상단 요약 지표(eps, bps, per, pbr, roe)가 N/A인 경우 최신 연간/분기 실적에서 자동 보충
         ref_rows = [r for r in (fund_data['financials_annual'] + fund_data['financials_quarterly']) if r.get('bps') or r.get('eps')]

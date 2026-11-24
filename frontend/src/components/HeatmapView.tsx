@@ -195,7 +195,7 @@ export default function HeatmapView({
     return () => clearInterval(timer);
   }, [marketTab, clickCount, fetchRealtimeHeatmapQuotes]);
 
-  // TradingView 전체 섹터 위젯 모드 (불필요한 1시·4시 상단바 완전 제거 hasTopBar: false 및 정상 dataSource 연결)
+  // TradingView 전체 섹터 위젯 모드 (미국 S&P 500 전용 — 불필요하거나 작동하지 않는 한국/기타 중복 버튼 제거)
   useEffect(() => {
     if (marketTab !== 'TV_WIDGET') return;
     if (tvContainerRef.current) {
@@ -207,14 +207,14 @@ export default function HeatmapView({
 
       script.innerHTML = JSON.stringify({
         exchanges: [],
-        dataSource: tvDataSource,
+        dataSource: 'SPX500',
         grouping: 'sector',
         blockSize: 'market_cap_basic',
         blockColor: 'change',
         locale: 'kr',
         symbolUrl: '',
         colorTheme: 'dark',
-        hasTopBar: false, // 1시, 4시 등 작동하지 않는 상단 시간바 완전 삭제
+        hasTopBar: false,
         isDataSetEnabled: false,
         isZoomEnabled: true,
         hasSymbolTooltip: true,
@@ -224,7 +224,7 @@ export default function HeatmapView({
       });
       tvContainerRef.current.appendChild(script);
     }
-  }, [marketTab, tvDataSource, clickCount]);
+  }, [marketTab, clickCount]);
 
   // 현재 선택된 마켓의 섹터별 종목 그룹화
   const groupedSectors = useMemo(() => {
@@ -353,30 +353,16 @@ export default function HeatmapView({
         <div className="flex-1 flex flex-col w-full h-full p-3 space-y-2 min-h-[520px]">
           <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-900/90 px-3 py-2 rounded-lg border border-gray-800">
             <span className="text-xs text-gray-300 font-bold">
-              📌 글로벌 전체 종목 트리맵 (상단 1시·4시 바 제거 완료 · 클릭 시 실시간 일일 등락률 기준 리로드)
+              📌 미국 S&amp;P 500 전체 섹터 트리맵 (한국 대표주 실시간 등락률은 상단 [🇰🇷 한국 KOSPI · KOSDAQ 대표주 (실시간)] 탭에서 실시간 연동됩니다)
             </span>
             <div className="flex flex-wrap gap-1.5">
-              {[
-                { id: 'SPX500', label: '🇺🇸 S&P 500 전체' },
-                { id: 'NASDAQ100', label: '🇺🇸 NASDAQ 100 전체' },
-                { id: 'AllUSA', label: '🇺🇸 미국 전 종목' },
-                { id: 'KOSPI', label: '🇰🇷 한국 KOSPI 전체' },
-              ].map((ds) => (
-                <button
-                  key={ds.id}
-                  onClick={() => {
-                    setTvDataSource(ds.id as any);
-                    setClickCount((c) => c + 1);
-                  }}
-                  className={`px-2.5 py-1 rounded text-xs font-bold cursor-pointer ${
-                    tvDataSource === ds.id
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-800 text-gray-400 hover:text-white'
-                  }`}
-                >
-                  {ds.label}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => setClickCount((c) => c + 1)}
+                className="px-3 py-1 rounded text-xs font-bold bg-blue-600 text-white cursor-pointer"
+              >
+                🇺🇸 미국 S&amp;P 500 전체
+              </button>
             </div>
           </div>
           <div className="flex-1 w-full h-full relative rounded-lg overflow-hidden border border-gray-800" ref={tvContainerRef} />
