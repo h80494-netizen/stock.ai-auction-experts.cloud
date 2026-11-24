@@ -105,72 +105,314 @@ def get_naver_fundamentals(code: str):
         'roe': 'N/A', 'roe_next': 'N/A',
         'roa': 'N/A', 'eps_trend': [],
         'net_income_trend': [], 'payout_ratio': 'N/A',
-        'shares': 'N/A',
+        'shares': 0,
+        'market_cap': 0,
+        'current_price': 0,
+        'par_value': 500,
         'financials_annual': [], 'financials_quarterly': []
     }
     
     try:
-        # 1. Integration (Current Valuation)
+        import re as _re
+
+        def _parse_krw_eok_str(raw_s: str) -> float:
+            # 예: "1,069조 2,844억" -> (1069*10000 + 2844) * 100000000
+            if not raw_s:
+                return 0.0
+            s = str(raw_s).replace(',', '').strip()
+            jo = 0.0
+            eok = 0.0
+            m_jo = _re.search(r'([\d.]+)\s*조', s)
+            if m_jo:
+                jo = float(m_jo.group(1))
+            m_eok = _re.search(r'([\d.]+)\s*억', s)
+            if m_eok:
+                eok = float(m_eok.group(1))
+            if jo > 0 or eok > 0:
+                return (jo * 10000.0 + eok) * 100_000_000.0
+            try:
+                return float(_re.sub(r'[^0-9.]', '', s)) * 100_000_000.0
+            except Exception:
+                return 0.0
+
+        # 1. Integration (Current Valuation, Price, MarketCap, Shares)
         res_int = requests.get(f'https://m.stock.naver.com/api/stock/{clean_code}/integration', headers=headers, timeout=5)
         if res_int.status_code == 200:
-            for info in res_int.json().get('totalInfos', []):
-                val_str = str(info.get('value', '')).replace(',', '').replace('배', '').replace('원', '').replace('%', '').strip()
+            int_json = res_int.json()
+            for info in int_json.get('totalInfos', []):
+                c_key = info.get('code', '')
+                raw_v = str(info.get('value', '')).strip()
+                if c_key == 'marketValue':
+                    mc_won = _parse_krw_eok_str(raw_v)
+                    if mc_won > 0:
+                        fund_data['market_cap'] = mc_won
+                    continue
+                val_str = raw_v.replace(',', '').replace('배', '').replace('원', '').replace('%', '').strip()
                 try:
                     v = float(val_str)
-                    if info['code'] == 'per': fund_data['per'] = v
-                    if info['code'] == 'eps': fund_data['eps'] = v
-                    if info['code'] == 'pbr': fund_data['pbr'] = v
-                    if info['code'] == 'bps': fund_data['bps'] = v
-                    if info['code'] == 'cnsPer': fund_data['per_next'] = v
-                    if info['code'] == 'cnsEps': fund_data['eps_next'] = v
-                except ValueError: pass
-        if fund_data['eps'] != 'N/A' and fund_data['bps'] != 'N/A' and fund_data['bps'] > 0:
-            fund_data['roe'] = f"{round((fund_data['eps'] / fund_data['bps']) * 100, 2)}%"
+                    if c_key == 'lastClosePrice' and v > 0: fund_data['current_price'] = v
+                    elif c_key == 'per': fund_data['per'] = v
+                    elif c_key == 'eps': fund_data['eps'] = v
+                    elif c_key == 'pbr': fund_data['pbr'] = v
+                    elif c_key == 'bps': fund_data['bps'] = v
+                    elif c_key == 'cnsPer': fund_data['per_next'] = v
+                    elif c_key == 'cnsEps': fund_data['eps_next'] = v
+                except ValueError:
+                    pass
 
-        # 2. Financials Helper
-        def parse_financials(period_type):
-            res = requests.get(f'https://m.stock.naver.com/api/stock/{clean_code}/finance/{period_type}', headers=headers, timeout=5)
+        # basic API에서 현재가 보강
+        if not fund_data['current_price']:
+            try:
+                res_b = requests.get(f'https://m.stock.naver.com/api/stock/{clean_code}/basic', headers=headers, timeout=3)
+                if res_b.status_code == 200:
+                    cp_s = str(res_b.json().get('closePrice', '0')).replace(',', '').strip()
+                    if cp_s.replace('.', '').isdigit():
+                        fund_data['current_price'] = float(cp_s)
+            except Exception:
+                pass
+
+        # 발행주식수 산출: 시가총액 / 현재가 (또는 DB/테트리스U 폴백)
+        if fund_data['market_cap'] > 0 and fund_data['current_price'] > 0:
+            fund_data['shares'] = int(round(fund_data['market_cap'] / fund_data['current_price']))
+
+        # DART 12분기 DB에서 분기별/연간 자본총계(equity), 매출, 영업이익, 순이익 보조 맵 로드
+        dart_map_by_ym = {}
+        latest_dart_equity = 0.0
+        try:
+            import database as _db
+            d_rows = _db.get_dart_financials(clean_code) or []
+            q_to_mm = {'11013': '03', '11012': '06', '11014': '09', '11011': '12'}
+            for dr in d_rows:
+                ym = f"{dr.get('year')}{q_to_mm.get(str(dr.get('quarter')), '12')}"
+                dart_map_by_ym[ym] = dr
+                if (dr.get('equity') or 0) > 0:
+                    latest_dart_equity = float(dr['equity'])
+        except Exception:
+            pass
+
+        # 2. Financials Helper (네이버 모바일 API: annual 및 quarter)
+        def parse_financials(period_type: str):
+            api_period = 'quarter' if period_type in ('quarterly', 'quarter') else 'annual'
+            res = requests.get(f'https://m.stock.naver.com/api/stock/{clean_code}/finance/{api_period}', headers=headers, timeout=5)
             financials = []
-            if res.status_code != 200: return financials
-            
-            data = res.json().get('financeInfo', {})
+            if res.status_code != 200:
+                return financials
+            try:
+                data = res.json().get('financeInfo', {})
+            except Exception:
+                return financials
+
             titles = data.get('trTitleList', [])
             row_list = data.get('rowList', [])
-            
-            # Init empty dicts for each period
-            periods = {t['key']: {'period': t['title'].replace('.', '').strip(), 'is_estimate': t['isConsensus'] == 'Y'} for t in titles}
-            
+            if not titles or not row_list:
+                return financials
+
+            periods = {}
+            for t in titles:
+                k = t.get('key')
+                if not k:
+                    continue
+                raw_title = str(t.get('title', '')).replace('.', '').strip()
+                is_est = (t.get('isConsensus') == 'Y')
+                periods[k] = {
+                    'raw_ym': raw_title[:6],
+                    'period': raw_title + ('(E)' if is_est and not raw_title.endswith('(E)') else ''),
+                    'is_estimate': is_est,
+                }
+
             for row in row_list:
-                title = row.get('title', '').replace(' ', '')
-                for key, col in row.get('columns', {}).items():
-                    if key not in periods: continue
-                    val_str = str(col.get('value', '')).replace(',', '')
+                title = str(row.get('title', '')).replace(' ', '').strip()
+                for key, col in (row.get('columns') or {}).items():
+                    if key not in periods or not isinstance(col, dict):
+                        continue
+                    val_str = str(col.get('value', '')).replace(',', '').strip()
+                    if val_str in ('', '-', 'N/A', 'nan', 'None'):
+                        continue
                     try:
                         v = float(val_str)
                     except ValueError:
-                        v = 0
-                    
-                    if '매출액' in title: periods[key]['revenue'] = v * 100000000
-                    elif '영업이익' in title: periods[key]['operating_profit'] = v * 100000000
-                    elif '당기순이익' in title: periods[key]['net_profit'] = v * 100000000
-                    elif title == 'EPS(원)': periods[key]['eps'] = v
-                    elif title == 'BPS(원)': periods[key]['bps'] = v
-                    elif title == 'PER(배)': periods[key]['per'] = v
-                    elif title == 'PBR(배)': periods[key]['pbr'] = v
-                    elif title == 'ROE(%)': periods[key]['roe'] = v
-            
-            sorted_keys = sorted(list(periods.keys()))
-            return [periods[k] for k in sorted_keys]
+                        continue
 
-        # 3. Fetch Annual and Quarterly
+                    if '매출액' in title:
+                        periods[key]['revenue'] = v * 100_000_000.0
+                    elif title in ('영업이익', '영업이익(발표기준)'):
+                        periods[key]['operating_profit'] = v * 100_000_000.0
+                    elif title == '당기순이익':
+                        periods[key]['net_profit'] = v * 100_000_000.0
+                    elif title == '지배주주순이익' and 'net_profit' not in periods[key]:
+                        periods[key]['net_profit'] = v * 100_000_000.0
+                    elif title in ('EPS', 'EPS(원)'):
+                        periods[key]['eps'] = v
+                    elif title in ('BPS', 'BPS(원)'):
+                        periods[key]['bps'] = v
+                    elif title in ('PER', 'PER(배)'):
+                        periods[key]['per'] = v
+                    elif title in ('PBR', 'PBR(배)'):
+                        periods[key]['pbr'] = v
+                    elif title in ('ROE', 'ROE(%)'):
+                        periods[key]['roe'] = v
+
+            shares = float(fund_data.get('shares') or 0)
+            cur_price = float(fund_data.get('current_price') or 0)
+            top_bps = float(fund_data['bps']) if isinstance(fund_data.get('bps'), (int, float)) else 0.0
+
+            is_q = (api_period == 'quarter')
+            annual_mult = 4.0 if is_q else 1.0
+
+            sorted_keys = sorted(list(periods.keys()))
+            out_list = []
+            for k in sorted_keys:
+                p_obj = periods[k]
+                ym = p_obj.get('raw_ym', '')
+                d_row = dart_map_by_ym.get(ym)
+
+                # DART DB 값으로 누락된 영업이익/순이익/자본총계 보강
+                if d_row:
+                    if not p_obj.get('operating_profit') and d_row.get('operating_profit'):
+                        p_obj['operating_profit'] = float(d_row['operating_profit']) / (annual_mult if is_q else 1.0)
+                    if not p_obj.get('net_profit') and d_row.get('net_profit'):
+                        p_obj['net_profit'] = float(d_row['net_profit']) / (annual_mult if is_q else 1.0)
+                    if not p_obj.get('equity') and d_row.get('equity'):
+                        p_obj['equity'] = float(d_row['equity'])
+
+                np_val = float(p_obj.get('net_profit') or 0.0)
+                eq_val = float(p_obj.get('equity') or 0.0)
+                eps_val = float(p_obj.get('eps') or 0.0)
+                bps_val = float(p_obj.get('bps') or 0.0)
+                per_val = float(p_obj.get('per') or 0.0)
+                pbr_val = float(p_obj.get('pbr') or 0.0)
+                roe_val = float(p_obj.get('roe') or 0.0)
+
+                # 1) 발행주식수가 아직 0이면 (순이익 / EPS) 또는 (자본총계 / BPS)로 역산
+                if shares <= 0:
+                    if np_val != 0 and eps_val != 0:
+                        shares = abs(np_val / eps_val)
+                        fund_data['shares'] = int(round(shares))
+                    elif eq_val > 0 and bps_val > 0:
+                        shares = eq_val / bps_val
+                        fund_data['shares'] = int(round(shares))
+
+                # 2) 자본총계(equity) 직접 계산: BPS * 발행주식수 또는 DART 자본총계
+                if eq_val <= 0:
+                    if bps_val > 0 and shares > 0:
+                        eq_val = bps_val * shares
+                    elif latest_dart_equity > 0:
+                        eq_val = latest_dart_equity
+                    elif top_bps > 0 and shares > 0:
+                        eq_val = top_bps * shares
+                if eq_val > 0:
+                    p_obj['equity'] = eq_val
+
+                # 3) BPS 직접 계산: 자본총계 / 발행주식수 (또는 상단 BPS 폴백)
+                if bps_val <= 0:
+                    if eq_val > 0 and shares > 0:
+                        bps_val = eq_val / shares
+                    elif top_bps > 0:
+                        bps_val = top_bps
+                if bps_val > 0:
+                    p_obj['bps'] = round(bps_val, 0)
+
+                # 4) EPS 직접 계산: 당기순이익 / 발행주식수
+                if eps_val == 0 and np_val != 0 and shares > 0:
+                    eps_val = np_val / shares
+                if eps_val != 0:
+                    p_obj['eps'] = round(eps_val, 0)
+
+                # 5) 해당 기간 기준 주가(ref_price): 네이버 PBR*BPS 또는 PER*EPS 역산 주가 우선, 없으면 현재주가 반영
+                ref_price = cur_price
+                if pbr_val > 0 and bps_val > 0:
+                    ref_price = pbr_val * bps_val
+                elif per_val > 0 and eps_val > 0:
+                    ref_price = per_val * (eps_val * annual_mult)
+
+                # 6) PBR 직접 계산: 주가 / BPS
+                if pbr_val <= 0 and ref_price > 0 and bps_val > 0:
+                    pbr_val = ref_price / bps_val
+                if pbr_val > 0:
+                    p_obj['pbr'] = round(pbr_val, 2)
+
+                # 7) ROE(%) 직접 계산: (연환산 순이익 / 자본총계)*100 또는 (연환산 EPS / BPS)*100
+                if roe_val == 0:
+                    if np_val != 0 and eq_val > 0:
+                        roe_val = ((np_val * annual_mult) / eq_val) * 100.0
+                    elif eps_val != 0 and bps_val > 0:
+                        roe_val = ((eps_val * annual_mult) / bps_val) * 100.0
+                if roe_val != 0:
+                    p_obj['roe'] = round(roe_val, 2)
+
+                # 8) PER 직접 계산: 주가 / 연환산 EPS (또는 PBR / (ROE/100))
+                if per_val == 0:
+                    if ref_price > 0 and eps_val != 0:
+                        per_val = ref_price / (eps_val * annual_mult)
+                    elif pbr_val > 0 and roe_val != 0:
+                        per_val = pbr_val / (roe_val / 100.0)
+                if per_val != 0:
+                    p_obj['per'] = round(per_val, 2)
+
+                # 영업이익/순이익/매출/EPS가 실제 존재하는 유효 실적 열만 포함 (미발표 빈 미래 컨센서스 열 제외)
+                has_any = any(
+                    p_obj.get(fld) not in (None, 0, 0.0)
+                    for fld in ('operating_profit', 'net_profit', 'revenue', 'eps')
+                )
+                if has_any:
+                    out_list.append(p_obj)
+            return out_list
+
+        # 3. Fetch Annual and Quarterly ('quarter' 엔드포인트 사용!)
         fund_data['financials_annual'] = parse_financials('annual')
-        fund_data['financials_quarterly'] = parse_financials('quarterly')
-        
+        fund_data['financials_quarterly'] = parse_financials('quarter')
+
+        # 만약 DART 12분기 데이터는 있는데 네이버 분기 재무제표가 비어있는 종목이면 DART 분기 데이터로 직접 생성
+        if not fund_data['financials_quarterly'] and dart_map_by_ym:
+            shares = float(fund_data.get('shares') or 0)
+            cur_price = float(fund_data.get('current_price') or 0)
+            q_fallback = []
+            for ym in sorted(dart_map_by_ym.keys())[-6:]:
+                dr = dart_map_by_ym[ym]
+                op_v = float(dr.get('operating_profit') or 0.0)
+                np_v = float(dr.get('net_profit') or 0.0)
+                eq_v = float(dr.get('equity') or 0.0)
+                eps_v = (np_v / shares) if (shares > 0 and np_v != 0) else 0.0
+                bps_v = (eq_v / shares) if (shares > 0 and eq_v > 0) else 0.0
+                pbr_v = (cur_price / bps_v) if (cur_price > 0 and bps_v > 0) else 0.0
+                roe_v = ((np_v * 4.0) / eq_v * 100.0) if (eq_v > 0 and np_v != 0) else 0.0
+                per_v = (cur_price / (eps_v * 4.0)) if (cur_price > 0 and eps_v != 0) else 0.0
+                q_fallback.append({
+                    'period': ym,
+                    'operating_profit': op_v,
+                    'net_profit': np_v,
+                    'equity': eq_v,
+                    'eps': round(eps_v, 0),
+                    'bps': round(bps_v, 0),
+                    'per': round(per_v, 2),
+                    'pbr': round(pbr_v, 2),
+                    'roe': round(roe_v, 2),
+                })
+            fund_data['financials_quarterly'] = q_fallback
+
+        # 상단 요약 지표(eps, bps, per, pbr, roe)가 N/A인 경우 최신 연간/분기 실적에서 자동 보충
+        ref_rows = [r for r in (fund_data['financials_annual'] + fund_data['financials_quarterly']) if r.get('bps') or r.get('eps')]
+        if ref_rows:
+            latest_r = ref_rows[-1]
+            if fund_data['bps'] == 'N/A' and latest_r.get('bps'):
+                fund_data['bps'] = latest_r['bps']
+            if fund_data['eps'] == 'N/A' and latest_r.get('eps'):
+                fund_data['eps'] = latest_r['eps']
+            if fund_data['pbr'] == 'N/A' and latest_r.get('pbr'):
+                fund_data['pbr'] = latest_r['pbr']
+            if fund_data['per'] == 'N/A' and latest_r.get('per'):
+                fund_data['per'] = latest_r['per']
+            if fund_data['roe'] == 'N/A' and latest_r.get('roe'):
+                fund_data['roe'] = latest_r['roe']
+
+        if fund_data['roe'] == 'N/A' and isinstance(fund_data['eps'], (int, float)) and isinstance(fund_data['bps'], (int, float)) and fund_data['bps'] > 0:
+            fund_data['roe'] = round((fund_data['eps'] / fund_data['bps']) * 100, 2)
+
         # Populate trends
         for ann in fund_data['financials_annual']:
-            # time formatting for trend
-            dt = ann['period']
-            if len(dt) == 6: dt = f"{dt[:4]}-{dt[4:]}-31" # e.g. 202312 -> 2023-12-31
+            dt = ann['period'].replace('(E)', '')
+            if len(dt) == 6:
+                dt = f"{dt[:4]}-{dt[4:]}-31"
             if 'eps' in ann:
                 fund_data['eps_trend'].append({
                     'time': dt,
@@ -183,10 +425,10 @@ def get_naver_fundamentals(code: str):
                     'value': ann['net_profit'],
                     'is_estimate': ann.get('is_estimate', False)
                 })
-                
+
     except Exception as e:
         print(f"Error fetching Naver fundamentals for {code}:", e)
-        
+
     return fund_data
 
 

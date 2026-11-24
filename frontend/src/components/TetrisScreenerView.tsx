@@ -919,42 +919,44 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               </div>
             </div>
 
-            {/* 범례 & 호버 종목 요약 바 */}
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs bg-gray-900/80 border border-gray-800 rounded-lg px-3.5 py-2">
-              <div className="flex flex-wrap items-center gap-4">
+            {/* 범례 & 호버 종목 요약 바 (고정 높이 및 줄바꿈 방지로 마우스 호버 시 차트 위아래 흔들림 원천 차단) */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs bg-gray-900/80 border border-gray-800 rounded-lg px-3.5 py-2 min-h-[44px]">
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-3 h-3 rounded-full bg-emerald-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">고ROE &amp; 전분기비 ROE 증가 (ΔROE ≥ +1%p)</span>
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/60" />
+                  <span className="text-gray-200 font-bold">고ROE &amp; 전분기비 ROE↑</span>
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-3 h-3 rounded-full bg-sky-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">고ROE 유지 (ΔROE 보합/소폭변동)</span>
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 border border-white/60" />
+                  <span className="text-gray-200 font-bold">고ROE 유지</span>
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-3 h-3 rounded-full bg-amber-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">전분기비 ROE 턴어라운드 개선주</span>
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 border border-white/60" />
+                  <span className="text-gray-200 font-bold">전분기비 ROE 개선주</span>
                 </span>
               </div>
 
-              {hoveredStock ? (
-                <div className="flex flex-wrap items-center gap-3 font-mono text-xs bg-indigo-950/90 border border-indigo-400/60 px-3 py-1 rounded-lg">
-                  <span className="font-sans font-extrabold text-white">
-                    {getStockName(hoveredStock)} ({hoveredStock.ticker})
+              <div className="h-7 flex items-center justify-end overflow-hidden">
+                {hoveredStock ? (
+                  <div className="flex items-center gap-2.5 font-mono text-xs bg-indigo-950/90 border border-indigo-400/60 px-3 py-1 rounded-lg whitespace-nowrap overflow-x-auto">
+                    <span className="font-sans font-extrabold text-white">
+                      {getStockName(hoveredStock)} ({hoveredStock.ticker})
+                    </span>
+                    <span className="text-sky-300 font-bold">
+                      PBR: {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
+                    </span>
+                    <span className="text-emerald-300 font-bold">
+                      ROE: {hoveredStock.prev_q_roe}→{hoveredStock.roe}% ({hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p)
+                    </span>
+                    <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
+                    <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
+                  </div>
+                ) : (
+                  <span className="text-gray-400 whitespace-nowrap">
+                    💡 차트 위의 종목 점(Dot)에 마우스를 올리면 전분기 대비(QoQ) PBR·ROE 상세 수치가 표시됩니다.
                   </span>
-                  <span className="text-sky-300 font-bold">
-                    PBR: {hoveredStock.prev_q_pbr}배 → {hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff}배)
-                  </span>
-                  <span className="text-emerald-300 font-bold">
-                    ROE: {hoveredStock.prev_q_roe}% → {hoveredStock.roe}% ({hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p)
-                  </span>
-                  <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
-                  <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
-                </div>
-              ) : (
-                <span className="text-gray-400">
-                  💡 차트 위의 종목 점(Dot)에 마우스를 올리면 전분기 대비(QoQ) PBR·ROE 상세 수치가 표시됩니다.
-                </span>
-              )}
+                )}
+              </div>
             </div>
 
             <div className="relative w-full">
@@ -1147,7 +1149,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     >
                       {/* 전분기(prev_q) -> 현재(cur) 이동 궤적 점선 */}
                       {showQoqTrajectory && (Math.abs(curX - prevX) > 2 || Math.abs(curY - prevY) > 2) && (
-                        <g opacity={isHovered ? 0.95 : 0.4}>
+                        <g opacity={isHovered ? 0.95 : 0.4} className="pointer-events-none">
                           <circle cx={prevX} cy={prevY} r={2.2} fill="#94a3b8" />
                           <line
                             x1={prevX}
@@ -1161,6 +1163,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         </g>
                       )}
 
+                      {/* 마우스 히트 영역 고정용 투명 원 (반지름이 변해도 onMouseLeave/Enter 진동이 발생하지 않도록 고정 r=10 유지) */}
+                      <circle cx={curX} cy={curY} r={10} fill="transparent" />
+
                       {/* 현재 종목 위치 원 */}
                       <circle
                         cx={curX}
@@ -1170,6 +1175,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         fillOpacity={isHovered ? 1.0 : 0.82}
                         stroke={isHovered ? '#ffffff' : '#0f172a'}
                         strokeWidth={isHovered ? '2.2' : '1.2'}
+                        className="pointer-events-none"
                       />
 
                       {/* 종목명 라벨 */}
@@ -1180,6 +1186,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           fill={isHovered ? '#ffffff' : idx < 10 ? '#a7f3d0' : '#cbd5e1'}
                           fontSize={isHovered ? '11.5' : '9.5'}
                           fontWeight={isHovered || idx < 10 ? 'bold' : 'normal'}
+                          className="pointer-events-none"
                         >
                           {getStockName(it)}
                         </text>

@@ -304,61 +304,160 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
               <div className="flex justify-between items-center mb-3 border-b border-gray-700 pb-2">
                 <h3 className="font-bold">재무제표</h3>
                 <div className="flex gap-2">
-                  <button onClick={() => setFinancialPeriod('annual')} className={`px-2 py-1 text-xs rounded ${financialPeriod === 'annual' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>연간</button>
-                  <button onClick={() => setFinancialPeriod('quarterly')} className={`px-2 py-1 text-xs rounded ${financialPeriod === 'quarterly' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>분기</button>
+                  <button onClick={() => setFinancialPeriod('annual')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'annual' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>연간</button>
+                  <button onClick={() => setFinancialPeriod('quarterly')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'quarterly' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>분기</button>
                 </div>
               </div>
-              <div className="text-right text-[10px] text-gray-500 mb-1">(단위: 억원, 원, %, 배)</div>
-              <table className="w-full text-xs text-right whitespace-nowrap">
-                <thead>
-                  <tr className="text-gray-500 border-b border-gray-800">
-                    <th className="py-2 text-left">항목</th>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => (
-                      <th key={f.period} className="py-2 px-1">{f.period}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="font-mono">
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">영업이익</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1">{typeof f.operating_profit === 'number' ? (f.operating_profit / 100000000).toFixed(1) : (f.operating_profit || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">순이익</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1">{typeof f.net_profit === 'number' ? (f.net_profit / 100000000).toFixed(1) : (f.net_profit || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">자본</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1">{typeof f.equity === 'number' ? (f.equity / 100000000).toFixed(1) : (f.equity || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">EPS</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1 text-green-400">{typeof f.eps === 'number' ? f.eps.toFixed(0) : (f.eps || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">BPS</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1">{typeof f.bps === 'number' ? f.bps.toFixed(0) : (f.bps || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">PER</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => <td key={f.period} className="px-1 text-red-400">{typeof f.per === 'number' ? f.per.toFixed(2) : (f.per || '-')}</td>)}
-                  </tr>
-                  <tr className="border-b border-gray-800">
-                    <td className="py-2 text-left text-gray-400">PBR</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => {
-                      const pbr = typeof f.bps === 'number' && f.bps > 0 ? (stockDetails.stock.price || 0) / f.bps : null;
-                      return <td key={f.period} className="px-1">{pbr !== null ? pbr.toFixed(2) : '-'}</td>;
-                    })}
-                  </tr>
-                  <tr>
-                    <td className="py-2 text-left text-gray-400">ROE (%)</td>
-                    {(stockDetails.financials || []).filter((f: any) => financialPeriod === 'annual' ? !f.period.includes('Q') : f.period.includes('Q')).map((f: any) => {
-                      const roe = typeof f.bps === 'number' && typeof f.eps === 'number' && f.bps > 0 ? (f.eps / f.bps) * 100 : null;
-                      return <td key={f.period} className="px-1 text-blue-400">{roe !== null ? roe.toFixed(2) : '-'}</td>;
-                    })}
-                  </tr>
-                </tbody>
-              </table>
+              <div className="text-right text-[10px] text-gray-500 mb-1">(단위: 억원, 원, %, 배 · 주가 및 발행주식수 연동 직접 계산)</div>
+              {(() => {
+                const s = stockDetails.stock || {};
+                const curPrice = Number(livePrices[s.ticker] || s.price || s.currentPrice || 0);
+                const rawShares = Number(s.outstanding_shares || s.shares || 0);
+                const mcap = Number(s.marketCap || s.market_cap || (curPrice * rawShares) || 0);
+                const outShares = rawShares > 0 ? rawShares : (mcap > 0 && curPrice > 0 ? Math.floor(mcap / curPrice) : 0);
+                const isQuarterly = financialPeriod === 'quarterly';
+                const mult = isQuarterly ? 4.0 : 1.0;
+
+                const filteredFins = (stockDetails.financials || [])
+                  .filter((f: any) => (isQuarterly ? String(f.period).includes('Q') : !String(f.period).includes('Q')))
+                  .map((f: any) => {
+                    const op = Number(f.operating_profit ?? 0);
+                    const np = Number(f.net_profit ?? 0);
+                    let eq = Number(f.equity ?? 0);
+                    let eps = Number(f.eps ?? 0);
+                    let bps = Number(f.bps ?? 0);
+                    let per = Number(f.per ?? 0);
+                    let pbr = Number(f.pbr ?? 0);
+                    let roe = Number(f.roe ?? 0);
+
+                    // 1) EPS 직접 계산: 순이익 / 발행주식수
+                    if (!eps && np !== 0 && outShares > 0) {
+                      eps = np / outShares;
+                    }
+                    // 2) 자본(equity) 및 BPS 상호 역산 계산
+                    if (eq <= 0 && bps > 0 && outShares > 0) {
+                      eq = bps * outShares;
+                    }
+                    if (bps <= 0 && eq > 0 && outShares > 0) {
+                      bps = eq / outShares;
+                    }
+                    if (bps <= 0 && Number(s.bps) > 0) {
+                      bps = Number(s.bps);
+                      if (eq <= 0 && outShares > 0) eq = bps * outShares;
+                    }
+                    // 3) PBR 직접 계산: 주가 / BPS
+                    if (pbr <= 0 && curPrice > 0 && bps > 0) {
+                      pbr = curPrice / bps;
+                    }
+                    // 4) ROE(%) 직접 계산: (연환산 순이익 / 자본)*100 또는 (연환산 EPS / BPS)*100
+                    if (!roe) {
+                      if (np !== 0 && eq > 0) {
+                        roe = ((np * mult) / eq) * 100.0;
+                      } else if (eps !== 0 && bps > 0) {
+                        roe = ((eps * mult) / bps) * 100.0;
+                      }
+                    }
+                    // 5) PER 직접 계산: 주가 / 연환산 EPS 또는 PBR / (ROE/100)
+                    if (!per) {
+                      if (curPrice > 0 && eps !== 0) {
+                        per = curPrice / (eps * mult);
+                      } else if (pbr > 0 && roe !== 0) {
+                        per = pbr / (roe / 100.0);
+                      }
+                    }
+
+                    return {
+                      ...f,
+                      _op: op,
+                      _np: np,
+                      _eq: eq,
+                      _eps: eps,
+                      _bps: bps,
+                      _per: per,
+                      _pbr: pbr,
+                      _roe: roe,
+                    };
+                  });
+
+                return (
+                  <table className="w-full text-xs text-right whitespace-nowrap">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-gray-800">
+                        <th className="py-2 text-left">항목</th>
+                        {filteredFins.map((f: any) => (
+                          <th key={f.period} className="py-2 px-1">{f.period}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono">
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">영업이익</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1">
+                            {f._op !== 0 ? (f._op / 100000000).toFixed(1) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">순이익</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1">
+                            {f._np !== 0 ? (f._np / 100000000).toFixed(1) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">자본</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1">
+                            {f._eq > 0 ? Math.round(f._eq / 100000000).toLocaleString() : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">EPS</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1 text-green-400">
+                            {f._eps !== 0 ? Math.round(f._eps).toLocaleString() : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">BPS</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1">
+                            {f._bps > 0 ? Math.round(f._bps).toLocaleString() : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">PER</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1 text-red-400">
+                            {f._per !== 0 ? f._per.toFixed(2) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-gray-800">
+                        <td className="py-2 text-left text-gray-400">PBR</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1 text-amber-300">
+                            {f._pbr > 0 ? f._pbr.toFixed(2) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <td className="py-2 text-left text-gray-400">ROE (%)</td>
+                        {filteredFins.map((f: any) => (
+                          <td key={f.period} className="px-1 text-blue-400">
+                            {f._roe !== 0 ? f._roe.toFixed(2) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                    </tbody>
+                  </table>
+                );
+              })()}
             </div>
             
           </div>

@@ -54,30 +54,64 @@ export default function ChartsView({ ticker, stockDetails }: { ticker: string, s
     fetchChart();
   }, [ticker, period]);
 
-  // 동적으로 주가에 맞춰 밴드와 이론가를 생성합니다.
-  const latestPrice = (chartData && chartData.length > 0) ? chartData[chartData.length - 1].close : (stockDetails?.stock?.currentPrice || stockDetails?.stock?.price || 50000);
-  
-  // Real Financial Multiples
-  const bps = stockDetails?.stock?.bps || (latestPrice / 1.2);
-  const eps = stockDetails?.stock?.eps || (latestPrice / 15);
-  // Parse ROE, it might be a percentage string or float
+  // 동적으로 주가에 맞춰 밴드와 이론가를 생성합니다. ("N/A" 문자열 안전 파싱 및 financials 폴백)
+  const latestPrice =
+    (chartData && chartData.length > 0 ? Number(chartData[chartData.length - 1].close) : 0) ||
+    Number(stockDetails?.stock?.currentPrice) ||
+    Number(stockDetails?.stock?.price) ||
+    50000;
+
+  const annualFins = (stockDetails?.financials || []).filter(
+    (f: any) => !String(f.period).includes('Q') && (Number(f.bps) > 0 || Number(f.eps) !== 0)
+  );
+  const latestFin = annualFins.length > 0 ? annualFins[annualFins.length - 1] : null;
+
+  const parsedBps = Number(stockDetails?.stock?.bps);
+  const bps =
+    !isNaN(parsedBps) && parsedBps > 0
+      ? parsedBps
+      : latestFin && Number(latestFin.bps) > 0
+      ? Number(latestFin.bps)
+      : latestPrice / 1.2;
+
+  const parsedEps = Number(stockDetails?.stock?.eps);
+  const eps =
+    !isNaN(parsedEps) && parsedEps !== 0
+      ? parsedEps
+      : latestFin && Number(latestFin.eps) !== 0
+      ? Number(latestFin.eps)
+      : latestPrice / 15;
+
   let roeVal = 0.1;
-  const rawRoe = stockDetails?.stock?.roe;
-  if (typeof rawRoe === 'string' && rawRoe.includes('%')) {
-    roeVal = parseFloat(rawRoe.replace('%', '')) / 100;
-  } else if (typeof rawRoe === 'number') {
-    roeVal = rawRoe > 1 ? rawRoe / 100 : rawRoe;
+  const rawRoe = stockDetails?.stock?.roe ?? latestFin?.roe;
+  if (typeof rawRoe === 'string') {
+    const cleaned = parseFloat(rawRoe.replace('%', ''));
+    if (!isNaN(cleaned) && cleaned !== 0) roeVal = cleaned / 100;
+  } else if (typeof rawRoe === 'number' && !isNaN(rawRoe) && rawRoe !== 0) {
+    roeVal = Math.abs(rawRoe) > 1 ? rawRoe / 100 : rawRoe;
+  } else if (bps > 0 && eps !== 0) {
+    roeVal = eps / bps;
   }
-  
-  // Calculate historical dynamic BPS and EPS assuming constant ROE growth backward
-  // For high-growth tech like NVDA, PBR is very high (e.g., 50x).
-  // We should anchor the PBR bands to the *current* PBR.
-  const currentPbr = stockDetails?.stock?.pbr || (latestPrice / bps) || 1.2;
+  roeVal = Math.max(-0.3, Math.min(0.5, roeVal));
+
+  const parsedPbr = Number(stockDetails?.stock?.pbr);
+  const currentPbr =
+    !isNaN(parsedPbr) && parsedPbr > 0
+      ? parsedPbr
+      : bps > 0
+      ? latestPrice / bps
+      : 1.2;
   const pbrMid = currentPbr;
   const pbrLow = currentPbr * 0.7;
   const pbrHigh = currentPbr * 1.3;
 
-  const currentPer = stockDetails?.stock?.per || (latestPrice / eps) || 15;
+  const parsedPer = Number(stockDetails?.stock?.per);
+  const currentPer =
+    !isNaN(parsedPer) && parsedPer > 0
+      ? parsedPer
+      : eps > 0
+      ? latestPrice / eps
+      : 15;
   const perMid = currentPer;
   const perLow = currentPer * 0.7;
   const perHigh = currentPer * 1.3;

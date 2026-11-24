@@ -2811,16 +2811,24 @@ def api_get_fundamentals(ticker: str):
         financials = []
         if nv_fund and nv_fund.get("financials_annual"):
             financials.extend(nv_fund.get("financials_annual", []))
-            # For quarterly, Naver returns dates like "2025.03", "2026.06(E)"
-            # Frontend expects "Q" in period to differentiate.
             for qf in nv_fund.get("financials_quarterly", []):
-                p = qf["period"]
-                if ".03" in p: p = p.replace(".03", ".1Q")
-                elif ".06" in p: p = p.replace(".06", ".2Q")
-                elif ".09" in p: p = p.replace(".09", ".3Q")
-                elif ".12" in p: p = p.replace(".12", ".4Q")
-                else: p += "Q" # fallback
-                # Create a copy so we don't mutate the cached nv_fund dictionary directly
+                p = str(qf.get("period", "")).strip()
+                is_est_suffix = "(E)" if p.endswith("(E)") else ""
+                p_clean = p.replace("(E)", "").replace(".", "")
+                if len(p_clean) == 6 and p_clean.isdigit():
+                    yr, mm = p_clean[:4], p_clean[4:6]
+                    mm_to_q = {"03": "1Q", "06": "2Q", "09": "3Q", "12": "4Q"}
+                    p = f"{yr}.{mm_to_q.get(mm, '4Q')}{is_est_suffix}"
+                elif ".03" in p:
+                    p = p.replace(".03", ".1Q")
+                elif ".06" in p:
+                    p = p.replace(".06", ".2Q")
+                elif ".09" in p:
+                    p = p.replace(".09", ".3Q")
+                elif ".12" in p:
+                    p = p.replace(".12", ".4Q")
+                elif "Q" not in p:
+                    p += "Q"
                 new_qf = dict(qf)
                 new_qf["period"] = p
                 financials.append(new_qf)
@@ -2912,20 +2920,21 @@ def api_get_fundamentals(ticker: str):
             "targetHigh": info.get("targetHighPrice", 0),
             "targetMean": targetMean,
             "targetLow": info.get("targetLowPrice", 0),
-            "marketCap": info.get("marketCap") or (krx_price * nv_fund.get("shares", 0) if krx_price and isinstance(nv_fund.get("shares"), (int, float)) else 0),
+            "marketCap": info.get("marketCap") or (nv_fund.get("market_cap", 0) if nv_fund else 0) or (krx_price * nv_fund.get("shares", 0) if krx_price and isinstance(nv_fund.get("shares"), (int, float)) else 0),
             "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", 0),
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", 0),
-            "currentPrice": info.get("currentPrice") or info.get("previousClose") or krx_price or db_fallback_price,
+            "currentPrice": info.get("currentPrice") or info.get("previousClose") or (nv_fund.get("current_price", 0) if nv_fund else 0) or krx_price or db_fallback_price,
             "analyst_count": info.get("numberOfAnalystOpinions", 0) or len(target_history),
             "price_chart": price_chart,
             "rs_chart": rs_chart,
             "eps_trend": eps_trend,
             "net_income_trend": nv_fund.get("net_income_trend", []),
             "payout_ratio": nv_fund.get("payout_ratio", "N/A"),
-            "shares": nv_fund.get("shares", info.get("sharesOutstanding", 0)),
+            "shares": (nv_fund.get("shares") if nv_fund and isinstance(nv_fund.get("shares"), (int, float)) and nv_fund.get("shares") > 0 else info.get("sharesOutstanding", 0)) or 0,
+            "outstanding_shares": (nv_fund.get("shares") if nv_fund and isinstance(nv_fund.get("shares"), (int, float)) and nv_fund.get("shares") > 0 else info.get("sharesOutstanding", 0)) or 0,
             "target_history": target_history,
             "financials": financials,
-            "price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or krx_price or db_fallback_price,
+            "price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or (nv_fund.get("current_price", 0) if nv_fund else 0) or krx_price or db_fallback_price,
             "change": info.get("regularMarketChange", 0) or (info.get("currentPrice", krx_price) - info.get("previousClose", krx_price) if info.get("currentPrice", krx_price) and info.get("previousClose", krx_price) else 0),
             "changePct": info.get("regularMarketChangePercent", 0) or 0,
             "currency": info.get("currency", "KRW" if is_krx else "USD")
