@@ -196,6 +196,47 @@ def _rolling_rank_pct(series: pd.Series, window: int = 90) -> pd.Series:
     return series.rolling(window=window, min_periods=10).rank(ascending=True)
 
 
+def smooth_expiry_oi_and_pcr(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    """
+    선물·옵션 만기일(매월 둘째 주 목요일 옵션만기 및 3·6·9·12월 선물·옵션 동시만기 주간)에 발생하는
+    1) 미결제약정(OI) 근월물->차월물 롤오버 일시 급락(V자 딥) 및 스파이크 왜곡
+    2) 만기일 임박 시 등가격(ATM) 콜/풋 옵션 시간가치 소멸(0.01~0.50pt)로 인한 PC비율(PCR) 40~700배 폭등 스파이크 왜곡을
+    롤링 중앙값(Rolling Median), 시간가치 바닥 보정(Damping Padding +1.5pt), 윈저라이징(Winsorizing) 및 지수평활(EMA)로
+    스무드하게 정규화하여 반환합니다.
+    """
+    # 1. PCR 만기 왜곡 제거 및 스무딩:
+    #    옵션 만기일 직전/당일 call_close 또는 put_close가 0.01~0.30으로 소멸할 때 분모가 0에 가까워져 700배로 튀는 현상 방지
+    call_c = pd.to_numeric(df["call_close"], errors="coerce").fillna(1.0).clip(lower=0.01)
+    put_c = pd.to_numeric(df["put_close"], errors="coerce").fillna(1.0).clip(lower=0.01)
+
+    # (A) 내재 시간가치 댐핑 패딩(+1.50pt): 옵션 가격이 0.01pt로 수렴하는 만기일에도 비율이 폭주하지 않도록 안정화
+    damped_pcr = (put_c + 1.50) / (call_c + 1.50)
+    # (B) 콜 또는 풋 중 하나가 0.45pt 이하(만기 시간가치 소멸 구간)이거나 일간 비율이 비정상(0.25 미만 또는 3.20 초과)일 때
+    #     직전 5거래일 롤링 중앙값(Median)과 블렌딩하고 상·하단 [0.35 ~ 2.80배]로 소프트 클리핑 후 3일 EMA 스무딩 적용
+    near_expiry_opt = (call_c <= 0.45) | (put_c <= 0.45) | (damped_pcr > 2.80) | (damped_pcr < 0.35)
+    clipped_pcr = damped_pcr.clip(lower=0.35, upper=2.80)
+    pcr_med5 = clipped_pcr.rolling(5, min_periods=1).median()
+    pcr_clean = pd.Series(
+        np.where(near_expiry_opt, pcr_med5, clipped_pcr),
+        index=df.index,
+    )
+    pcr_smooth = pcr_clean.ewm(span=3, min_periods=1).mean().round(3)
+
+    # 2. 미결제약정(OI) 선물 동시만기 롤오버 V자 급락(예: 18만 -> 6.8만 -> 19만) 및 일시 스파이크 스무딩:
+    raw_oi = pd.to_numeric(df["open_interest"], errors="coerce").ffill().bfill().fillna(150000.0)
+    oi_med15 = raw_oi.rolling(15, min_periods=3).median().bfill().fillna(raw_oi)
+    oi_pct_chg = raw_oi.pct_change().abs().fillna(0.0)
+
+    # 만기 주간 롤오버로 인해 15일 중앙값 대비 18% 이상 급락/급등하거나 일간 15% 이상 급변한 이상치(Outlier)를
+    # NaN 처리 후 선형 보간(Linear Interpolation)하고 3일 EMA로 매끄럽게 연결
+    is_oi_rollover_dip = (raw_oi < oi_med15 * 0.82) | (raw_oi > oi_med15 * 1.22) | (oi_pct_chg > 0.15)
+    oi_cleaned = raw_oi.mask(is_oi_rollover_dip)
+    oi_interp = oi_cleaned.interpolate(method="linear", limit=6).bfill().ffill().fillna(oi_med15)
+    oi_smooth = oi_interp.ewm(span=3, min_periods=1).mean().round(0)
+
+    return oi_smooth, pcr_smooth
+
+
 def compute_all_model_signals(
     df: pd.DataFrame,
     combine_supply: bool = True,
@@ -715,9 +756,15 @@ def compute_indicator_group_diagnostics(df: pd.DataFrame, sig_df: Optional[pd.Da
     opt_for_diff = float(last["call_foreign_qty"] - last["put_foreign_qty"])
     sentiment_score = float(sig_df["M09_Option_Investor_Flow"].iloc[-1])
 
-    # 최근 45거래일 4대 지표군 시계열
+    # 최근 45거래일 4대 지표군 시계열 (선물·옵션 만기 스무딩 적용)
     tail_df = df.tail(45).reset_index(drop=True)
     tail_sig = sig_df.tail(45).reset_index(drop=True)
+    tail_oi_smooth, tail_pcr_smooth = smooth_expiry_oi_and_pcr(df)
+    tail_oi_s = tail_oi_smooth.tail(45).reset_index(drop=True)
+    tail_pcr_s = tail_pcr_smooth.tail(45).reset_index(drop=True)
+    pcr_val = round(float(tail_pcr_s.iloc[-1]), 3)
+    oi_now = float(tail_oi_s.iloc[-1])
+    oi_chg = round(oi_now - float(tail_oi_s.iloc[-2]), 0) if len(tail_oi_s) >= 2 else 0.0
     t_dates = tail_df["date"].tolist()
     tech_series = [
         round(float(np.mean([tail_sig.loc[r_i, m] for m in tech_models])), 2)
@@ -726,11 +773,8 @@ def compute_indicator_group_diagnostics(df: pd.DataFrame, sig_df: Optional[pd.Da
     supply_series = [int(tail_sig.loc[r_i, "M08_Foreign_Program_Flow"]) for r_i in range(len(tail_sig))]
     breadth_series = [int(tail_sig.loc[r_i, "M10_Breadth_HPI_Sentiment"]) for r_i in range(len(tail_sig))]
     sentiment_series = [int(tail_sig.loc[r_i, "M09_Option_Investor_Flow"]) for r_i in range(len(tail_sig))]
-    pcr_series = [
-        round(float((tail_df.loc[r_i, "put_close"] + 0.05) / (tail_df.loc[r_i, "call_close"] + 0.05)), 2)
-        for r_i in range(len(tail_df))
-    ]
-    oi_series = [int(tail_df.loc[r_i, "open_interest"]) for r_i in range(len(tail_df))]
+    pcr_series = [round(float(tail_pcr_s.loc[r_i]), 3) for r_i in range(len(tail_pcr_s))]
+    oi_series = [int(tail_oi_s.loc[r_i]) for r_i in range(len(tail_oi_s))]
 
     cfg = load_simulation_config()
 
@@ -1642,8 +1686,11 @@ def run_futures_simulation(
         )
 
     # 지정 구간 전체 매매 원장 (15:35~15:45 동시호가 포지션 조정 내역 + 일간/누적 매매수익률 + Step 5 클릭형 시장지표 시계열 포함)
+    # ★ 선물·옵션 만기일 왜곡(PCR 700배 스파이크 및 미결제약정 롤오버 급락)을 스무딩 보정한 시계열 적용
     k200_base_for_ledger = float(k200_close[0]) if float(k200_close[0]) > 0 else 1.0
-    oi_arr = df["open_interest"].values
+    oi_smooth_series, pcr_smooth_series = smooth_expiry_oi_and_pcr(df)
+    oi_arr = oi_smooth_series.values
+    pcr_arr_smooth = pcr_smooth_series.values
     fut_for_arr = df["fut_foreign_net"].values
     spot_for_arr = df["spot_foreign_net"].values
     spot_per_arr = df["spot_personal_net"].values
@@ -1664,7 +1711,7 @@ def run_futures_simulation(
         k_val = float(k200_close[idx])
         c_val = float(call_c_arr[idx])
         p_val = float(put_c_arr[idx])
-        pcr_v = round(p_val / max(0.01, c_val), 3) if c_val > 0 else 1.0
+        pcr_v = round(float(pcr_arr_smooth[idx]), 3)
         oi_v = float(oi_arr[idx])
         oi_prev_v = float(oi_arr[idx - 1]) if idx > 0 else oi_v
         recent_ledger.append(
@@ -2582,7 +2629,7 @@ def get_intraday_and_1530_lock_status(
         oi_prev = float(r1.get("open_interest") or oi_today)
         call_c = float(r0.get("call_close") or 0.0)
         put_c = float(r0.get("put_close") or 0.0)
-        pcr_val = round(put_c / max(0.01, call_c), 3) if call_c > 0 else 1.0
+        pcr_val = round(float(np.clip((put_c + 1.50) / max(0.5, call_c + 1.50), 0.35, 2.80)), 3)
 
         excel_path = os.path.join(BASE_DIR, "data", "rawdata.xlsx")
         excel_mtime_str = (

@@ -90,7 +90,9 @@ def prepare_4supply_features(
     mkt_cap_eok = k200_c * 61500.0  # KOSPI200 350pt 기준 약 2,152조원
     spot_turnover_20d_ma = (k200_vol * k200_c * 0.05).rolling(20, min_periods=3).mean().replace(0, 1.0)
 
-    oi = df["open_interest"].astype(float).replace(0, np.nan).ffill().fillna(150000.0)
+    from futures_simulator import smooth_expiry_oi_and_pcr
+
+    oi, pcr_smoothed_series = smooth_expiry_oi_and_pcr(df)
     sp_for = df["spot_foreign_net"].astype(float).fillna(0.0)
     sp_per = df["spot_personal_net"].astype(float).fillna(0.0)
     prog_arb = df["program_arb_net"].astype(float).fillna(0.0)
@@ -232,8 +234,8 @@ def prepare_4supply_features(
     oi_ma120 = oi.rolling(120, min_periods=20).mean().bfill().fillna(150000.0)
     feat["oi_level_ratio"] = (oi / oi_ma120.replace(0, 1.0)).round(3)
 
-    # 옵션 PCR 및 20일 Z-Score
-    pcr_series = (put_c + 0.05) / (call_c + 0.05)
+    # 옵션 PCR 및 20일 Z-Score (선옵션 만기일 왜곡 보정 스무딩 적용)
+    pcr_series = pcr_smoothed_series
     pcr_z = _rolling_zscore(pcr_series, window=20, min_periods=5)
     feat["pcr_ratio"] = pcr_series.round(3)
     feat["pcr_z"] = pcr_z.round(2)

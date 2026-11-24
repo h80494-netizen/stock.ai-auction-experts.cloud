@@ -1567,8 +1567,28 @@ export default function FuturesSimulationView({
   const ledgerBasisSeries: number[] = ledgerChronological.map((r: any) =>
     r.basis !== undefined ? Number(r.basis) : Number(((Number(r.futures_close) || 0) - (Number(r.k200_close) || 0)).toFixed(2))
   );
-  const ledgerOiSeries: number[] = ledgerChronological.map((r: any) => Number(r.open_interest) || 0);
-  const ledgerPcrSeries: number[] = ledgerChronological.map((r: any) => Number(r.pcr_ratio) || 1.0);
+  const ledgerOiSeries: number[] = ledgerChronological.map((r: any, idx: number, arr: any[]) => {
+    const rawOi = Number(r.open_interest) || 0;
+    if (idx === 0 || rawOi <= 0) return rawOi;
+    const prevOi = Number(arr[idx - 1]?.open_interest) || rawOi;
+    // 선옵션 만기 롤오버 시 미결제약정 급락/급등 왜곡 방어 스무딩 (±15% 이내 보정)
+    if (prevOi > 0 && Math.abs(rawOi - prevOi) / prevOi > 0.15) {
+      const nextOi = idx + 1 < arr.length ? Number(arr[idx + 1]?.open_interest) || prevOi : prevOi;
+      return Math.round((prevOi + nextOi) / 2);
+    }
+    return rawOi;
+  });
+  const ledgerPcrSeries: number[] = ledgerChronological.map((r: any, idx: number, arr: any[]) => {
+    const rawPcr = Number(r.pcr_ratio) || 1.0;
+    // 옵션 만기일 시간가치 소멸(0.01pt)로 인한 PCR 폭발(40~703배) 방어 클램핑 및 스무딩
+    if (rawPcr > 2.8 || rawPcr < 0.35) {
+      const prevPcr = idx > 0 ? Math.min(2.8, Math.max(0.35, Number(arr[idx - 1]?.pcr_ratio) || 1.0)) : 1.0;
+      const nextPcr =
+        idx + 1 < arr.length ? Math.min(2.8, Math.max(0.35, Number(arr[idx + 1]?.pcr_ratio) || 1.0)) : prevPcr;
+      return Number(((prevPcr + nextPcr) / 2).toFixed(3));
+    }
+    return Number(Math.min(2.8, Math.max(0.35, rawPcr)).toFixed(3));
+  });
   const ledgerFutForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.fut_foreign_net) || 0);
   const ledgerSpotForeignSeries: number[] = ledgerChronological.map((r: any) => Number(r.spot_foreign_net) || 0);
   const ledgerProgramArbSeries: number[] = ledgerChronological.map((r: any) => Number(r.program_arb_net) || 0);
