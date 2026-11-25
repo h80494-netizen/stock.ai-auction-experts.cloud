@@ -6202,20 +6202,20 @@ export default function FuturesSimulationView({
 
           {renderLedgerPeriodBar("Step 5 매매원장 & 포지션 차트")}
 
-          {/* Step 5 매매원장의 매매수익률 차트 & 포지션 차트 */}
+          {/* Step 5 매매원장의 선택 5모델 합산포지션 & 누적 매매수익률 차트 (좌측) + 포지션 계약수 & 동시호가 주문수량 차트 (우측) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
-              <h3 className="text-xs font-extrabold text-emerald-300 mb-2">
-                📈 매매원장의 일별 매매수익률(막대, %) &amp; 누적 매매수익률 vs KOSPI200 현물지수(선, %) 차트
+              <h3 className="text-xs font-extrabold text-sky-300 mb-2">
+                📊 매매원장 선택 5모델 합산포지션(-5 ~ +5) &amp; 기간 누적 매매수익률(%) &amp; KOSPI200 현물지수 비교 차트
               </h3>
               <SvgBarAndLineChart
                 dates={ledgerDates}
-                barData={ledgerDailyRetPct}
-                barLabel="일별 매매수익률"
-                barUnit="%"
+                barData={ledgerBasePositions}
+                barLabel="선택 5모델 시그널 합산포지션 (-5 ~ +5)"
+                barUnit=""
                 lineData={ledgerCumRetPct}
                 lineLabel="기간 누적 매매수익률"
-                lineColor="#38bdf8"
+                lineColor="#10b981"
                 lineUnit="%"
                 secondLineData={ledgerK200CumRetPct}
                 secondLineLabel="KOSPI200 현물지수"
@@ -6243,30 +6243,6 @@ export default function FuturesSimulationView({
                 negBarColor="#f43f5e"
               />
             </div>
-          </div>
-
-          {/* Step 5 전체 구간 합산포지션(-5 ~ +5) 추이 차트 */}
-          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4">
-            <h3 className="text-xs font-extrabold text-sky-300 mb-2">
-              📊 매매원장 선택 5모델 합산포지션(-5 ~ +5) &amp; 기간 누적 매매수익률(%) &amp; KOSPI200 현물지수 비교 차트
-            </h3>
-            <SvgBarAndLineChart
-              dates={ledgerDates}
-              barData={ledgerBasePositions}
-              barLabel="선택 5모델 시그널 합산포지션 (-5 ~ +5)"
-              barUnit=""
-              lineData={ledgerCumRetPct}
-              lineLabel="기간 누적 매매수익률"
-              lineColor="#10b981"
-              lineUnit="%"
-              secondLineData={ledgerK200CumRetPct}
-              secondLineLabel="KOSPI200 현물지수"
-              secondLineColor="#f59e0b"
-              secondLineUnit="%"
-              secondLineDashed={true}
-              secondLineExtraText={`${ledgerLatestK200Close}pt`}
-              height={220}
-            />
           </div>
 
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 overflow-x-auto">
