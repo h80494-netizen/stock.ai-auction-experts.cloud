@@ -1481,17 +1481,20 @@ export default function FuturesSimulationView({
     const liveK200 = Number(liveRawData.k200_close) > 0 ? Number(liveRawData.k200_close) : Number(r.k200_close || 0);
     const liveFut = Number(liveRawData.fut_close) > 0 ? Number(liveRawData.fut_close) : Number(r.futures_close || 0);
     const prevFut = Number(prevRow?.futures_close ?? liveRawData.prev_fut_close ?? liveFut);
-    const prevContracts = Number(r.prev_contracts ?? prevRow?.target_contracts ?? livePosCheck?.prev_contracts ?? 0);
+    const prevContracts = Number(
+      prevRow?.target_contracts ?? r.prev_contracts ?? livePosCheck?.prev_contracts ?? 0
+    );
     const prevPrevContracts = Number(prevRow?.prev_contracts ?? 0);
     const prevDelta = Number(prevRow?.order_delta_contracts ?? 0);
-    const todayTargetContracts =
-      livePosCheck?.today_target_contracts !== undefined
-        ? Number(livePosCheck.today_target_contracts)
-        : Number(r.target_contracts ?? 0);
-    const todayDelta =
-      livePosCheck?.order_delta_contracts !== undefined
-        ? Number(livePosCheck.order_delta_contracts)
-        : todayTargetContracts - prevContracts;
+    const todayBasePos = Number(
+      r.base_position_sum ?? livePosCheck?.today_base_position_sum ?? 0
+    );
+    const todayTargetContracts = Number(
+      r.target_contracts ?? livePosCheck?.today_target_contracts ?? todayBasePos * multiplier
+    );
+    const todayDelta = todayTargetContracts - prevContracts;
+    const todayOrderAction =
+      todayDelta > 0 ? "매수 진입/추가" : todayDelta < 0 ? "매도 진입/청산" : "포지션 유지(0)";
     const feeRate = 0.00003;
 
     let netPnlKrw = 0;
@@ -1513,25 +1516,22 @@ export default function FuturesSimulationView({
       k200_close: liveK200,
       futures_close: liveFut,
       basis: Number((liveFut - liveK200).toFixed(2)),
-      open_interest: Number(liveRawData.open_interest ?? r.open_interest ?? 0),
-      oi_change: Number(liveRawData.oi_change ?? r.oi_change ?? 0),
-      pcr_ratio: Number(liveRawData.pcr_ratio ?? r.pcr_ratio ?? 1.0),
+      open_interest: Number(r.open_interest ?? liveRawData.open_interest ?? 0),
+      oi_change: Number(r.oi_change ?? liveRawData.oi_change ?? 0),
+      pcr_ratio: Number(r.pcr_ratio ?? liveRawData.pcr_ratio ?? 1.0),
       fut_foreign_net: Number(liveRawData.fut_foreign_net ?? r.fut_foreign_net ?? 0),
       spot_foreign_net: Number(liveRawData.spot_foreign_net ?? r.spot_foreign_net ?? 0),
       spot_personal_net: Number(liveRawData.spot_personal_net ?? r.spot_personal_net ?? 0),
-      program_arb_net: Number(liveRawData.program_arb_net ?? r.program_arb_net ?? 0),
+      program_arb_net: Number(r.program_arb_net ?? liveRawData.program_arb_net ?? 0),
       fx_close: Number(liveRawData.fx_close ?? r.fx_close ?? 0),
       kodex_leverage: Number(liveRawData.kodex_leverage ?? r.kodex_leverage ?? 0),
       up_down_diff: Number(liveRawData.up_down_diff ?? r.up_down_diff ?? 0),
       new_high_low_diff: Number(liveRawData.new_high_low_diff ?? r.new_high_low_diff ?? 0),
-      base_position_sum:
-        livePosCheck?.today_base_position_sum !== undefined
-          ? Number(livePosCheck.today_base_position_sum)
-          : r.base_position_sum,
+      base_position_sum: todayBasePos,
       prev_contracts: prevContracts,
       target_contracts: todayTargetContracts,
       order_delta_contracts: todayDelta,
-      order_action: livePosCheck?.order_action || r.order_action,
+      order_action: todayOrderAction,
       daily_return_pct: dailyRetPct,
       daily_pnl_krw: netPnlKrw,
       cum_return_pct: newCumRetPct,
@@ -5713,16 +5713,61 @@ export default function FuturesSimulationView({
             {/* 3) 전일 보유 vs 당일 장마감까지 실시간 포지션 변화 체크 & 15:35~15:45 동시호가 주문 확정 보드 */}
             {(() => {
               const pchk = lockStatus?.position_change_check || {};
-              const prevPos = pchk.prev_base_position_sum ?? 0;
-              const todayPos = pchk.today_base_position_sum ?? lockStatus?.base_position_sum ?? pm?.current_base_position ?? 0;
-              const prevC = pchk.prev_contracts ?? lockStatus?.prev_contracts ?? 0;
-              const targetC = pchk.today_target_contracts ?? lockStatus?.target_contracts ?? pm?.current_target_contracts ?? 0;
-              const deltaC = pchk.order_delta_contracts ?? lockStatus?.order_delta_contracts ?? lt?.last_executed_delta_contracts ?? 0;
-              const actStr = pchk.order_action || lockStatus?.order_action || lt?.last_executed_action || "포지션 유지";
-              const dRet = pchk.today_daily_return_pct ?? 0;
-              const dPnl = pchk.today_daily_pnl_krw ?? 0;
+              const latestLedgerRow = activeLedgerRows.length > 0 ? activeLedgerRows[0] : null;
+              const prevLedgerRow = activeLedgerRows.length > 1 ? activeLedgerRows[1] : null;
+              const prevDateStr = prevLedgerRow?.date || pchk.prev_date || "전일";
+              const todayDateStr = latestLedgerRow?.date || pchk.today_date || "당일";
+              const prevPos =
+                prevLedgerRow?.base_position_sum !== undefined
+                  ? Number(prevLedgerRow.base_position_sum)
+                  : Number(pchk.prev_base_position_sum ?? 0);
+              const todayPos =
+                latestLedgerRow?.base_position_sum !== undefined
+                  ? Number(latestLedgerRow.base_position_sum)
+                  : Number(pchk.today_base_position_sum ?? lockStatus?.base_position_sum ?? pm?.current_base_position ?? 0);
+              const prevC =
+                latestLedgerRow?.prev_contracts !== undefined
+                  ? Number(latestLedgerRow.prev_contracts)
+                  : prevLedgerRow?.target_contracts !== undefined
+                  ? Number(prevLedgerRow.target_contracts)
+                  : Number(pchk.prev_contracts ?? lockStatus?.prev_contracts ?? 0);
+              const targetC =
+                latestLedgerRow?.target_contracts !== undefined
+                  ? Number(latestLedgerRow.target_contracts)
+                  : Number(pchk.today_target_contracts ?? lockStatus?.target_contracts ?? pm?.current_target_contracts ?? 0);
+              const deltaC = targetC - prevC;
+              const actStr =
+                deltaC > 0 ? "매수 진입/추가" : deltaC < 0 ? "매도 진입/청산" : "포지션 유지(0)";
+              const dRet =
+                latestLedgerRow?.daily_return_pct !== undefined
+                  ? Number(latestLedgerRow.daily_return_pct)
+                  : Number(pchk.today_daily_return_pct ?? 0);
+              const dPnl =
+                latestLedgerRow?.daily_pnl_krw !== undefined
+                  ? Number(latestLedgerRow.daily_pnl_krw)
+                  : Number(pchk.today_daily_pnl_krw ?? 0);
               const sigChanges: any[] = pchk.models_signal_changes || [];
-              const timeline: any[] = lockStatus?.intraday_timeline || [];
+              const rawTimeline: any[] = lockStatus?.intraday_timeline || [];
+              const timeline: any[] =
+                rawTimeline.length > 0
+                  ? rawTimeline.map((t: any, idx: number, arr: any[]) => {
+                      if (idx === arr.length - 1) {
+                        return {
+                          ...t,
+                          base_position_sum: todayPos,
+                          target_contracts: targetC,
+                          order_delta_contracts: deltaC,
+                        };
+                      }
+                      const bPos = Number(t.base_position_sum ?? todayPos);
+                      const tC = bPos * multiplier;
+                      return {
+                        ...t,
+                        target_contracts: tC,
+                        order_delta_contracts: tC - prevC,
+                      };
+                    })
+                  : [];
 
               return (
                 <div className="space-y-4 pt-2 border-t border-slate-800">
@@ -5740,7 +5785,7 @@ export default function FuturesSimulationView({
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5">
                       <div className="text-[11px] text-slate-400">
-                        ① 전일({pchk.prev_date || "전일"}) 보유 포지션
+                        ① 전일({prevDateStr}) 보유 포지션
                       </div>
                       <div className="text-xl font-extrabold font-mono text-slate-200 mt-1">
                         {prevC > 0 ? `+${prevC}` : prevC}계약
@@ -5752,7 +5797,7 @@ export default function FuturesSimulationView({
 
                     <div className="bg-slate-950/90 border border-sky-500/40 rounded-xl p-3.5">
                       <div className="text-[11px] text-sky-300 font-bold">
-                        ② 당일({pchk.today_date || "당일"}) 실시간 목표 포지션
+                        ② 당일({todayDateStr}) 실시간 목표 포지션
                       </div>
                       <div
                         className={`text-xl font-extrabold font-mono mt-1 ${

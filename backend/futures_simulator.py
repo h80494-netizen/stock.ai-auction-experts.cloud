@@ -1518,7 +1518,7 @@ def run_futures_simulation(
         if combine_supply and int(is_range_arr[i]) == 1:
             sum_sig = int(box_contrarian_arr[i])
         else:
-            sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in active_set))
+            sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
         target_contracts[i] = sum_sig * mult
@@ -1727,6 +1727,9 @@ def run_futures_simulation(
     comb_port_metrics = calculate_series_metrics(
         pd.Series(comb_port_ret[1:]), annual_days=annual_days, rf_annual=rf_annual
     )
+
+    # 시뮬레이션(또는 MDD/정기 교체) 종료 시점의 최종 활성 5개 모델 확정
+    active_set = list(sim_active_set)
 
     # 개별 모델별 성과 요약 (10대 운영 모델 + 후보 모델), 순수 vs 4대 수급 합산 비교 및 T=0~T-20 시그널 이력
     model_summaries: List[Dict[str, Any]] = []
@@ -2803,10 +2806,10 @@ def get_intraday_and_1530_lock_status(
             "excel_updated_at": excel_mtime_str,
         }
 
-    # 캐시된 시뮬레이션(없으면 1회 실행)의 채택 모델 + 최근 120일 실시간 시그널로 Step 5를 0.01초 내 초고속 산출
+    # 캐시된 시뮬레이션(없으면 1회 실행)의 채택 모델 + 매매원장 시계열로 Step 5 포지션을 100% 동일하게 산출
     matched_cached_sim = None
-    for k, v in _CACHED_SIM_RESULTS.items():
-        if len(k) >= 14 and k[3] == multiplier and k[-2] == int(point_value_krw) and k[-1] == int(initial_capital_krw):
+    for k, v in reversed(list(_CACHED_SIM_RESULTS.items())):
+        if len(k) >= 14 and k[3] == multiplier and k[12] == int(point_value_krw) and k[13] == int(initial_capital_krw):
             matched_cached_sim = v
             break
     if matched_cached_sim is not None:
@@ -2833,8 +2836,13 @@ def get_intraday_and_1530_lock_status(
     else:
         sig_tail = pd.DataFrame()
 
-    active_5_set = set(m["model_id"] for m in get_active_pool() if m.get("is_selected")) or set(sim_res.get("active_5_models") or [])
+    active_5_set = set(sim_res.get("active_5_models") or []) or set(
+        m["model_id"] for m in get_active_pool() if m.get("is_selected")
+    )
     models_perf_list = sim_res.get("models_performance", [])
+    ledger_list = sim_res.get("recent_trading_ledger", []) if sim_res.get("success") else []
+    today_ledger = ledger_list[0] if len(ledger_list) > 0 else {}
+    prev_ledger = ledger_list[1] if len(ledger_list) > 1 else today_ledger
 
     prev_base_pos = 0
     today_base_pos = 0
@@ -2844,12 +2852,8 @@ def get_intraday_and_1530_lock_status(
 
     for m in models_perf_list:
         m_id = m["model_id"]
-        if not sig_tail.empty and m_id in sig_tail.columns and len(sig_tail) >= 2:
-            today_sig = int(sig_tail[m_id].iloc[-1])
-            prev_sig = int(sig_tail[m_id].iloc[-2])
-        else:
-            prev_sig = int(m.get("signal_lags", {}).get("T_1", 0))
-            today_sig = int(m.get("latest_signal", 0))
+        prev_sig = int(m.get("signal_lags", {}).get("T_1", m.get("prev_signal", 0)))
+        today_sig = int(m.get("latest_signal", 0))
         sig_diff = today_sig - prev_sig
         is_sel = m_id in active_5_set
         if is_sel:
@@ -2884,10 +2888,6 @@ def get_intraday_and_1530_lock_status(
         )
 
     if not sig_tail.empty and "IS_RANGE_REGIME" in sig_tail.columns and len(sig_tail) >= 2:
-        if int(sig_tail["IS_RANGE_REGIME"].iloc[-2]) == 1:
-            prev_base_pos = int(sig_tail["BOX_CONTRARIAN_BASE_POS"].iloc[-2])
-        if int(sig_tail["IS_RANGE_REGIME"].iloc[-1]) == 1:
-            today_base_pos = int(sig_tail["BOX_CONTRARIAN_BASE_POS"].iloc[-1])
         today_rawdata["vix_20ma"] = float(sig_tail["VIX_20MA"].iloc[-1])
         today_rawdata["vol_volume_energy"] = float(sig_tail["VOL_VOLUME_ENERGY"].iloc[-1])
         today_rawdata["is_range_regime"] = bool(int(sig_tail["IS_RANGE_REGIME"].iloc[-1]) == 1)
@@ -2898,10 +2898,26 @@ def get_intraday_and_1530_lock_status(
             else "🚀 추세+수급 5대모델 가동"
         )
 
+    # 매매원장(recent_trading_ledger)과 상단 포지션 카드(① 전일 보유 / ② 당일 목표 / ③ 동시호가 주문수량 / ④ 일별손익)를 100% 일치시킴
+    if prev_ledger and "base_position_sum" in prev_ledger:
+        prev_base_pos = int(prev_ledger.get("base_position_sum", prev_base_pos))
+    if today_ledger and "base_position_sum" in today_ledger:
+        today_base_pos = int(today_ledger.get("base_position_sum", today_base_pos))
+
     prev_base_pos = max(-5, min(5, prev_base_pos))
     today_base_pos = max(-5, min(5, today_base_pos))
-    prev_contracts = prev_base_pos * multiplier
-    today_target_contracts = today_base_pos * multiplier
+    if today_ledger and "prev_contracts" in today_ledger:
+        prev_contracts = int(today_ledger["prev_contracts"])
+    elif prev_ledger and "target_contracts" in prev_ledger:
+        prev_contracts = int(prev_ledger["target_contracts"])
+    else:
+        prev_contracts = prev_base_pos * multiplier
+
+    if today_ledger and "target_contracts" in today_ledger:
+        today_target_contracts = int(today_ledger["target_contracts"])
+    else:
+        today_target_contracts = today_base_pos * multiplier
+
     order_delta_contracts = today_target_contracts - prev_contracts
     order_action = (
         "매수 진입/추가"
@@ -2909,12 +2925,15 @@ def get_intraday_and_1530_lock_status(
         else ("매도 진입/청산" if order_delta_contracts < 0 else "포지션 유지(0)")
     )
 
-    fut_diff_today = float(today_rawdata.get("fut_change_pt") or 0.0)
-    today_daily_pnl_krw = round(prev_contracts * fut_diff_today * float(point_value_krw), 0)
-    today_daily_ret_pct = round((today_daily_pnl_krw / float(initial_capital_krw)) * 100.0, 3) if prev_contracts != 0 else 0.0
-    ledger_list = sim_res.get("recent_trading_ledger", []) if sim_res.get("success") else []
-    today_ledger = ledger_list[0] if len(ledger_list) > 0 else {}
-    prev_ledger = ledger_list[1] if len(ledger_list) > 1 else today_ledger
+    if today_ledger and "daily_pnl_krw" in today_ledger and "daily_return_pct" in today_ledger:
+        today_daily_pnl_krw = round(float(today_ledger["daily_pnl_krw"]), 0)
+        today_daily_ret_pct = round(float(today_ledger["daily_return_pct"]), 3)
+    else:
+        fut_diff_today = float(today_rawdata.get("fut_change_pt") or 0.0)
+        today_daily_pnl_krw = round(prev_contracts * fut_diff_today * float(point_value_krw), 0)
+        today_daily_ret_pct = (
+            round((today_daily_pnl_krw / float(initial_capital_krw)) * 100.0, 3) if prev_contracts != 0 else 0.0
+        )
 
     position_change_check = {
         "prev_date": today_rawdata.get("prev_date") or prev_ledger.get("date", "-"),
