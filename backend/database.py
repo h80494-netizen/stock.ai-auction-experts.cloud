@@ -2501,6 +2501,133 @@ def admin_update_user_password(request_id: int, new_password: str):
     conn.close()
     return {"success": True, "message": "회원 비밀번호가 수정되었습니다."}
 
+
+RESTRICTED_MENU_ITEMS = [
+    ("futures_sim", "🚀 선물오버나잇자동매매"),
+    ("order", "🚨 매수주문 (Orders)"),
+    ("etf_strategy", "⚡ ETF 투자전략"),
+    ("etf_history", "📜 시뮬레이션 히스토리"),
+]
+
+
+def get_menu_access_policy() -> dict:
+    """
+    신규 가입회원 및 일반 회원의 핵심 트레이딩 메뉴(선물오버나잇자동매매, 매수주문, ETF투자전략, 시뮬레이션히스토리)
+    이용 권한 정책을 조회합니다.
+    - mode:
+      * 'ADMIN_ONLY': 관리자 1인만 이용 (일반 회원 전체 차단)
+      * 'SELECTED_USERS': 관리자 + 관리자가 지정(허용)한 회원만 이용 (신규 가입회원은 자동 제한)
+      * 'ALL_APPROVED': 승인된 정회원 전체 허용
+    """
+    import json
+    raw = get_system_setting("menu_access_policy_json", "")
+    default_policy = {
+        "mode": "SELECTED_USERS",
+        "restricted_menus": [m[0] for m in RESTRICTED_MENU_ITEMS],
+        "allowed_user_ids": [],
+        "menu_allowed_users": {
+            "futures_sim": [],
+            "order": [],
+            "etf_strategy": [],
+            "etf_history": [],
+        },
+        "notice_message": "현재 [선물오버나잇자동매매 · 매수주문 · ETF투자전략 · 시뮬레이션히스토리] 메뉴는 시스템 운영 정책에 따라 [관리자 및 지정 허용 회원 전용 모드]로 이용이 제한되어 있습니다. 일반/신규 회원분들은 재무분석(DartLab), 증권사 리포트, 시세/차트, 종목조회, AI 목표가, 종목 필터링(Tetris) 등 일반 분석 메뉴를 자유롭게 이용하실 수 있습니다.",
+        "updated_at": "",
+    }
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                default_policy.update(loaded)
+        except Exception:
+            pass
+    mode = str(default_policy.get("mode") or "SELECTED_USERS").upper()
+    if mode not in ("ADMIN_ONLY", "SELECTED_USERS", "ALL_APPROVED"):
+        mode = "SELECTED_USERS"
+    default_policy["mode"] = mode
+
+    allowed_ids = default_policy.get("allowed_user_ids")
+    if not isinstance(allowed_ids, list):
+        allowed_ids = []
+    default_policy["allowed_user_ids"] = list(dict.fromkeys([str(x).strip() for x in allowed_ids if str(x).strip()]))
+
+    menu_map = default_policy.get("menu_allowed_users")
+    if not isinstance(menu_map, dict):
+        menu_map = {}
+    cleaned_menu_map = {}
+    for m_id, _ in RESTRICTED_MENU_ITEMS:
+        m_list = menu_map.get(m_id)
+        if not isinstance(m_list, list):
+            m_list = list(default_policy["allowed_user_ids"])
+        cleaned_menu_map[m_id] = list(dict.fromkeys([str(x).strip() for x in m_list if str(x).strip()]))
+    default_policy["menu_allowed_users"] = cleaned_menu_map
+    default_policy["restricted_menus"] = [m[0] for m in RESTRICTED_MENU_ITEMS]
+    return default_policy
+
+
+def save_menu_access_policy(payload: dict) -> dict:
+    import json
+    import datetime
+    current = get_menu_access_policy()
+    if isinstance(payload, dict):
+        if "mode" in payload and payload["mode"]:
+            m = str(payload["mode"]).upper().strip()
+            if m in ("ADMIN_ONLY", "SELECTED_USERS", "ALL_APPROVED"):
+                current["mode"] = m
+        if "allowed_user_ids" in payload and isinstance(payload["allowed_user_ids"], list):
+            clean_ids = list(dict.fromkeys([str(x).strip() for x in payload["allowed_user_ids"] if str(x).strip()]))
+            current["allowed_user_ids"] = clean_ids
+            # 통합 회원 선택 시 4대 제한 메뉴에도 동기화 (개별 메뉴 지정이 함께 오지 않은 경우)
+            if "menu_allowed_users" not in payload:
+                for m_id, _ in RESTRICTED_MENU_ITEMS:
+                    current["menu_allowed_users"][m_id] = list(clean_ids)
+        if "menu_allowed_users" in payload and isinstance(payload["menu_allowed_users"], dict):
+            for m_id, _ in RESTRICTED_MENU_ITEMS:
+                if m_id in payload["menu_allowed_users"] and isinstance(payload["menu_allowed_users"][m_id], list):
+                    current["menu_allowed_users"][m_id] = list(
+                        dict.fromkeys([str(x).strip() for x in payload["menu_allowed_users"][m_id] if str(x).strip()])
+                    )
+        if "notice_message" in payload and payload["notice_message"] is not None:
+            current["notice_message"] = str(payload["notice_message"]).strip()
+
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current["updated_at"] = now_str
+    set_system_setting("menu_access_policy_json", json.dumps(current, ensure_ascii=False))
+    return get_menu_access_policy()
+
+
+def get_user_menu_permissions(user_id: str = "guest", is_admin: bool = False) -> dict:
+    policy = get_menu_access_policy()
+    uid = _norm_uid(user_id)
+    admin_flag = bool(is_admin) or (uid == "admin")
+    mode = policy["mode"]
+    allowed_global = set(policy.get("allowed_user_ids") or [])
+    menu_map = policy.get("menu_allowed_users") or {}
+
+    permissions = {}
+    for m_id, _ in RESTRICTED_MENU_ITEMS:
+        if admin_flag:
+            permissions[m_id] = True
+        elif mode == "ALL_APPROVED":
+            permissions[m_id] = True
+        elif mode == "ADMIN_ONLY":
+            permissions[m_id] = False
+        else:  # SELECTED_USERS
+            m_allowed = set(menu_map.get(m_id) or [])
+            permissions[m_id] = (uid in allowed_global) or (uid in m_allowed)
+
+    return {
+        "user_id": uid,
+        "is_admin": admin_flag,
+        "mode": mode,
+        "restricted_menus": [m[0] for m in RESTRICTED_MENU_ITEMS],
+        "permissions": permissions,
+        "allowed_user_ids": policy.get("allowed_user_ids") or [],
+        "menu_allowed_users": menu_map,
+        "notice_message": policy.get("notice_message") or "",
+        "updated_at": policy.get("updated_at") or "",
+    }
+
 # Initialize DB when imported
 init_db()
 

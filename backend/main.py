@@ -44,6 +44,9 @@ from database import (
     save_user_trading_account,
     get_all_users_trading_overview,
     SUPPORTED_BROKERS,
+    get_menu_access_policy,
+    save_menu_access_policy,
+    get_user_menu_permissions,
 )
 
 
@@ -3644,6 +3647,45 @@ def api_admin_trading_overview(req: AdminAuthModel):
         u_item["etf_us_total_eval_usd"] = etf_info.get("total_eval_usd", 0.0)
 
     return {"status": "success", "data": overview_list}
+
+
+class AdminMenuAccessPolicySaveModel(BaseModel):
+    admin_password: str = ""
+    mode: Optional[str] = None  # ADMIN_ONLY | SELECTED_USERS | ALL_APPROVED
+    allowed_user_ids: Optional[List[str]] = None
+    menu_allowed_users: Optional[Dict[str, List[str]]] = None
+    notice_message: Optional[str] = None
+
+
+@app.get("/api/auth/menu-permissions")
+def api_get_menu_permissions(request: Request, user_id: Optional[str] = None, is_admin: bool = False):
+    uid = _resolve_uid(user_id, request)
+    data = get_user_menu_permissions(uid, is_admin=is_admin)
+    return {"success": True, "data": data}
+
+
+@app.post("/api/auth/admin/menu-policy")
+def api_admin_get_menu_policy(req: AdminAuthModel):
+    admin_master = get_admin_master_password()
+    if req.admin_password.strip() and req.admin_password.strip() != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    policy = get_menu_access_policy()
+    requests_list = get_all_user_requests()
+    return {"status": "success", "data": policy, "users": requests_list}
+
+
+@app.post("/api/auth/admin/save-menu-policy")
+def api_admin_save_menu_policy(req: AdminMenuAccessPolicySaveModel):
+    admin_master = get_admin_master_password()
+    if req.admin_password.strip() and req.admin_password.strip() != admin_master:
+        raise HTTPException(status_code=403, detail="관리자 접근 권한이 없습니다.")
+    payload = req.dict(exclude_unset=True)
+    saved = save_menu_access_policy(payload)
+    return {
+        "status": "success",
+        "message": "✅ 4대 핵심 트레이딩 메뉴(선물오버나잇자동매매 · 매수주문 · ETF투자전략 · 시뮬레이션히스토리) 회원 이용권한 설정이 즉시 적용되었습니다.",
+        "data": saved,
+    }
 
 
 if __name__ == "__main__":

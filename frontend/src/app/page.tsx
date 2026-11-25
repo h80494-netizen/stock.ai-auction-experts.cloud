@@ -39,6 +39,59 @@ export default function Home() {
   const [showAccountModal, setShowAccountModal] = useState<boolean>(false);
   const [showMobileMenuDrawer, setShowMobileMenuDrawer] = useState<boolean>(false);
 
+  // 4대 핵심 트레이딩 메뉴(선물오버나잇자동매매, 매수주문, ETF투자전략, 시뮬레이션히스토리) 회원별 접근 권한 상태
+  const [menuPermissions, setMenuPermissions] = useState<Record<string, boolean>>({
+    futures_sim: true,
+    order: true,
+    etf_strategy: true,
+    etf_history: true,
+  });
+  const [menuPolicyMode, setMenuPolicyMode] = useState<string>('SELECTED_USERS');
+  const [menuNoticeMessage, setMenuNoticeMessage] = useState<string>(
+    '현재 [선물오버나잇자동매매 · 매수주문 · ETF투자전략 · 시뮬레이션히스토리] 메뉴는 시스템 운영 정책에 따라 [관리자 및 지정 허용 회원 전용 모드]로 이용이 제한되어 있습니다.'
+  );
+
+  const fetchUserMenuPermissions = async (uidParam?: string, adminParam?: boolean) => {
+    const targetUid = uidParam !== undefined ? uidParam : userId;
+    const targetAdmin = adminParam !== undefined ? adminParam : isAdmin;
+    try {
+      const res = await fetch(
+        `/api/auth/menu-permissions?user_id=${encodeURIComponent(targetUid || 'guest')}&is_admin=${targetAdmin ? 'true' : 'false'}`
+      );
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.data) {
+          setMenuPermissions(
+            json.data.permissions || {
+              futures_sim: targetAdmin,
+              order: targetAdmin,
+              etf_strategy: targetAdmin,
+              etf_history: targetAdmin,
+            }
+          );
+          if (json.data.mode) setMenuPolicyMode(json.data.mode);
+          if (json.data.notice_message) setMenuNoticeMessage(json.data.notice_message);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchUserMenuPermissions(userId, isAdmin);
+    }
+  }, [isAuthenticated, userId, isAdmin]);
+
+  const isMenuAllowed = (tabId: string) => {
+    if (isAdmin) return true;
+    if (['futures_sim', 'order', 'etf_strategy', 'etf_history'].includes(tabId)) {
+      return Boolean(menuPermissions[tabId]);
+    }
+    return true;
+  };
+
   const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
@@ -246,16 +299,16 @@ export default function Home() {
           </h1>
 
           <div className="flex items-center gap-1.5 flex-wrap">
-            {/* 오직 관리자(주인장)에게만 노출되는 승인 관리 버튼 */}
+            {/* 오직 관리자(주인장)에게만 노출되는 통합 관제 센터 버튼 */}
             {isAdmin && (
               <button
                 onClick={() => setShowAdminModal(true)}
-                title="회원 가입 승인 및 회원별 트레이딩 계좌 감독 (관리자 전용)"
-                className="px-2 py-1 text-[11px] bg-red-950/80 hover:bg-red-900 border border-red-500 text-red-200 hover:text-white rounded-lg transition-all flex items-center gap-1 shadow cursor-pointer font-bold animate-pulse"
+                title="관리자 전용 통합 관제 센터 (메뉴 이용권한 3단계 제어 · 회원 승인 · 계좌 감독)"
+                className="px-2.5 py-1 text-[11px] bg-amber-950/90 hover:bg-amber-900 border border-amber-400 text-amber-200 hover:text-white rounded-lg transition-all flex items-center gap-1 shadow cursor-pointer font-extrabold"
               >
                 <span>👑</span>
-                <span className="hidden sm:inline">회원 승인 & 계좌 감독</span>
-                <span className="sm:hidden">승인/계좌관리</span>
+                <span className="hidden sm:inline">관리자 전용 통합 관제 센터</span>
+                <span className="sm:hidden">관리자센터</span>
               </button>
             )}
 
@@ -356,22 +409,28 @@ export default function Home() {
                 { id: 'derivatives', label: '📊 파생/수급 랩', accent: 'border-teal-500/50 text-teal-200' },
                 { id: 'tetris', label: '🧱 종목 필터링 (Tetris)', accent: 'border-purple-500/50 text-purple-200' },
                 { id: 'scanner', label: '🕷️ DB크롤링 스캐너', accent: 'border-blue-500/50 text-blue-200' },
-              ].map(item => (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    setActiveTab(item.id as any);
-                    setShowMobileMenuDrawer(false);
-                  }}
-                  className={`px-3 py-2.5 rounded-lg text-left text-xs font-bold border transition-all truncate ${
-                    activeTab === item.id
-                      ? 'bg-indigo-600 border-indigo-400 text-white shadow-lg'
-                      : `bg-[#141926] ${item.accent} hover:bg-gray-800`
-                  }`}
-                >
-                  {item.label}
-                </button>
-              ))}
+              ].map(item => {
+                const locked = !isMenuAllowed(item.id);
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      setActiveTab(item.id as any);
+                      setShowMobileMenuDrawer(false);
+                    }}
+                    className={`px-3 py-2.5 rounded-lg text-left text-xs font-bold border transition-all truncate flex items-center justify-between ${
+                      activeTab === item.id
+                        ? 'bg-indigo-600 border-indigo-400 text-white shadow-lg'
+                        : locked
+                        ? 'bg-gray-900/70 border-gray-800 text-gray-500'
+                        : `bg-[#141926] ${item.accent} hover:bg-gray-800`
+                    }`}
+                  >
+                    <span className="truncate">{item.label}</span>
+                    {locked && <span className="text-[10px] text-rose-400 ml-1 shrink-0">🔒</span>}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -379,35 +438,55 @@ export default function Home() {
         <div className="flex items-center gap-1 w-full md:flex-1 md:min-w-0 overflow-x-auto top-nav-scroll pb-2">
           <button
             onClick={() => setActiveTab('futures_sim')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
               activeTab === 'futures_sim'
                 ? 'bg-emerald-900/50 border-emerald-500 text-emerald-200 shadow-md shadow-emerald-900/40'
+                : !isMenuAllowed('futures_sim')
+                ? 'bg-gray-900/60 border-gray-800 text-gray-500'
                 : 'bg-emerald-950/30 border-emerald-800/60 text-emerald-400 hover:text-emerald-200'
             }`}
           >
-            🚀 선물오버나잇자동매매
+            <span>🚀 선물오버나잇자동매매</span>
+            {!isMenuAllowed('futures_sim') && <span className="text-[10px] text-rose-400">🔒</span>}
           </button>
           <button
             onClick={() => setActiveTab('order')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
               activeTab === 'order' 
                 ? 'bg-red-900/40 border-red-600 text-red-300 shadow-md shadow-red-900/30' 
+                : !isMenuAllowed('order')
+                ? 'bg-gray-900/60 border-gray-800 text-gray-500'
                 : 'bg-red-950/25 border-red-800/50 text-red-300 hover:text-red-200'
             }`}
           >
-            🚨 매수주문 (Orders)
+            <span>🚨 매수주문 (Orders)</span>
+            {!isMenuAllowed('order') && <span className="text-[10px] text-rose-400">🔒</span>}
           </button>
           <button 
             onClick={() => setActiveTab('etf_strategy')} 
-            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_strategy' ? 'bg-indigo-900/50 border-indigo-400 text-white shadow-md shadow-indigo-900/30' : 'bg-indigo-950/25 border-indigo-800/50 text-indigo-300 hover:text-white'}`}
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
+              activeTab === 'etf_strategy'
+                ? 'bg-indigo-900/50 border-indigo-400 text-white shadow-md shadow-indigo-900/30'
+                : !isMenuAllowed('etf_strategy')
+                ? 'bg-gray-900/60 border-gray-800 text-gray-500'
+                : 'bg-indigo-950/25 border-indigo-800/50 text-indigo-300 hover:text-white'
+            }`}
           >
-            ⚡ ETF 투자전략
+            <span>⚡ ETF 투자전략</span>
+            {!isMenuAllowed('etf_strategy') && <span className="text-[10px] text-rose-400">🔒</span>}
           </button>
           <button 
             onClick={() => setActiveTab('etf_history')} 
-            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 ${activeTab === 'etf_history' ? 'bg-indigo-900/40 border-indigo-300 text-white' : 'border-transparent text-gray-300 hover:text-white'}`}
+            className={`px-3 py-1.5 rounded font-bold text-xs border transition-colors whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
+              activeTab === 'etf_history'
+                ? 'bg-indigo-900/40 border-indigo-300 text-white'
+                : !isMenuAllowed('etf_history')
+                ? 'bg-gray-900/60 border-gray-800 text-gray-500'
+                : 'border-transparent text-gray-300 hover:text-white'
+            }`}
           >
-            시뮬레이션 히스토리
+            <span>시뮬레이션 히스토리</span>
+            {!isMenuAllowed('etf_history') && <span className="text-[10px] text-rose-400">🔒</span>}
           </button>
           <button 
             onClick={() => setActiveTab('etf')} 
@@ -563,7 +642,49 @@ export default function Home() {
 
       {/* Main Content Area */}
       <main className="flex-1 overflow-y-auto lg:overflow-hidden relative pb-14 md:pb-0">
-        {activeTab === 'search' ? (
+        {!isMenuAllowed(activeTab) ? (
+          <div className="h-full min-h-[70vh] flex items-center justify-center p-6 bg-[#070b14]">
+            <div className="max-w-xl w-full bg-[#0f1623] border border-red-500/50 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-2xl">
+              <div className="w-16 h-16 mx-auto rounded-full bg-red-950/80 border border-red-500/60 flex items-center justify-center text-3xl">
+                🔒
+              </div>
+              <div className="space-y-2">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-950/90 border border-red-500/50 text-red-300 text-xs font-extrabold">
+                  <span>⚖️ 관리자 지정 회원 전용 메뉴 접근 제한</span>
+                </div>
+                <h2 className="text-lg sm:text-xl font-black text-white">
+                  해당 트레이딩 메뉴는 관리자 또는 지정 허용 회원만 이용할 수 있습니다
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-300 leading-relaxed bg-[#090d16] border border-slate-800 rounded-xl p-4">
+                  {menuNoticeMessage}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('dartlab')}
+                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold cursor-pointer transition shadow-lg"
+                >
+                  📊 재무분석 (DartLab) 이동
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('tetris')}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold cursor-pointer transition shadow-lg"
+                >
+                  🧱 종목 필터링 (Tetris) 이동
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('search')}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-extrabold cursor-pointer transition"
+                >
+                  🔍 종목조회 화면으로 이동
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'search' ? (
           <StockDashboard stocks={stocks} globalStocks={globalData?.stocks || []} globalSearchTicker={globalSearchTicker} setGlobalSearchTicker={setGlobalSearchTicker} />
         ) : activeTab === 'price' ? (
           <PriceView stocks={stocks} globalStocks={globalData.stocks} news={news} forceCategory={forceCategory} globalSearchTicker={globalSearchTicker} setGlobalSearchTicker={setGlobalSearchTicker} />
@@ -674,6 +795,7 @@ export default function Home() {
         <AdminApprovalModal
           isOpen={showAdminModal}
           onClose={() => setShowAdminModal(false)}
+          onPolicyUpdated={() => fetchUserMenuPermissions(userId, isAdmin)}
           onInspectUser={(targetUid, targetName) => {
             if (targetUid === 'admin') {
               setInspectingUser(null);
