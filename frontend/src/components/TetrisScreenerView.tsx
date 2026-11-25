@@ -1283,6 +1283,33 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           return px >= xMin - xRange * 0.03 && px <= xMax + xRange * 0.03 && py >= yMin - yRange * 0.03 && py <= yMax + yRange * 0.03;
         });
 
+        // 🚫 차트 내 주요 종목 라벨 글씨 겹침 방지 충돌 검사 (Collision-Free Greedy Bounding Box)
+        const placedLabelBoxes: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+        const nonOverlappingLabelTickers = new Set<string>();
+        visibleItems.forEach((it: any, idx: number) => {
+          const isCandidate = !showTopLabelsOnly || visibleItems.length <= 25 || idx < 24;
+          if (!isCandidate) return;
+          const cx = toX(Number(it.pbr) || 0);
+          const cy = toY(Number(it.roe) || 0);
+          const nameStr = getStockName(it);
+          const estW = Math.max(46, nameStr.length * 10.5 + 14);
+          const estH = 15;
+          const bx1 = cx + 6;
+          const by1 = cy - 9;
+          const bx2 = bx1 + estW;
+          const by2 = by1 + estH;
+          const hasCollision = placedLabelBoxes.some(
+            (b) => !(bx2 < b.x1 || bx1 > b.x2 || by2 < b.y1 || by1 > b.y2)
+          );
+          if (!hasCollision) {
+            placedLabelBoxes.push({ x1: bx1, y1: by1, x2: bx2, y2: by2 });
+            nonOverlappingLabelTickers.add(it.ticker);
+          }
+        });
+
+        // 차트 상단 고정 바에 겹침 없이 정렬 표시할 주요 종목 TOP 16
+        const topHeaderStocks = visibleItems.slice(0, 16);
+
         const anchorSvgX = toX(effectiveAnchor.pbr);
         const anchorSvgY = toY(effectiveAnchor.roe);
         const ZOOM_PRESETS = [100, 150, 200, 300, 400, 600];
@@ -1504,76 +1531,120 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               </div>
             </div>
 
-            {/* 범례 & 호버 종목 요약 바 (고정 높이 및 줄바꿈 방지로 마우스 호버 시 차트 위아래 흔들림 원천 차단) */}
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs bg-gray-900/80 border border-gray-800 rounded-lg px-3.5 py-2 min-h-[44px]">
-              <div className="flex flex-wrap items-center gap-3 shrink-0">
-                {colorMode === 'SECTOR' ? (
-                  <>
-                    <span className="text-purple-300 font-bold">🎨 섹터별 고유 색상</span>
-                    <span className="flex items-center gap-1.5 text-[11px] text-gray-300">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-emerald-400 bg-transparent" />
-                      <span>빈 원(○): 전분기(25.3Q~26.2Q 4Q합)</span>
+            {/* 🏆 차트 맨위: 마우스 호버 툴팁 & 주요 종목 라벨 겹침 없는 전용 상단 대시보드 바 */}
+            <div className="bg-[#0b101b] border border-indigo-500/40 rounded-xl p-3 space-y-2.5 shadow-inner">
+              {/* 1단: 마우스 호버 툴팁 고정 패널 (차트 위 글씨 겹침 원천 차단) */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800/90 pb-2 min-h-[36px]">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="px-2 py-0.5 rounded bg-indigo-600/30 border border-indigo-400/50 text-indigo-200 font-extrabold">
+                    🎯 선택·호버 종목 상세 툴팁
+                  </span>
+                  {hoveredStock ? (
+                    <div className="flex flex-wrap items-center gap-2 font-mono text-xs bg-indigo-950/90 border border-indigo-400/70 px-3 py-1 rounded-lg shadow">
+                      <span className="font-sans font-extrabold text-white text-sm">
+                        {getStockName(hoveredStock)} ({hoveredStock.ticker})
+                      </span>
+                      <span
+                        className="px-2 py-0.5 rounded text-[11px] font-sans font-extrabold text-slate-950"
+                        style={{
+                          backgroundColor:
+                            sectorColorMap[String(hoveredStock.sector || '기타').trim() || '기타'] || '#38bdf8',
+                        }}
+                      >
+                        {hoveredStock.sector || '기타'}
+                      </span>
+                      <span className="text-sky-300 font-bold">
+                        PBR: {hoveredStock.prev_q_pbr}배 → {hoveredStock.pbr}배 (
+                        {hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
+                      </span>
+                      <span className="text-emerald-300 font-extrabold">
+                        ROE(25.3Q~26.2Q → 25.4Q~26.3Q): {hoveredStock.prev_q_roe}% → {hoveredStock.roe}% (
+                        {hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p{' '}
+                        {hoveredStock.qoq_roe_diff >= 0 ? '↗' : '↘'})
+                      </span>
+                      <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
+                      <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
+                      {setGlobalSearchTicker && (
+                        <button
+                          type="button"
+                          onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
+                          className="px-2.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-extrabold text-[11px] cursor-pointer"
+                        >
+                          상세 리포트 →
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-gray-400 text-xs">
+                      아래 주요 종목 라벨 배지 또는 차트의 점(●) 위에 마우스를 올리면 전분기(25.3Q~26.2Q)→현재분기(25.4Q~26.3Q) 상세 수치가 이곳에 겹침 없이 표시됩니다.
                     </span>
-                    <span className="flex items-center gap-1.5 text-[11px] text-gray-300">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                      <span>채운 원(●) &amp; 화살표(↗): 현재분기(25.4Q~26.3Q 4Q합)</span>
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/60" />
-                      <span className="text-gray-200 font-bold">고ROE(≥10%) &amp; 기울기 우상향(↗)</span>
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-slate-300 bg-transparent" />
-                      <span className="text-gray-300 font-bold">전분기(25.3Q~26.2Q) 시작점(○)</span>
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 border border-white/60" />
-                      <span className="text-gray-200 font-bold">현재분기(25.4Q~26.3Q) 도착점(●)</span>
-                    </span>
-                  </>
-                )}
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-300 shrink-0">
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-emerald-400 bg-transparent" />
+                    <span>빈 원(○): 전분기(25.3Q~26.2Q)</span>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                    <span>채운 원(●) &amp; 화살표(↗): 현재분기(25.4Q~26.3Q)</span>
+                  </span>
+                </div>
               </div>
 
-              <div className="h-7 flex items-center justify-end overflow-hidden">
-                {hoveredStock ? (
-                  <div className="flex items-center gap-2.5 font-mono text-xs bg-indigo-950/90 border border-indigo-400/60 px-3 py-1 rounded-lg whitespace-nowrap overflow-x-auto">
-                    <span className="font-sans font-extrabold text-white">
-                      {getStockName(hoveredStock)} ({hoveredStock.ticker})
-                    </span>
-                    <span
-                      className="px-1.5 py-0.5 rounded text-[10px] font-sans font-bold text-slate-950"
-                      style={{
-                        backgroundColor:
-                          sectorColorMap[String(hoveredStock.sector || '기타').trim() || '기타'] || '#38bdf8',
-                      }}
-                    >
-                      {hoveredStock.sector || '기타'}
-                    </span>
-                    <span className="text-sky-300 font-bold">
-                      PBR(전분기→현재): {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
-                    </span>
-                    <span className="text-emerald-300 font-bold">
-                      ROE[25.3Q~26.2Q → 25.4Q~26.3Q]: {hoveredStock.prev_q_roe}%→{hoveredStock.roe}% (기울기 {hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p {hoveredStock.qoq_roe_diff >= 0 ? '↗' : '↘'})
-                    </span>
-                    <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
-                    {setGlobalSearchTicker && (
-                      <button
-                        type="button"
-                        onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
-                        className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-bold text-[10px] cursor-pointer"
-                      >
-                        리포트 이동 →
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-gray-400 whitespace-nowrap">
-                    💡 한 기업의 전분기(○, 25.3Q~26.2Q)와 현재분기(●, 25.4Q~26.3Q)를 화살표로 동시 표시합니다. 차트 클릭 시 기준점(📌) 고정 후 상단 배율로 확대됩니다.
+              {/* 2단: 주요 종목 라벨을 차트 맨위에 겹치지 않게 바둑판 태그로 정렬 표시 */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="font-extrabold text-emerald-300">
+                    🏷️ 화면 내 주요 핵심 종목 라벨 (마우스 호버 시 차트 위치 하이라이트 · 클릭 시 해당 종목 기준점 고정):
                   </span>
-                )}
+                  <span className="text-gray-400 font-mono">
+                    화면 표시 {visibleItems.length}종목 중 상위 {topHeaderStocks.length}개 라벨 정렬
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {topHeaderStocks.map((it: any, idx: number) => {
+                    const isHov = hoveredStock?.ticker === it.ticker;
+                    const secName = String(it.sector || '기타').trim() || '기타';
+                    const badgeColor = sectorColorMap[secName] || '#38bdf8';
+                    const qoqDiff = Number(it.qoq_roe_diff) || 0;
+                    return (
+                      <button
+                        key={`top-lbl-${it.ticker}`}
+                        type="button"
+                        onMouseEnter={() => setHoveredStock(it)}
+                        onMouseLeave={() => setHoveredStock(null)}
+                        onClick={() => {
+                          const pbrV = Number((Number(it.pbr) || 0).toFixed(2));
+                          const roeV = Number((Number(it.roe) || 0).toFixed(1));
+                          setAnchorPoint({
+                            pbr: pbrV,
+                            roe: roeV,
+                            label: `${getStockName(it)} (${it.ticker})`,
+                          });
+                          setHoveredStock(it);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border ${
+                          isHov
+                            ? 'bg-indigo-900 border-white text-white shadow-lg scale-[1.02]'
+                            : 'bg-[#121826] border-gray-700/80 text-gray-200 hover:border-indigo-400 hover:bg-gray-800/80'
+                        }`}
+                      >
+                        <span className="text-[10px] font-bold text-amber-300">#{idx + 1}</span>
+                        <span
+                          className="inline-block w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: badgeColor }}
+                        />
+                        <span className="font-sans font-extrabold text-white">{getStockName(it)}</span>
+                        <span className="text-sky-300 text-[11px]">PBR {it.pbr}</span>
+                        <span className="text-emerald-300 text-[11px] font-bold">
+                          ROE {it.prev_q_roe}→{it.roe}% ({qoqDiff >= 0 ? `+${it.qoq_roe_diff}` : it.qoq_roe_diff}%p↗)
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
@@ -1811,8 +1882,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         : '#f59e0b';
 
                     const radius = isHovered ? 8.5 : idx < 12 || visibleItems.length <= 35 ? 6.0 : 4.8;
-                    const showLabel =
-                      isHovered || !showTopLabelsOnly || visibleItems.length <= 40 || idx < 28;
+                    const showLabel = isHovered || nonOverlappingLabelTickers.has(it.ticker);
 
                     return (
                       <g
@@ -1856,19 +1926,6 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                                 markerEnd={qoqRoe >= 0 ? 'url(#arrow-upward-green)' : 'url(#arrow-downward-red)'}
                               />
                             )}
-                            {/* 호버 시 전분기 좌표와 현재분기 좌표 텍스트를 점 옆에 직접 표시 */}
-                            {isHovered && (
-                              <text
-                                x={prevX - 6}
-                                y={prevY - 8}
-                                textAnchor="end"
-                                fill="#fcd34d"
-                                fontSize="10"
-                                fontWeight="bold"
-                              >
-                                전분기(25.3Q~26.2Q): PBR {it.prev_q_pbr}배, ROE {it.prev_q_roe}%
-                              </text>
-                            )}
                           </g>
                         )}
 
@@ -1887,20 +1944,17 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           className="pointer-events-none"
                         />
 
-                        {/* 종목명 라벨 (성장주 우상향 모드 또는 호버 시 전분기→현재분기 ROE 변화 함께 표기) */}
+                        {/* 차트 내부에서는 서로 겹치지 않는(Collision-Free) 종목명만 간결하게 표시 (상세 수치는 차트 맨위 고정 패널에 표시) */}
                         {showLabel && (
                           <text
-                            x={curX + radius + 3}
+                            x={curX + radius + 4}
                             y={curY + 3}
-                            fill={isHovered ? '#ffffff' : idx < 12 ? '#a7f3d0' : '#cbd5e1'}
+                            fill={isHovered ? '#fde047' : idx < 12 ? '#a7f3d0' : '#cbd5e1'}
                             fontSize={isHovered ? '11.5' : '9.5'}
                             fontWeight={isHovered || idx < 12 ? 'bold' : 'normal'}
                             className="pointer-events-none"
                           >
                             {getStockName(it)}
-                            {(isHovered || ((onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') && idx < 18))
-                              ? ` (${it.prev_q_roe}%→${it.roe}%, ${qoqRoe >= 0 ? '+' : ''}${it.qoq_roe_diff}%p↗)`
-                              : ''}
                           </text>
                         )}
                       </g>
