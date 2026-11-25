@@ -81,20 +81,12 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   const [showQoqTrajectory, setShowQoqTrajectory] = useState<boolean>(false);
   const [showTopLabelsOnly, setShowTopLabelsOnly] = useState<boolean>(true);
 
-  // 🔍 산점도 줌인/줌아웃 & 박스 드래그 확대 & 팬(Pan) 상태
-  const [zoomBounds, setZoomBounds] = useState<{
-    xMin: number;
-    xMax: number;
-    yMin: number;
-    yMax: number;
-  } | null>(null);
-  const [interactionMode, setInteractionMode] = useState<'BOX_ZOOM' | 'PAN'>('BOX_ZOOM');
-  const [dragStartPt, setDragStartPt] = useState<{ x: number; y: number } | null>(null);
-  const [dragCurrPt, setDragCurrPt] = useState<{ x: number; y: number } | null>(null);
-  const [panStartState, setPanStartState] = useState<{
-    svgX: number;
-    svgY: number;
-    bounds: { xMin: number; xMax: number; yMin: number; yMax: number };
+  // 🔍 산점도 클릭 기준 고정점(Anchor) & 배율(%) 확대 상태 (디폴트 100%)
+  const [zoomPercent, setZoomPercent] = useState<number>(100);
+  const [anchorPoint, setAnchorPoint] = useState<{
+    pbr: number;
+    roe: number;
+    label?: string;
   } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -139,7 +131,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       const data = await res.json();
       if (data.success) {
         setResults(data.results || []);
-        setZoomBounds(null);
+        setZoomPercent(100);
+        setAnchorPoint(null);
       } else {
         throw new Error(data.error || '필터링 실패');
       }
@@ -921,19 +914,42 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const defaultYMin = Number((minYRaw - Math.max(2, (maxYRaw - minYRaw) * 0.1)).toFixed(1));
         const defaultYMax = Number((maxYRaw + Math.max(3, (maxYRaw - minYRaw) * 0.12)).toFixed(1));
 
-        const activeBounds = zoomBounds || {
-          xMin: defaultXMin,
-          xMax: defaultXMax,
-          yMin: defaultYMin,
-          yMax: defaultYMax,
+        // 종목들의 중앙값(Median)을 기본 앵커(클릭 전 기본 기준점)로 계산
+        const sortedPbr = [...curPbrVals].sort((a, b) => a - b);
+        const sortedRoe = [...curRoeVals].sort((a, b) => a - b);
+        const medianPbr = sortedPbr.length
+          ? Number(sortedPbr[Math.floor(sortedPbr.length * 0.45)].toFixed(2))
+          : Number(((defaultXMin + defaultXMax) / 2).toFixed(2));
+        const medianRoe = sortedRoe.length
+          ? Number(sortedRoe[Math.floor(sortedRoe.length * 0.5)].toFixed(1))
+          : Number(((defaultYMin + defaultYMax) / 2).toFixed(1));
+
+        const effectiveAnchor = anchorPoint || {
+          pbr: medianPbr,
+          roe: medianRoe,
+          label: '밀집 중심(자동)',
         };
 
-        const xMin = activeBounds.xMin;
-        const xMax = activeBounds.xMax;
-        const xRange = Math.max(0.04, xMax - xMin);
+        const baseXSpan = Math.max(0.1, defaultXMax - defaultXMin);
+        const baseYSpan = Math.max(4.0, defaultYMax - defaultYMin);
+        const safeZoomPct = Math.max(100, Math.min(1000, zoomPercent));
+        const scaleFactor = 100 / safeZoomPct;
 
-        const yMin = activeBounds.yMin;
-        const yMax = activeBounds.yMax;
+        let xMin = defaultXMin;
+        let xMax = defaultXMax;
+        let yMin = defaultYMin;
+        let yMax = defaultYMax;
+
+        if (safeZoomPct > 100) {
+          const halfX = (baseXSpan * scaleFactor) / 2;
+          const halfY = (baseYSpan * scaleFactor) / 2;
+          xMin = Math.max(0, Number((effectiveAnchor.pbr - halfX).toFixed(3)));
+          xMax = Number((xMin + halfX * 2).toFixed(3));
+          yMin = Number((effectiveAnchor.roe - halfY).toFixed(2));
+          yMax = Number((effectiveAnchor.roe + halfY).toFixed(2));
+        }
+
+        const xRange = Math.max(0.04, xMax - xMin);
         const yRange = Math.max(1.0, yMax - yMin);
 
         const toX = (pbrVal: number) => padL + ((pbrVal - xMin) / xRange) * plotW;
@@ -941,122 +957,28 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const fromX = (svgX: number) => xMin + ((svgX - padL) / plotW) * xRange;
         const fromY = (svgY: number) => yMin + ((padT + plotH - svgY) / plotH) * yRange;
 
-        const applyZoomStep = (factor: number, centerPbr?: number, centerRoe?: number) => {
-          const cx = centerPbr !== undefined ? centerPbr : (xMin + xMax) / 2;
-          const cy = centerRoe !== undefined ? centerRoe : (yMin + yMax) / 2;
-          const newXRange = Math.max(0.06, Math.min(5.0, xRange * factor));
-          const newYRange = Math.max(2.0, Math.min(200.0, yRange * factor));
-          const rxRatio = (cx - xMin) / xRange;
-          const ryRatio = (cy - yMin) / yRange;
-          const nextXMin = Math.max(0, Number((cx - rxRatio * newXRange).toFixed(3)));
-          const nextXMax = Number((nextXMin + newXRange).toFixed(3));
-          const nextYMin = Number((cy - ryRatio * newYRange).toFixed(2));
-          const nextYMax = Number((nextYMin + newYRange).toFixed(2));
-          setZoomBounds({ xMin: nextXMin, xMax: nextXMax, yMin: nextYMin, yMax: nextYMax });
-        };
-
-        // 밀집 구간(Dense Cluster: 분위수 P10~P85) 원클릭 자동 줌
-        const focusDenseCluster = () => {
-          if (curPbrVals.length < 3) return;
-          const sortedX = [...curPbrVals].sort((a, b) => a - b);
-          const sortedY = [...curRoeVals].sort((a, b) => a - b);
-          const q = (arr: number[], p: number) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * p)))];
-          const x1 = Math.max(0.05, q(sortedX, 0.05) - 0.04);
-          const x2 = Math.max(x1 + 0.15, q(sortedX, 0.8) + 0.05);
-          const y1 = q(sortedY, 0.08) - 1.5;
-          const y2 = Math.max(y1 + 6, q(sortedY, 0.85) + 2.5);
-          setZoomBounds({
-            xMin: Number(x1.toFixed(2)),
-            xMax: Number(x2.toFixed(2)),
-            yMin: Number(y1.toFixed(1)),
-            yMax: Number(y2.toFixed(1)),
-          });
-        };
-
-        const getSvgCoords = (e: React.MouseEvent<SVGSVGElement>) => {
-          const svg = svgRef.current;
-          if (!svg) return { x: padL, y: padT };
-          const rect = svg.getBoundingClientRect();
-          const scaleX = W / Math.max(1, rect.width);
-          const scaleY = H / Math.max(1, rect.height);
-          const rawX = (e.clientX - rect.left) * scaleX;
-          const rawY = (e.clientY - rect.top) * scaleY;
-          return {
-            x: Math.min(padL + plotW, Math.max(padL, rawX)),
-            y: Math.min(padT + plotH, Math.max(padT, rawY)),
-          };
-        };
-
-        const handleSvgWheel = (e: React.WheelEvent<SVGSVGElement>) => {
-          e.preventDefault();
+        const handleSvgClick = (e: React.MouseEvent<SVGSVGElement>) => {
           const svg = svgRef.current;
           if (!svg) return;
           const rect = svg.getBoundingClientRect();
           const scaleX = W / Math.max(1, rect.width);
           const scaleY = H / Math.max(1, rect.height);
-          const svgX = Math.min(padL + plotW, Math.max(padL, (e.clientX - rect.left) * scaleX));
-          const svgY = Math.min(padT + plotH, Math.max(padT, (e.clientY - rect.top) * scaleY));
-          const cPbr = fromX(svgX);
-          const cRoe = fromY(svgY);
-          const factor = e.deltaY < 0 ? 0.78 : 1.28;
-          applyZoomStep(factor, cPbr, cRoe);
+          const rawX = (e.clientX - rect.left) * scaleX;
+          const rawY = (e.clientY - rect.top) * scaleY;
+          if (rawX < padL || rawX > padL + plotW || rawY < padT || rawY > padT + plotH) return;
+          const clickedPbr = Number(Math.max(0, fromX(rawX)).toFixed(2));
+          const clickedRoe = Number(fromY(rawY).toFixed(1));
+          setAnchorPoint({
+            pbr: clickedPbr,
+            roe: clickedRoe,
+            label: `클릭 고정 (PBR ${clickedPbr}배, ROE ${clickedRoe}%)`,
+          });
         };
 
-        const handleSvgMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (e.button !== 0) return;
-          const pt = getSvgCoords(e);
-          if (interactionMode === 'PAN' || e.shiftKey) {
-            setPanStartState({ svgX: pt.x, svgY: pt.y, bounds: activeBounds });
-          } else {
-            setDragStartPt(pt);
-            setDragCurrPt(pt);
-          }
-        };
-
-        const handleSvgMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-          const pt = getSvgCoords(e);
-          if (panStartState) {
-            const dxSvg = pt.x - panStartState.svgX;
-            const dySvg = pt.y - panStartState.svgY;
-            const b = panStartState.bounds;
-            const bw = b.xMax - b.xMin;
-            const bh = b.yMax - b.yMin;
-            const dPbr = (dxSvg / plotW) * bw;
-            const dRoe = (dySvg / plotH) * bh;
-            const nextXMin = Math.max(0, Number((b.xMin - dPbr).toFixed(3)));
-            setZoomBounds({
-              xMin: nextXMin,
-              xMax: Number((nextXMin + bw).toFixed(3)),
-              yMin: Number((b.yMin + dRoe).toFixed(2)),
-              yMax: Number((b.yMax + dRoe).toFixed(2)),
-            });
-          } else if (dragStartPt) {
-            setDragCurrPt(pt);
-          }
-        };
-
-        const handleSvgMouseUp = () => {
-          if (panStartState) {
-            setPanStartState(null);
-            return;
-          }
-          if (dragStartPt && dragCurrPt) {
-            const boxW = Math.abs(dragCurrPt.x - dragStartPt.x);
-            const boxH = Math.abs(dragCurrPt.y - dragStartPt.y);
-            if (boxW >= 14 && boxH >= 14) {
-              const leftSvg = Math.min(dragStartPt.x, dragCurrPt.x);
-              const rightSvg = Math.max(dragStartPt.x, dragCurrPt.x);
-              const topSvg = Math.min(dragStartPt.y, dragCurrPt.y);
-              const botSvg = Math.max(dragStartPt.y, dragCurrPt.y);
-              const nxMin = Math.max(0, Number(fromX(leftSvg).toFixed(3)));
-              const nxMax = Number(Math.max(nxMin + 0.05, fromX(rightSvg)).toFixed(3));
-              const nyMin = Number(fromY(botSvg).toFixed(2));
-              const nyMax = Number(Math.max(nyMin + 1.5, fromY(topSvg)).toFixed(2));
-              setZoomBounds({ xMin: nxMin, xMax: nxMax, yMin: nyMin, yMax: nyMax });
-            }
-          }
-          setDragStartPt(null);
-          setDragCurrPt(null);
+        const handleSvgWheel = (e: React.WheelEvent<SVGSVGElement>) => {
+          e.preventDefault();
+          const step = e.deltaY < 0 ? 50 : -50;
+          setZoomPercent((prev) => Math.max(100, Math.min(800, prev + step)));
         };
 
         const refPbr = 1.0;
@@ -1087,82 +1009,94 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           return px >= xMin - xRange * 0.03 && px <= xMax + xRange * 0.03 && py >= yMin - yRange * 0.03 && py <= yMax + yRange * 0.03;
         });
 
-        const zoomRatio = Number(((defaultXMax - defaultXMin) / Math.max(0.05, xRange)).toFixed(1));
+        const anchorSvgX = toX(effectiveAnchor.pbr);
+        const anchorSvgY = toY(effectiveAnchor.roe);
+        const ZOOM_PRESETS = [100, 150, 200, 300, 400, 600];
 
         return (
           <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3">
               <div>
                 <h3 className="text-sm sm:text-base font-extrabold text-white flex flex-wrap items-center gap-2">
-                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 섹터별 &amp; 줌인(Zoom-In) 밸류에이션 매트릭스 산점도</span>
+                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 섹터별 &amp; 배율 확대(100%~800%) 밸류에이션 산점도</span>
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-xs font-mono">
-                    {selectedSector === 'ALL' ? `전체 섹터 (${filteredResults.length}종목)` : `[${selectedSector}] 섹터 단독 (${filteredResults.length}종목)`} · 배율 {zoomRatio}x
+                    {selectedSector === 'ALL' ? `전체 섹터 (${filteredResults.length}종목)` : `[${selectedSector}] 섹터 단독 (${filteredResults.length}종목)`} · 현재 배율 {safeZoomPct}%
                   </span>
                 </h3>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  💡 <strong>줌인(확대) 사용법:</strong> 마우스 <strong>드래그로 몰려있는 영역을 박스 선택</strong>하거나, 차트 위에서 <strong>마우스 휠 스크롤</strong> 또는 우측 상단 <strong>[🔍 밀집구간 자동확대 / ➕ 줌인]</strong> 버튼을 누르면 겹쳐있는 종목들이 넓게 펼쳐집니다. 아래 섹터 버튼을 클릭하면 <strong>섹터별 단독 산점도</strong>로 즉시 전환됩니다.
+                  💡 <strong>클릭 고정 &amp; 배율 확대 사용법:</strong> 차트 위에서 <strong>확대하고 싶은 위치(또는 종목 점)를 마우스로 클릭해 기준점을 고정</strong>한 뒤, 상단 <strong>배율 버튼(100% ~ 600%)</strong>을 누르면 고정된 기준점을 중심으로 깔끔하게 확대됩니다.
                 </p>
               </div>
 
-              {/* 줌 컨트롤 & 색상 모드 & 궤적 표시 컨트롤 */}
+              {/* 상단 배율(%) 표시 및 원클릭 배율 선택 바 */}
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
-                  <button
-                    type="button"
-                    onClick={() => applyZoomStep(0.68)}
-                    className="px-2.5 py-1 rounded bg-indigo-600/80 hover:bg-indigo-500 text-white font-extrabold cursor-pointer"
-                    title="중심 기준 확대 (Zoom In)"
-                  >
-                    ➕ 줌인
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyZoomStep(1.45)}
-                    className="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
-                    title="중심 기준 축소 (Zoom Out)"
-                  >
-                    ➖ 줌아웃
-                  </button>
-                  <button
-                    type="button"
-                    onClick={focusDenseCluster}
-                    className="px-2.5 py-1 rounded bg-emerald-700/80 hover:bg-emerald-600 text-white font-extrabold cursor-pointer"
-                    title="종목이 가장 많이 몰려있는 저PBR·고ROE 밀집 구간을 자동으로 확대합니다"
-                  >
-                    🎯 밀집구간 확대
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setZoomBounds(null)}
-                    className="px-2.5 py-1 rounded bg-amber-700/70 hover:bg-amber-600 text-white font-bold cursor-pointer"
-                  >
-                    🔄 전체 초기화
-                  </button>
+                <div className="flex flex-wrap items-center gap-1 bg-gray-900 border border-indigo-500/40 rounded-lg p-1.5">
+                  <span className="text-indigo-300 font-extrabold px-1.5">🔍 확대 배율:</span>
+                  {ZOOM_PRESETS.map((pct) => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => setZoomPercent(pct)}
+                      className={`px-2.5 py-1 rounded font-mono font-extrabold cursor-pointer transition ${
+                        safeZoomPct === pct
+                          ? 'bg-indigo-600 text-white shadow border border-indigo-300'
+                          : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                      }`}
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                  <div className="flex items-center gap-1 pl-1 border-l border-gray-700 ml-1">
+                    <button
+                      type="button"
+                      onClick={() => setZoomPercent((p) => Math.max(100, p - 25))}
+                      className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
+                      title="25% 축소"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={100}
+                      max={800}
+                      step={25}
+                      value={safeZoomPct}
+                      onChange={(e) => setZoomPercent(Math.max(100, Math.min(800, Number(e.target.value) || 100)))}
+                      className="w-16 bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 text-center font-mono font-extrabold text-emerald-300"
+                    />
+                    <span className="text-gray-400 font-mono">%</span>
+                    <button
+                      type="button"
+                      onClick={() => setZoomPercent((p) => Math.min(800, p + 25))}
+                      className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
+                      title="25% 확대"
+                    >
+                      +
+                    </button>
+                  </div>
+                  {(safeZoomPct !== 100 || anchorPoint) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setZoomPercent(100);
+                        setAnchorPoint(null);
+                      }}
+                      className="ml-1 px-2.5 py-1 rounded bg-amber-700/80 hover:bg-amber-600 text-white font-bold cursor-pointer"
+                    >
+                      🔄 100% 초기화
+                    </button>
+                  )}
                 </div>
 
-                <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
-                  <button
-                    type="button"
-                    onClick={() => setInteractionMode('BOX_ZOOM')}
-                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
-                      interactionMode === 'BOX_ZOOM'
-                        ? 'bg-sky-600 text-white'
-                        : 'text-gray-400 hover:text-white'
-                    }`}
-                  >
-                    ⬚ 드래그 박스확대
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInteractionMode('PAN')}
-                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
-                      interactionMode === 'PAN'
-                        ? 'bg-sky-600 text-white'
-                        : 'text-gray-400 hover:text-white'
-                    }`}
-                  >
-                    ✋ 드래그 화면이동
-                  </button>
+                {/* 현재 클릭 고정된 기준점(Anchor) 표시 배지 */}
+                <div className="flex items-center gap-1.5 bg-gray-900 border border-amber-500/40 rounded-lg px-2.5 py-1.5">
+                  <span className="text-amber-300 font-extrabold">📌 확대 기준점:</span>
+                  <span className="font-mono font-bold text-white">
+                    PBR {effectiveAnchor.pbr}배 · ROE {effectiveAnchor.roe}%
+                  </span>
+                  <span className="text-[11px] text-amber-200/80">
+                    ({anchorPoint ? anchorPoint.label : '차트 클릭 시 위치 고정'})
+                  </span>
                 </div>
 
                 <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
@@ -1222,7 +1156,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     type="button"
                     onClick={() => {
                       setSelectedSector('ALL');
-                      setZoomBounds(null);
+                      setZoomPercent(100);
+                      setAnchorPoint(null);
                     }}
                     className="text-amber-300 hover:underline font-bold cursor-pointer"
                   >
@@ -1235,7 +1170,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   type="button"
                   onClick={() => {
                     setSelectedSector('ALL');
-                    setZoomBounds(null);
+                    setZoomPercent(100);
+                    setAnchorPoint(null);
                   }}
                   className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer border transition ${
                     selectedSector === 'ALL'
@@ -1254,7 +1190,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       onClick={() => {
                         const nextSec = isSel ? 'ALL' : sObj.sector;
                         setSelectedSector(nextSec);
-                        setZoomBounds(null);
+                        setZoomPercent(100);
+                        setAnchorPoint(null);
                       }}
                       className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border transition flex items-center gap-1.5 ${
                         isSel
@@ -1325,10 +1262,19 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     </span>
                     <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
                     <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
+                    {setGlobalSearchTicker && (
+                      <button
+                        type="button"
+                        onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
+                        className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-bold text-[10px] cursor-pointer"
+                      >
+                        리포트 이동 →
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <span className="text-gray-400 whitespace-nowrap">
-                    💡 마우스 드래그로 원하는 구역을 박스 확대하거나, 점(Dot) 위에 마우스를 올려 상세 수치를 확인하세요. (현재 화면 내 {visibleItems.length}개 표시)
+                    💡 차트에서 원하는 곳(또는 종목 점)을 클릭해 기준점(📌)을 고정하고 상단 배율(100%~600%)로 확대하세요. (화면 내 {visibleItems.length}개 표시)
                   </span>
                 )}
               </div>
@@ -1338,15 +1284,13 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${W} ${H}`}
+                onClick={handleSvgClick}
                 onWheel={handleSvgWheel}
-                onMouseDown={handleSvgMouseDown}
-                onMouseMove={handleSvgMouseMove}
-                onMouseUp={handleSvgMouseUp}
-                onMouseLeave={handleSvgMouseUp}
-                onDoubleClick={() => setZoomBounds(null)}
-                className={`w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none ${
-                  interactionMode === 'PAN' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'
-                }`}
+                onDoubleClick={() => {
+                  setZoomPercent(100);
+                  setAnchorPoint(null);
+                }}
+                className="w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none cursor-crosshair"
               >
                 <defs>
                   <clipPath id="tetris-scatter-clip">
@@ -1543,7 +1487,13 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         onMouseLeave={() => setHoveredStock(null)}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (setGlobalSearchTicker) setGlobalSearchTicker(it.ticker);
+                          const pbrV = Number((Number(it.pbr) || 0).toFixed(2));
+                          const roeV = Number((Number(it.roe) || 0).toFixed(1));
+                          setAnchorPoint({
+                            pbr: pbrV,
+                            roe: roeV,
+                            label: `${getStockName(it)} (${it.ticker})`,
+                          });
                         }}
                       >
                         {/* 전분기(prev_q) -> 현재(cur) 이동 궤적 점선 */}
@@ -1594,21 +1544,41 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       </g>
                     );
                   })}
-                </g>
 
-                {/* 드래그 박스 줌 선택 사각형 */}
-                {dragStartPt && dragCurrPt && (
-                  <rect
-                    x={Math.min(dragStartPt.x, dragCurrPt.x)}
-                    y={Math.min(dragStartPt.y, dragCurrPt.y)}
-                    width={Math.abs(dragCurrPt.x - dragStartPt.x)}
-                    height={Math.abs(dragCurrPt.y - dragStartPt.y)}
-                    fill="rgba(56, 189, 248, 0.18)"
-                    stroke="#38bdf8"
-                    strokeWidth="1.5"
-                    strokeDasharray="4,3"
-                  />
-                )}
+                  {/* 클릭하여 고정된 확대 기준점(Anchor) 십자 표적 마커 */}
+                  {anchorSvgX >= padL &&
+                    anchorSvgX <= padL + plotW &&
+                    anchorSvgY >= padT &&
+                    anchorSvgY <= padT + plotH && (
+                      <g className="pointer-events-none">
+                        <line
+                          x1={anchorSvgX - 14}
+                          y1={anchorSvgY}
+                          x2={anchorSvgX + 14}
+                          y2={anchorSvgY}
+                          stroke="#fbbf24"
+                          strokeWidth="1.6"
+                        />
+                        <line
+                          x1={anchorSvgX}
+                          y1={anchorSvgY - 14}
+                          x2={anchorSvgX}
+                          y2={anchorSvgY + 14}
+                          stroke="#fbbf24"
+                          strokeWidth="1.6"
+                        />
+                        <circle
+                          cx={anchorSvgX}
+                          cy={anchorSvgY}
+                          r={7}
+                          fill="rgba(251, 191, 36, 0.18)"
+                          stroke="#fbbf24"
+                          strokeWidth="1.6"
+                          strokeDasharray="3,2"
+                        />
+                      </g>
+                    )}
+                </g>
               </svg>
             </div>
           </div>
