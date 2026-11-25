@@ -726,7 +726,7 @@ export default function FuturesSimulationView({
   const [kisCanoInput, setKisCanoInput] = useState<string>("44790516");
   const [kisPrdtInput, setKisPrdtInput] = useState<string>("03");
   const [kisCapInput, setKisCapInput] = useState<number>(10);
-  const [kisAutoExecInput, setKisAutoExecInput] = useState<boolean>(false);
+  const [kisAutoExecInput, setKisAutoExecInput] = useState<boolean>(true);
 
   // Step 7: 4대 핵심 수급(① 공매도잔고 T+2, ② 신용잔고 T+2, ③ 미결제약정 OI, ④ 5일·20일 누적 차익거래) 역추세 시뮬레이션 상태
   const [scStartDate, setScStartDate] = useState<string>("2016-01-04");

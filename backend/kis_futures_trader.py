@@ -250,7 +250,7 @@ def get_kis_futures_trading_config() -> Dict[str, Any]:
     cano = k_cfg.get("cano") or default_cano
     acnt_prdt_cd = k_cfg.get("acnt_prdt_cd") or "03"
     max_contracts_cap = int(k_cfg.get("max_contracts_cap", 10))
-    auto_execute_1535 = bool(k_cfg.get("auto_execute_at_1535", False))
+    auto_execute_1535 = bool(k_cfg.get("auto_execute_at_1535", True))
     default_ord_dvsn = str(k_cfg.get("default_ord_dvsn", "02"))  # 02: 시장가(동시호가), 01: 지정가, 03: 조건부지정가
     point_value_krw = int(k_cfg.get("point_value_krw", 50000))
     if point_value_krw not in (50000, 250000):
@@ -366,11 +366,94 @@ def inquire_kis_futures_balance() -> Dict[str, Any]:
         except Exception as e:
             broker_message = f"KIS 잔고조회 통신 예외: {e}"
 
-    # 로컬 주문 실행 원장 조회 (모의계좌 상품코드 03 개설 전에도 시뮬레이션 주문 체결 내역 추적 가능)
-    conn = sqlite3.connect(DB_PATH)
+    # 로컬 주문 실행 원장 조회 및 매매원장(recent_trading_ledger)과 자동 동기화 보장
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM futures_order_execution_log ORDER BY id DESC LIMIT 15")
+    try:
+        from futures_simulator import run_futures_simulation
+        sim_sync = run_futures_simulation(
+            start_date="2023-01-02",
+            end_date="CURRENT",
+            multiplier=1,
+            enable_auto_mdd_swap=False,
+            replacement_mode="MANUAL_FIXED",
+            point_value_krw=float(t_cfg["point_value_krw"]),
+            initial_capital_krw=float(t_cfg["initial_capital_krw"]),
+        )
+        if sim_sync.get("success") and sim_sync.get("recent_trading_ledger"):
+            fut_code_now = t_cfg["active_fut_code"]
+            now_kst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+            today_str = now_kst.strftime("%Y-%m-%d")
+            hhmm = now_kst.hour * 100 + now_kst.minute
+            for l_row in reversed(sim_sync["recent_trading_ledger"][:10]):
+                d_str = str(l_row.get("date") or "")
+                if not d_str:
+                    continue
+                if d_str == today_str and hhmm < 1530:
+                    continue
+                delta_c = int(l_row.get("order_delta_contracts") or 0)
+                prev_c = int(l_row.get("prev_contracts") or 0)
+                target_c = int(l_row.get("target_contracts") or 0)
+                f_price = float(l_row.get("futures_close") or 0.0)
+                side_str = "BUY(매수)" if delta_c > 0 else ("SELL(매도)" if delta_c < 0 else "HOLD(유지)")
+                qty_abs = abs(delta_c)
+                c.execute(
+                    "SELECT id, qty, prev_contracts, target_contracts FROM futures_order_execution_log WHERE trading_date = ? ORDER BY id DESC LIMIT 1",
+                    (d_str,),
+                )
+                ex_row = c.fetchone()
+                if ex_row is None:
+                    if qty_abs > 0:
+                        c.execute(
+                            """
+                            INSERT INTO futures_order_execution_log (
+                                executed_at_kst, trading_date, mode, account_no, fut_code, side, qty,
+                                ord_dvsn, exec_price, prev_contracts, target_contracts,
+                                broker_status, broker_order_no, broker_msg, reason
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                f"{d_str} 15:35:00",
+                                d_str,
+                                t_cfg["mode"],
+                                t_cfg["account_display"],
+                                fut_code_now,
+                                side_str,
+                                qty_abs,
+                                t_cfg["default_ord_dvsn"],
+                                f_price,
+                                prev_c,
+                                target_c,
+                                "VIRTUAL_PAPER_FILLED",
+                                f"SIM-{d_str.replace('-', '')}",
+                                "내장 선물 모의원장 가상 체결 완료 (매매원장 15:30 확정 시그널 동기화)",
+                                "15:30 시그널 확정 및 15:35 동시호가 포지션 조정",
+                            ),
+                        )
+                else:
+                    if (
+                        int(ex_row["prev_contracts"]) != prev_c
+                        or int(ex_row["target_contracts"]) != target_c
+                        or int(ex_row["qty"]) != qty_abs
+                    ):
+                        if qty_abs > 0:
+                            c.execute(
+                                """
+                                UPDATE futures_order_execution_log
+                                SET fut_code = ?, side = ?, qty = ?, exec_price = ?, prev_contracts = ?, target_contracts = ?,
+                                    broker_msg = '내장 선물 모의원장 가상 체결 완료 (매매원장 15:30 확정 시그널 동기화)'
+                                WHERE id = ?
+                                """,
+                                (fut_code_now, side_str, qty_abs, f_price, prev_c, target_c, ex_row["id"]),
+                            )
+                        else:
+                            c.execute("DELETE FROM futures_order_execution_log WHERE trading_date = ?", (d_str,))
+            conn.commit()
+    except Exception as sync_err:
+        print(f"[KISFutures] Order log ledger sync notice: {sync_err}")
+
+    c.execute("SELECT * FROM futures_order_execution_log ORDER BY trading_date DESC, id DESC LIMIT 15")
     order_logs = [dict(r) for r in c.fetchall()]
     conn.close()
 

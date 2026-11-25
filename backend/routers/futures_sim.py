@@ -675,8 +675,9 @@ def _realtime_and_daily_background_worker() -> None:
                     start_date="2023-01-02",
                     end_date="CURRENT",
                     multiplier=1,
-                    sharpe_lookback_days=63,
-                    enable_auto_mdd_swap=True,
+                    sharpe_lookback_days=126,
+                    enable_auto_mdd_swap=False,
+                    replacement_mode="MANUAL_FIXED",
                 )
                 startup_synced = True
 
