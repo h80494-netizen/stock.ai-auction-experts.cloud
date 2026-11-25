@@ -40,9 +40,13 @@
     "initial_capital_per_base_unit_krw": 20000000.0
   },
   "model_replacement_rules": {
-    "default_mdd_threshold_pct": 12.0,
+    "default_mdd_threshold_pct": 15.0,
     "mdd_rolling_window_days": 126,
     "sharpe_lookback_days": 126,
+    "periodic_rebalance_days": 126,
+    "default_replacement_mode": "MANUAL_FIXED",
+    "default_mdd_trigger_mode": "LIMIT_ONLY",
+    "default_enable_auto_mdd_swap": false,
     "replacement_metric": "sharpe_ratio",
     "cooldown_days_after_swap": 5
   },

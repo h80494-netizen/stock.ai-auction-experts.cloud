@@ -42,18 +42,18 @@ class SimulationRunRequest(BaseModel):
     multiplier: int = 1
     point_value_krw: float = 50000.0
     initial_capital_krw: float = 100000000.0
-    mdd_threshold_pct: float = 12.0
+    mdd_threshold_pct: float = 15.0
     portfolio_risk_mode: str = "MODEL_SWAP_ONLY"
-    portfolio_mdd_limit_pct: float = 12.0
+    portfolio_mdd_limit_pct: float = 15.0
     sharpe_lookback_days: Optional[int] = 126
     initial_selected_ids: Optional[List[str]] = None
-    enable_auto_mdd_swap: bool = True
+    enable_auto_mdd_swap: bool = False
     record_swaps_to_db: bool = False
     combine_supply: bool = True
     supply_weight: float = 0.35
-    replacement_mode: str = "HYBRID"
-    periodic_rebalance_days: int = 63
-    mdd_trigger_mode: str = "RENEWAL_OR_LIMIT"
+    replacement_mode: str = "MANUAL_FIXED"
+    periodic_rebalance_days: int = 126
+    mdd_trigger_mode: str = "LIMIT_ONLY"
 
 
 class SelectModelsRequest(BaseModel):
@@ -289,11 +289,11 @@ def api_run_simulation_get(
     multiplier: int = 1,
     point_value_krw: float = 50000.0,
     initial_capital_krw: float = 100000000.0,
-    mdd_threshold_pct: float = 12.0,
+    mdd_threshold_pct: float = 15.0,
     portfolio_risk_mode: str = "MODEL_SWAP_ONLY",
-    portfolio_mdd_limit_pct: float = 12.0,
+    portfolio_mdd_limit_pct: float = 15.0,
     sharpe_lookback_days: int = 126,
-    enable_auto_mdd_swap: bool = True,
+    enable_auto_mdd_swap: bool = False,
     combine_supply: bool = True,
     supply_weight: float = 0.35,
 ) -> Dict[str, Any]:

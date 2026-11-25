@@ -675,14 +675,14 @@ export default function FuturesSimulationView({
   const [multiplier, setMultiplier] = useState(1);
   const [pointValueKrw, setPointValueKrw] = useState<number>(50000); // 디폴트: 50,000원(미니선물), 선택: 250,000원(정규선물)
   const initialCapitalKrw = 100000000; // 투자원금 기준: 1억원 (100,000,000원)
-  const [mddThreshold, setMddThreshold] = useState(12.0);
-  const [enableAutoSwap, setEnableAutoSwap] = useState(true);
-  const [sharpeLookbackDays, setSharpeLookbackDays] = useState<number>(63); // 63=최근3개월, 126=최근6개월, 0=구간전체
-  const [replacementMode, setReplacementMode] = useState<string>("HYBRID"); // HYBRID, PERIODIC_ONLY, MDD_RENEWAL_ONLY, MANUAL_FIXED
-  const [periodicRebalanceDays, setPeriodicRebalanceDays] = useState<number>(63); // 63=3개월 정기교체, 126=6개월 정기교체
-  const [mddTriggerMode, setMddTriggerMode] = useState<string>("RENEWAL_OR_LIMIT"); // RENEWAL_OR_LIMIT, RENEWAL_ONLY, LIMIT_ONLY
+  const [mddThreshold, setMddThreshold] = useState(15.0);
+  const [enableAutoSwap, setEnableAutoSwap] = useState(false);
+  const [sharpeLookbackDays, setSharpeLookbackDays] = useState<number>(126); // 126=최근6개월(장기일관성 기본값), 63=최근3개월, 0=구간전체
+  const [replacementMode, setReplacementMode] = useState<string>("MANUAL_FIXED"); // MANUAL_FIXED(주력5모델 고정 기본값), MDD_RENEWAL_ONLY, HYBRID, PERIODIC_ONLY
+  const [periodicRebalanceDays, setPeriodicRebalanceDays] = useState<number>(126); // 126=6개월 정기교체(기본값), 63=3개월 정기교체
+  const [mddTriggerMode, setMddTriggerMode] = useState<string>("LIMIT_ONLY"); // LIMIT_ONLY(엄격한도 15% 초과시에만 교체), RENEWAL_OR_LIMIT, RENEWAL_ONLY
   const [portfolioRiskMode, setPortfolioRiskMode] = useState<string>("MODEL_SWAP_ONLY"); // MODEL_SWAP_ONLY, PORTFOLIO_SCALE_DOWN, PORTFOLIO_HARD_STOP
-  const [portfolioMddLimit, setPortfolioMddLimit] = useState<number>(12.0); // 포트폴리오 위험 축소 / 실전 운용 중지 기준 한도(%)
+  const [portfolioMddLimit, setPortfolioMddLimit] = useState<number>(15.0); // 포트폴리오 위험 축소 / 실전 운용 중지 기준 한도(%)
 
   const [evalStart, setEvalStart] = useState("2024-01-02");
   const [evalEnd, setEvalEnd] = useState("2025-12-30");
