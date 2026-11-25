@@ -705,6 +705,8 @@ export default function FuturesSimulationView({
   const [ledgerEndDate, setLedgerEndDate] = useState<string>("2026-11-10");
   const [ledgerUseCurrent, setLedgerUseCurrent] = useState<boolean>(true);
   const [step5LedgerRows, setStep5LedgerRows] = useState<any[]>([]);
+  const [step5ActiveModels, setStep5ActiveModels] = useState<string[]>([]);
+  const [step5ModelsPerformance, setStep5ModelsPerformance] = useState<any[]>([]);
   const [ledgerLoading, setLedgerLoading] = useState<boolean>(false);
   const [autoRefreshRealtime, setAutoRefreshRealtime] = useState<boolean>(true);
   const [realtimeSyncing, setRealtimeSyncing] = useState<boolean>(false);
@@ -817,12 +819,12 @@ export default function FuturesSimulationView({
             initial_capital_krw: initialCapitalKrw,
             mdd_threshold_pct: mddThreshold,
             initial_selected_ids: targetModels,
-            enable_auto_mdd_swap: replacementMode !== "MANUAL_FIXED" && enableAutoSwap,
+            enable_auto_mdd_swap: false,
             combine_supply: targetCombineSupply,
             supply_weight: targetSupplyWeight / 100.0,
             sharpe_lookback_days: sharpeLookbackDays > 0 ? sharpeLookbackDays : null,
             record_swaps_to_db: false,
-            replacement_mode: replacementMode,
+            replacement_mode: "MANUAL_FIXED",
             periodic_rebalance_days: periodicRebalanceDays,
             mdd_trigger_mode: mddTriggerMode,
             portfolio_risk_mode: portfolioRiskMode,
@@ -831,6 +833,12 @@ export default function FuturesSimulationView({
         });
         if (res?.success && Array.isArray(res.data?.recent_trading_ledger)) {
           setStep5LedgerRows(res.data.recent_trading_ledger);
+          if (Array.isArray(res.data?.active_5_models)) {
+            setStep5ActiveModels(res.data.active_5_models);
+          }
+          if (Array.isArray(res.data?.models_performance)) {
+            setStep5ModelsPerformance(res.data.models_performance);
+          }
         }
       } catch (e) {
         console.error(e);
@@ -925,6 +933,7 @@ export default function FuturesSimulationView({
               .map((m: any) => m.model_id);
           if (activeIds.length > 0) {
             setSelectedModelIds(activeIds);
+            fetchLedgerOnly({ models: activeIds });
           }
         }
       } catch (e) {
@@ -5746,7 +5755,45 @@ export default function FuturesSimulationView({
                 latestLedgerRow?.daily_pnl_krw !== undefined
                   ? Number(latestLedgerRow.daily_pnl_krw)
                   : Number(pchk.today_daily_pnl_krw ?? 0);
-              const sigChanges: any[] = pchk.models_signal_changes || [];
+              const rawSigChanges: any[] = pchk.models_signal_changes || [];
+              const active5SetForStep5 = new Set(
+                step5ActiveModels.length > 0
+                  ? step5ActiveModels
+                  : selectedModelIds.length > 0
+                  ? selectedModelIds
+                  : rawSigChanges.filter((m: any) => m.is_selected).map((m: any) => m.model_id)
+              );
+              const perfMapForStep5 = new Map<string, any>(
+                (step5ModelsPerformance.length > 0 ? step5ModelsPerformance : allModels).map((m: any) => [
+                  m.model_id,
+                  m,
+                ])
+              );
+              const sigChanges: any[] = rawSigChanges.map((m: any) => {
+                const isSel = active5SetForStep5.has(m.model_id);
+                const pObj = perfMapForStep5.get(m.model_id);
+                const prevSig = pObj?.signal_lags?.T_1 !== undefined ? Number(pObj.signal_lags.T_1) : Number(m.prev_signal ?? 0);
+                const todaySig = pObj?.latest_signal !== undefined ? Number(pObj.latest_signal) : Number(m.today_signal ?? 0);
+                const sigDelta = todaySig - prevSig;
+                const changed = prevSig !== todaySig;
+                const sigLabel = (s: number) => (s > 0 ? "매수(+1)" : s < 0 ? "매도(-1)" : "중립(0)");
+                return {
+                  ...m,
+                  is_selected: isSel,
+                  prev_signal: prevSig,
+                  today_signal: todaySig,
+                  signal_delta: sigDelta,
+                  signal_changed: changed,
+                  change_label: changed
+                    ? `⚡ ${sigLabel(prevSig)} → ${sigLabel(todaySig)} 전환`
+                    : `${sigLabel(todaySig)} 유지`,
+                  cum_return_pct: pObj?.cum_return_pct ?? m.cum_return_pct,
+                  sharpe_ratio: pObj?.sharpe_ratio ?? m.sharpe_ratio,
+                  mdd_pct: pObj?.mdd_pct ?? m.mdd_pct,
+                };
+              });
+              const changedSelectedCount = sigChanges.filter((m: any) => m.is_selected && m.signal_changed).length;
+              const changedTotalCount = sigChanges.filter((m: any) => m.signal_changed).length;
               const rawTimeline: any[] = lockStatus?.intraday_timeline || [];
               const timeline: any[] =
                 rawTimeline.length > 0
@@ -5777,8 +5824,8 @@ export default function FuturesSimulationView({
                     </h4>
                     <span className="text-[11px] text-slate-300">
                       주력 5대 모델 중 당일 시그널 변동:{" "}
-                      <strong className="text-amber-300">{pchk.changed_selected_models_count ?? 0}개 모델 전환</strong>{" "}
-                      (전체 13개 모델 중 {pchk.changed_total_models_count ?? 0}개 전환)
+                      <strong className="text-amber-300">{changedSelectedCount}개 모델 전환</strong>{" "}
+                      (전체 13개 모델 중 {changedTotalCount}개 전환)
                     </span>
                   </div>
 

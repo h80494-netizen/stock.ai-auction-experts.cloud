@@ -1510,15 +1510,8 @@ def run_futures_simulation(
                         swap_events.append(swap_info)
 
         # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출:
-        #    ★ 실전 채택된 [5대 복합 박스권 자동 감지 역추세 비중 리밸런싱 엔진] 적용:
-        #    - 당일 IS_RANGE_REGIME == 1 (VIX 20MA ≤ 16.0pt & 변동×거래량 에너지 ≤ 1.35 & OI·PCR 박스권 2일 연속 확정)일 때:
-        #      추세 모델의 고점물림(Whip-saw)을 차단하고 박스권 역추세 특화 조합(M04×2 + M05 + M07 + C01 + 에너지회귀)으로 자동 리밸런싱
-        #    - 당일 IS_RANGE_REGIME == 0 (추세장)일 때:
-        #      사용자가 선택한 채택 5개 주력 모델 시그널 합산을 그대로 가동
-        if combine_supply and int(is_range_arr[i]) == 1:
-            sum_sig = int(box_contrarian_arr[i])
-        else:
-            sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
+        #    ★ 채택된 5개 주력 모델(sim_active_set)의 시그널 합계(-5 ~ +5)와 매매원장 합산포지션이 항상 100% 일치하도록 산출
+        sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
         target_contracts[i] = sum_sig * mult
