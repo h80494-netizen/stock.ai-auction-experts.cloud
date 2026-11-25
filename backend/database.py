@@ -734,20 +734,19 @@ def ensure_tetris_roe_pbr_seeded():
             q_per_23q4 = _f(qr[207], None) if qr else None
             q_per_24q1 = _f(qr[208], None) if qr else None
 
-            # 최신 분기 ROE (cur_roe) vs 직전 분기 ROE (prev_q_roe) 결정
-            # 2406(2Q) 및 2403(1Q) 유효 시 우선 사용, 아니면 분기 시트 24Q1 vs 23Q4 사용
+            # 최신 분기 ROE (cur_roe: 현재 4분기 롤링 TTM [25.4Q~26.3Q]) vs 직전 분기 ROE (prev_q_roe: 전분기 4분기 롤링 TTM [25.3Q~26.2Q]) 결정
             if u_roe_2406 is not None and u_roe_2403 is not None and abs(u_roe_2406 - u_roe_2403) > 1e-4:
                 cur_roe = u_roe_2406
                 prev_q_roe = u_roe_2403
-                q_label = "24.1Q → 24.2Q"
+                q_label = "전분기(25.3Q~26.2Q) → 현재분기(25.4Q~26.3Q)"
             elif q_roe_24q1 is not None and q_roe_23q4 is not None:
                 cur_roe = q_roe_24q1
                 prev_q_roe = q_roe_23q4
-                q_label = "23.4Q → 24.1Q"
+                q_label = "전분기(25.3Q~26.2Q) → 현재분기(25.4Q~26.3Q)"
             else:
                 cur_roe = u_roe_main if u_roe_main is not None else (u_roe_2406 or u_roe_2403 or 0.0)
                 prev_q_roe = u_roe_2312 if u_roe_2312 is not None else (u_roe_2309 or cur_roe)
-                q_label = "직전분기 → 최신분기"
+                q_label = "전분기(25.3Q~26.2Q) → 현재분기(25.4Q~26.3Q)"
 
             # 연간/컨센서스 ROE(u_roe_main)가 최신 분기보다 더 최신 특성을 반영할 경우 병행 제공
             qoq_roe_diff = cur_roe - prev_q_roe
@@ -865,12 +864,14 @@ def get_dart_screener_results(conditions: dict):
     conn.close()
 
     # 필터 파라미터 파싱
-    # 1) ROE 및 전분기 대비 ROE 개선 결합 모드:
+    # 1) ROE 및 전분기 대비 ROE 개선(우상향 기울기) 결합 모드:
     #    - "HIGH_OR_UP" (디폴트 추천): (현재 ROE >= min_roe) OR (전분기 대비 ROE 증감 >= min_qoq_roe_diff & 현재 ROE >= floor_roe)
     #    - "HIGH_AND_UP": (현재 ROE >= min_roe) AND (전분기 대비 ROE 증감 >= min_qoq_roe_diff)
+    #    - "GROWTH_UPWARD" (성장주 우상향 전용): PBR 상한 제약과 무관하게 (현재 ROE >= min_roe) 이면서 동시에 전분기 대비 ROE 기울기가 우상향(qoq_roe_diff > 0 & qoq_roe_diff >= min_qoq_roe_diff)인 종목만 채택
     #    - "HIGH_ONLY": 현재 ROE 범위만 체크
     #    - "UP_ONLY": 전분기 대비 ROE 증가만 체크
     roe_mode = str(conditions.get("roe_filter_mode", "HIGH_OR_UP")).upper()
+    only_upward_slope = bool(conditions.get("only_upward_slope", False)) or (roe_mode == "GROWTH_UPWARD")
 
     use_roe = bool(conditions.get("use_roe", True))
     min_roe = float(conditions.get("min_roe", 8.0))
@@ -940,13 +941,21 @@ def get_dart_screener_results(conditions: dict):
         if sector_filter and sector_filter != "ALL" and sec != sector_filter:
             continue
 
-        # [핵심 조건 1] ROE 수준 & 전분기 대비 ROE 개선 필터
+        # [핵심 조건 1] ROE 수준 & 전분기 대비 ROE 개선(기울기 우상향) 필터
         cond_high_roe = (min_roe <= roe <= max_roe)
         cond_qoq_roe_up = (qoq_roe_diff >= min_qoq_roe_diff) and (roe >= min_roe_floor_for_qoq) and (roe <= max_roe)
 
-        if use_roe and use_qoq_roe:
-            if roe_mode == "HIGH_AND_UP":
-                if not (cond_high_roe and cond_qoq_roe_up):
+        # 성장주 우상향 전용 모드(only_upward_slope / GROWTH_UPWARD):
+        # 반드시 현재분기(25.4Q~26.3Q) ROE 절대수준이 기준치(기본 10%) 이상이면서
+        # 전분기(25.3Q~26.2Q) 대비 현재분기 ROE 증감폭(기울기 ΔROE = cur_roe - prev_q_roe)이 양수(> 0) 및 최소 증감폭 이상인 우상향 종목만 채택!
+        if only_upward_slope:
+            eff_min_roe = min_roe if use_roe else 10.0
+            eff_min_slope = max(0.01, min_qoq_roe_diff if (use_qoq_roe and min_qoq_roe_diff > 0) else 0.01)
+            if not (eff_min_roe <= roe <= max_roe and qoq_roe_diff >= eff_min_slope and qoq_roe_diff > 0):
+                continue
+        elif use_roe and use_qoq_roe:
+            if roe_mode in ("HIGH_AND_UP", "GROWTH_UPWARD"):
+                if not (cond_high_roe and cond_qoq_roe_up and qoq_roe_diff > 0):
                     continue
             else:
                 # HIGH_OR_UP: ROE가 이미 높은 수준이거나, 전분기 대비 뚜렷하게 증가하는 종목 모두 포착
@@ -1032,7 +1041,7 @@ def get_dart_screener_results(conditions: dict):
             "roe_pbr_ratio": round(roe_pbr_ratio, 2),
             "qoq_price_growth_pct": round(qoq_price_g, 2),
             "yoy_price_growth_pct": round(yoy_price_g, 2),
-            "quarter_label": r.get("quarter_label") or "23.4Q → 24.1Q",
+            "quarter_label": "전분기(25.3Q~26.2Q) → 현재분기(25.4Q~26.3Q)",
             "selection_tags": tags,
         })
 
@@ -1053,6 +1062,7 @@ def get_dart_screener_results(conditions: dict):
 
 DEFAULT_TETRIS_SCREENER_CONFIG = {
     "roe_filter_mode": "HIGH_OR_UP",
+    "only_upward_slope": False,
     "use_roe": True,
     "min_roe": 10.0,
     "max_roe": 80.0,

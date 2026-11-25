@@ -30,10 +30,12 @@ const getSectorColor = (sectorName: string, indexHint: number = 0) => {
 };
 
 export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks, stocks }: any) {
-  // 1. ROE 및 전분기 대비(QoQ) ROE 증가 결합 모드
+  // 1. ROE 및 전분기 대비(QoQ) ROE 증가(기울기 우상향) 결합 모드
   // HIGH_OR_UP: ROE가 높은 수준이거나(OR) 전분기 대비 ROE가 증가하는 종목
   // HIGH_AND_UP: ROE도 높고(AND) 전분기 대비 ROE도 증가하는 종목
-  const [roeFilterMode, setRoeFilterMode] = useState<'HIGH_OR_UP' | 'HIGH_AND_UP'>('HIGH_OR_UP');
+  // GROWTH_UPWARD: 성장주 전용 — PBR 고평가 여부와 무관하게 ROE가 높은 수준이고 증감폭(기울기 ΔROE > 0)이 우상향인 종목만 채택하여 플롯
+  const [roeFilterMode, setRoeFilterMode] = useState<'HIGH_OR_UP' | 'HIGH_AND_UP' | 'GROWTH_UPWARD'>('HIGH_OR_UP');
+  const [onlyUpwardSlope, setOnlyUpwardSlope] = useState<boolean>(false);
 
   // (1) 고ROE 수준 필터
   const [useRoe, setUseRoe] = useState<boolean>(true);
@@ -97,6 +99,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
 
   const getCurrentFilterPayload = () => ({
     roe_filter_mode: roeFilterMode,
+    only_upward_slope: onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD',
     use_roe: useRoe,
     min_roe: minRoe,
     max_roe: maxRoe,
@@ -124,6 +127,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   const applyFilterConfigToState = (cfg: Record<string, any>) => {
     if (!cfg || typeof cfg !== 'object') return;
     if (cfg.roe_filter_mode) setRoeFilterMode(cfg.roe_filter_mode);
+    if (cfg.only_upward_slope !== undefined) {
+      setOnlyUpwardSlope(Boolean(cfg.only_upward_slope) || cfg.roe_filter_mode === 'GROWTH_UPWARD');
+    }
     if (cfg.use_roe !== undefined) setUseRoe(Boolean(cfg.use_roe));
     if (cfg.min_roe !== undefined) setMinRoe(Number(cfg.min_roe));
     if (cfg.max_roe !== undefined) setMaxRoe(Number(cfg.max_roe));
@@ -252,10 +258,13 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
     };
   }, []);
 
-  const applyPreset = (preset: 'CORE_ROE_PBR' | 'QOQ_TURNAROUND' | 'DEEP_VALUE' | 'STRICT_BOTH') => {
+  const applyPreset = (
+    preset: 'CORE_ROE_PBR' | 'QOQ_TURNAROUND' | 'DEEP_VALUE' | 'STRICT_BOTH' | 'GROWTH_UPWARD_SLOPE'
+  ) => {
     if (preset === 'CORE_ROE_PBR') {
       // 핵심 기본: ROE 높거나(>=10%) 전분기 대비 증가(+1%p↑) & PBR 낮고(<=1.2배) 전분기 대비 PBR 미상승(<=+0.15배)
       setRoeFilterMode('HIGH_OR_UP');
+      setOnlyUpwardSlope(false);
       setUseRoe(true);
       setMinRoe(10);
       setMaxRoe(80);
@@ -275,6 +284,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       setMinRoePbrRatio(10.0);
       executeScreener({
         roe_filter_mode: 'HIGH_OR_UP',
+        only_upward_slope: false,
         use_roe: true,
         min_roe: 10,
         max_roe: 80,
@@ -293,9 +303,48 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         use_roe_pbr_ratio: true,
         min_roe_pbr_ratio: 10.0,
       });
+    } else if (preset === 'GROWTH_UPWARD_SLOPE') {
+      // ★ 성장주 우상향 체크 모드:
+      // PBR이 높다는 것은 시장에서 프리미엄 평가를 받는 것이므로 PBR 상한 및 ΔPBR 상한을 해제하고,
+      // 하나의 기업에 대해 전분기(2025.3Q~2026.2Q 4Q합) 점과 현재분기(2025.4Q~2026.3Q 4Q합) 점을 동시에 표시하며
+      // 절대 ROE가 10% 이상이면서 기울기(ΔROE = 현재분기 ROE - 전분기 ROE > 0)가 우상향인 종목만 추출하여 플로팅!
+      setRoeFilterMode('GROWTH_UPWARD');
+      setOnlyUpwardSlope(true);
+      setUseRoe(true);
+      setMinRoe(10);
+      setMaxRoe(100);
+      setUseQoqRoe(true);
+      setMinQoqRoeDiff(0.1);
+      setMinRoeFloorForQoq(10.0);
+      setUsePbr(false);
+      setMinPbr(0.15);
+      setMaxPbr(20.0);
+      setUseQoqPbrLimit(false);
+      setUsePer(false);
+      setUseRoePbrRatio(false);
+      setShowQoqTrajectory(true);
+      setSortBy('QOQ_ROE_DIFF');
+      executeScreener({
+        roe_filter_mode: 'GROWTH_UPWARD',
+        only_upward_slope: true,
+        use_roe: true,
+        min_roe: 10,
+        max_roe: 100,
+        use_qoq_roe: true,
+        min_qoq_roe_diff: 0.1,
+        min_roe_floor_for_qoq: 10.0,
+        use_pbr: false,
+        min_pbr: 0.15,
+        max_pbr: 20.0,
+        use_qoq_pbr_limit: false,
+        use_per: false,
+        use_roe_pbr_ratio: false,
+        sort_by: 'QOQ_ROE_DIFF',
+      });
     } else if (preset === 'QOQ_TURNAROUND') {
       // 전분기 대비 ROE 급증(+2.5%p↑)했는데 PBR은 오히려 동결/하락(<=+0.05배)한 저평가 종목
       setRoeFilterMode('HIGH_OR_UP');
+      setOnlyUpwardSlope(false);
       setUseRoe(false);
       setUseQoqRoe(true);
       setMinQoqRoeDiff(2.5);
@@ -314,6 +363,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       setSortBy('QOQ_ROE_DIFF');
       executeScreener({
         roe_filter_mode: 'HIGH_OR_UP',
+        only_upward_slope: false,
         use_roe: false,
         use_qoq_roe: true,
         min_qoq_roe_diff: 2.5,
@@ -334,6 +384,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
     } else if (preset === 'DEEP_VALUE') {
       // 초저PBR(<=0.8배) + 고ROE(>=12%) + 저PER(<=10배)
       setRoeFilterMode('HIGH_OR_UP');
+      setOnlyUpwardSlope(false);
       setUseRoe(true);
       setMinRoe(12);
       setMaxRoe(80);
@@ -352,6 +403,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       setSortBy('ROE_PBR_RATIO');
       executeScreener({
         roe_filter_mode: 'HIGH_OR_UP',
+        only_upward_slope: false,
         use_roe: true,
         min_roe: 12,
         max_roe: 80,
@@ -372,6 +424,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
     } else if (preset === 'STRICT_BOTH') {
       // ROE >= 10% 이면서 동시에(AND) 전분기 대비 ROE +1.5%p 이상 상승 + PBR <= 1.0배 + PBR 증가 <= +0.10배
       setRoeFilterMode('HIGH_AND_UP');
+      setOnlyUpwardSlope(true);
       setUseRoe(true);
       setMinRoe(10);
       setMaxRoe(80);
@@ -391,6 +444,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       setMinRoePbrRatio(12.0);
       executeScreener({
         roe_filter_mode: 'HIGH_AND_UP',
+        only_upward_slope: true,
         use_roe: true,
         min_roe: 10,
         max_roe: 80,
@@ -444,9 +498,22 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   }, [sectorStats]);
 
   const filteredResults = useMemo(() => {
-    if (!selectedSector || selectedSector === 'ALL') return results;
-    return results.filter((it: any) => (String(it.sector || '기타').trim() || '기타') === selectedSector);
-  }, [results, selectedSector]);
+    let base = results;
+    if (selectedSector && selectedSector !== 'ALL') {
+      base = base.filter((it: any) => (String(it.sector || '기타').trim() || '기타') === selectedSector);
+    }
+    if (onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') {
+      const floorRoe = useRoe ? minRoe : 10.0;
+      const minSlope = useQoqRoe && minQoqRoeDiff > 0 ? minQoqRoeDiff : 0.01;
+      base = base.filter(
+        (it: any) =>
+          Number(it.roe || 0) >= floorRoe &&
+          Number(it.qoq_roe_diff || 0) >= minSlope &&
+          Number(it.qoq_roe_diff || 0) > 0
+      );
+    }
+    return base;
+  }, [results, selectedSector, onlyUpwardSlope, roeFilterMode, useRoe, minRoe, useQoqRoe, minQoqRoeDiff]);
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a] text-gray-200 p-4 sm:p-6 overflow-y-auto space-y-5">
@@ -491,7 +558,14 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             onClick={() => applyPreset('CORE_ROE_PBR')}
             className="px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-200 font-bold cursor-pointer transition"
           >
-            🎯 [추천] 고ROE(≥10%) 또는 전분기 ROE↑ + 저PBR(≤1.2배) &amp; PBR 상승억제
+            🎯 [저평가 가치주] 고ROE(≥10%) 또는 전분기 ROE↑ + 저PBR(≤1.2배)
+          </button>
+          <button
+            type="button"
+            onClick={() => applyPreset('GROWTH_UPWARD_SLOPE')}
+            className="px-3 py-1.5 rounded-lg bg-rose-950/90 hover:bg-rose-900 border border-rose-400/70 text-rose-200 font-extrabold cursor-pointer transition shadow-md"
+          >
+            📈 [성장주 우상향 전용] 전분기(25.3Q~26.2Q)→현재(25.4Q~26.3Q) 동시표시 · ROE≥10% &amp; 기울기 우상향(ΔROE&gt;0)만 추출
           </button>
           <button
             type="button"
@@ -570,14 +644,17 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-2 text-xs bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1">
+            <div className="flex flex-wrap items-center gap-2 text-xs bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1">
               <span className="text-gray-300 font-bold">ROE 조건 결합방식:</span>
               <label className="flex items-center gap-1 cursor-pointer text-emerald-300 font-bold">
                 <input
                   type="radio"
                   name="roeMode"
-                  checked={roeFilterMode === 'HIGH_OR_UP'}
-                  onChange={() => setRoeFilterMode('HIGH_OR_UP')}
+                  checked={roeFilterMode === 'HIGH_OR_UP' && !onlyUpwardSlope}
+                  onChange={() => {
+                    setRoeFilterMode('HIGH_OR_UP');
+                    setOnlyUpwardSlope(false);
+                  }}
                   className="accent-emerald-500"
                 />
                 <span>고ROE 이거나(OR) 전분기 대비 ROE 증가</span>
@@ -587,11 +664,54 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 <input
                   type="radio"
                   name="roeMode"
-                  checked={roeFilterMode === 'HIGH_AND_UP'}
-                  onChange={() => setRoeFilterMode('HIGH_AND_UP')}
+                  checked={roeFilterMode === 'HIGH_AND_UP' && !onlyUpwardSlope}
+                  onChange={() => {
+                    setRoeFilterMode('HIGH_AND_UP');
+                    setOnlyUpwardSlope(false);
+                  }}
                   className="accent-indigo-500"
                 />
                 <span>고ROE 이면서 동시에(AND) 전분기 대비 증가</span>
+              </label>
+              <span className="text-gray-600">|</span>
+              <label
+                className="flex items-center gap-1 cursor-pointer text-rose-300 font-extrabold"
+                title="PBR이 높은 성장주도 시장 평가를 인정하여 PBR 상한을 해제하고, 오직 ROE가 높은 수준이고 증감폭(기울기 ΔROE)이 우상향인 종목만 채택하여 산점도에 플롯합니다."
+              >
+                <input
+                  type="radio"
+                  name="roeMode"
+                  checked={roeFilterMode === 'GROWTH_UPWARD' || onlyUpwardSlope}
+                  onChange={() => {
+                    setRoeFilterMode('GROWTH_UPWARD');
+                    setOnlyUpwardSlope(true);
+                    setUseRoe(true);
+                    setMinRoe(10);
+                    setUseQoqRoe(true);
+                    setMinQoqRoeDiff(0.1);
+                    setMinRoeFloorForQoq(10.0);
+                    setUsePbr(false);
+                    setUseQoqPbrLimit(false);
+                    setUsePer(false);
+                    setUseRoePbrRatio(false);
+                    setShowQoqTrajectory(true);
+                    executeScreener({
+                      roe_filter_mode: 'GROWTH_UPWARD',
+                      only_upward_slope: true,
+                      use_roe: true,
+                      min_roe: 10,
+                      use_qoq_roe: true,
+                      min_qoq_roe_diff: 0.1,
+                      min_roe_floor_for_qoq: 10.0,
+                      use_pbr: false,
+                      use_qoq_pbr_limit: false,
+                      use_per: false,
+                      use_roe_pbr_ratio: false,
+                    });
+                  }}
+                  className="accent-rose-500"
+                />
+                <span>📈 [성장주 우상향] 전분기(25.3Q~26.2Q)→현재(25.4Q~26.3Q) 동시표시 · ROE≥10% &amp; 우상향(ΔROE&gt;0)만 추출</span>
               </label>
             </div>
 
@@ -759,20 +879,24 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   onChange={(e) => setUsePbr(e.target.checked)}
                   className="w-4 h-4 accent-sky-500 rounded"
                 />
-                <span>③ 저PBR 수준 (배) 범위</span>
+                <span>③ PBR 수준 (배) 범위 {onlyUpwardSlope ? '(고PBR 성장주 허용)' : ''}</span>
               </label>
               <span className="font-mono text-sky-300 font-bold">
-                {minPbr}배 ~ {maxPbr}배 이하
+                {usePbr ? `${minPbr}배 ~ ${maxPbr}배 이하` : '제한 없음 (전 구간)'}
               </span>
             </div>
-            <p className="text-[11px] text-gray-400">순자산(BPS) 대비 주가가 저평가된 종목 필터</p>
+            <p className="text-[11px] text-gray-400">
+              {onlyUpwardSlope
+                ? '성장주 우상향 모드에서는 고PBR 프리미엄 종목도 모두 포함됩니다 (원할 때만 체크)'
+                : '순자산(BPS) 대비 주가 멀티플(PBR) 범위 필터'}
+            </p>
             <div className="space-y-1.5 pt-1">
               <div className="flex items-center gap-2">
                 <span className="w-12 text-[11px] text-gray-400">최소:</span>
                 <input
                   type="range"
                   min="0.05"
-                  max="1.5"
+                  max="3.0"
                   step="0.05"
                   value={minPbr}
                   disabled={!usePbr}
@@ -793,8 +917,8 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 <input
                   type="range"
                   min="0.2"
-                  max="5.0"
-                  step="0.1"
+                  max="20.0"
+                  step="0.2"
                   value={maxPbr}
                   disabled={!usePbr}
                   onChange={(e) => setMaxPbr(Number(e.target.value))}
@@ -802,7 +926,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 />
                 <input
                   type="number"
-                  step="0.1"
+                  step="0.2"
                   value={maxPbr}
                   disabled={!usePbr}
                   onChange={(e) => setMaxPbr(Number(e.target.value))}
@@ -1038,18 +1162,29 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const plotH = H - padT - padB;
 
         const plotItems = filteredResults.slice(0, 220);
+        const isDualTrajectoryActive = showQoqTrajectory || onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD';
 
-        // 현재 위치(pbr, roe) 기준으로 기본 축 스케일을 잡아서 전분기 극단적 적자(-168% ROE 등) 때문에 점들이 한쪽에 찌그러지는 현상 방지
+        // 현재분기(25.4Q~26.3Q) 위치(pbr, roe)와 전분기(25.3Q~26.2Q) 위치(prev_q_pbr, prev_q_roe)를 동시에 표시하되,
+        // 전분기 극단적 적자(-168% ROE 등) 때문에 축이 찌그러지지 않도록 정상 범위(-15% 이상)의 전분기 점을 기본 축에 함께 포함
         const curPbrVals = plotItems.map((it: any) => Number(it.pbr) || 0).filter((v) => v > 0);
-        const curRoeVals = plotItems.map((it: any) => Number(it.roe) || 0);
+        const prevPbrVals = isDualTrajectoryActive
+          ? plotItems.map((it: any) => Number(it.prev_q_pbr) || 0).filter((v) => v > 0 && v <= 25)
+          : [];
+        const allXForAxis = [...curPbrVals, ...prevPbrVals];
 
-        const minXRaw = curPbrVals.length ? Math.min(...curPbrVals, 0.15) : 0.1;
-        const maxXRaw = curPbrVals.length ? Math.max(...curPbrVals, 1.05) : 1.5;
+        const curRoeVals = plotItems.map((it: any) => Number(it.roe) || 0);
+        const prevRoeVals = isDualTrajectoryActive
+          ? plotItems.map((it: any) => Number(it.prev_q_roe) || 0).filter((v) => v >= -15 && v <= 120)
+          : [];
+        const allYForAxis = [...curRoeVals, ...prevRoeVals];
+
+        const minXRaw = allXForAxis.length ? Math.min(...allXForAxis, 0.15) : 0.1;
+        const maxXRaw = allXForAxis.length ? Math.max(...allXForAxis, 1.05) : 1.5;
         const defaultXMin = Math.max(0, Number((minXRaw - 0.06).toFixed(2)));
         const defaultXMax = Number((maxXRaw + Math.max(0.1, (maxXRaw - minXRaw) * 0.1)).toFixed(2));
 
-        const minYRaw = curRoeVals.length ? Math.min(...curRoeVals, 4) : 0;
-        const maxYRaw = curRoeVals.length ? Math.max(...curRoeVals, 22) : 35;
+        const minYRaw = allYForAxis.length ? Math.min(...allYForAxis, 4) : 0;
+        const maxYRaw = allYForAxis.length ? Math.max(...allYForAxis, 22) : 35;
         const defaultYMin = Number((minYRaw - Math.max(2, (maxYRaw - minYRaw) * 0.1)).toFixed(1));
         const defaultYMax = Number((maxYRaw + Math.max(3, (maxYRaw - minYRaw) * 0.12)).toFixed(1));
 
@@ -1263,6 +1398,25 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   </button>
                 </div>
 
+                <label className="flex items-center gap-1.5 cursor-pointer text-rose-300 font-extrabold bg-rose-950/60 border border-rose-500/50 rounded-lg px-2.5 py-1">
+                  <input
+                    type="checkbox"
+                    checked={onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD'}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setOnlyUpwardSlope(checked);
+                      if (checked) {
+                        setRoeFilterMode('GROWTH_UPWARD');
+                        setShowQoqTrajectory(true);
+                      } else {
+                        setRoeFilterMode('HIGH_OR_UP');
+                      }
+                    }}
+                    className="accent-rose-500"
+                  />
+                  <span>📈 고ROE &amp; 기울기 우상향(ΔROE&gt;0)만 플롯</span>
+                </label>
+
                 <label className="flex items-center gap-1.5 cursor-pointer text-emerald-300 font-bold">
                   <input
                     type="checkbox"
@@ -1270,7 +1424,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     onChange={(e) => setShowQoqTrajectory(e.target.checked)}
                     className="accent-emerald-500"
                   />
-                  <span>전분기 궤적선</span>
+                  <span>전분기→현재 기울기 화살표</span>
                 </label>
                 <label className="flex items-center gap-1.5 cursor-pointer text-sky-300 font-bold">
                   <input
@@ -1355,24 +1509,29 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               <div className="flex flex-wrap items-center gap-3 shrink-0">
                 {colorMode === 'SECTOR' ? (
                   <>
-                    <span className="text-purple-300 font-bold">🎨 현재 색상: 섹터별 고유 색상</span>
-                    <span className="text-gray-400 text-[11px]">
-                      (위 섹터 버튼의 색상 점과 동일한 색으로 각 섹터 종목이 구분 표시됩니다)
+                    <span className="text-purple-300 font-bold">🎨 섹터별 고유 색상</span>
+                    <span className="flex items-center gap-1.5 text-[11px] text-gray-300">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-emerald-400 bg-transparent" />
+                      <span>빈 원(○): 전분기(25.3Q~26.2Q 4Q합)</span>
+                    </span>
+                    <span className="flex items-center gap-1.5 text-[11px] text-gray-300">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                      <span>채운 원(●) &amp; 화살표(↗): 현재분기(25.4Q~26.3Q 4Q합)</span>
                     </span>
                   </>
                 ) : (
                   <>
                     <span className="flex items-center gap-1.5">
                       <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/60" />
-                      <span className="text-gray-200 font-bold">고ROE &amp; 전분기비 ROE↑</span>
+                      <span className="text-gray-200 font-bold">고ROE(≥10%) &amp; 기울기 우상향(↗)</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-slate-300 bg-transparent" />
+                      <span className="text-gray-300 font-bold">전분기(25.3Q~26.2Q) 시작점(○)</span>
                     </span>
                     <span className="flex items-center gap-1.5">
                       <span className="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 border border-white/60" />
-                      <span className="text-gray-200 font-bold">고ROE 유지</span>
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 border border-white/60" />
-                      <span className="text-gray-200 font-bold">전분기비 ROE 개선주</span>
+                      <span className="text-gray-200 font-bold">현재분기(25.4Q~26.3Q) 도착점(●)</span>
                     </span>
                   </>
                 )}
@@ -1394,13 +1553,12 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       {hoveredStock.sector || '기타'}
                     </span>
                     <span className="text-sky-300 font-bold">
-                      PBR: {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
+                      PBR(전분기→현재): {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
                     </span>
                     <span className="text-emerald-300 font-bold">
-                      ROE: {hoveredStock.prev_q_roe}→{hoveredStock.roe}% ({hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p)
+                      ROE[25.3Q~26.2Q → 25.4Q~26.3Q]: {hoveredStock.prev_q_roe}%→{hoveredStock.roe}% (기울기 {hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p {hoveredStock.qoq_roe_diff >= 0 ? '↗' : '↘'})
                     </span>
                     <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
-                    <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
                     {setGlobalSearchTicker && (
                       <button
                         type="button"
@@ -1413,7 +1571,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   </div>
                 ) : (
                   <span className="text-gray-400 whitespace-nowrap">
-                    💡 차트에서 원하는 곳(또는 종목 점)을 클릭해 기준점(📌)을 고정하고 상단 배율(100%~600%)로 확대하세요. (화면 내 {visibleItems.length}개 표시)
+                    💡 한 기업의 전분기(○, 25.3Q~26.2Q)와 현재분기(●, 25.4Q~26.3Q)를 화살표로 동시 표시합니다. 차트 클릭 시 기준점(📌) 고정 후 상단 배율로 확대됩니다.
                   </span>
                 )}
               </div>
@@ -1435,18 +1593,53 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   <clipPath id="tetris-scatter-clip">
                     <rect x={padL} y={padT} width={plotW} height={plotH} />
                   </clipPath>
+                  <marker
+                    id="arrow-upward-green"
+                    viewBox="0 0 10 10"
+                    refX="7"
+                    refY="5"
+                    markerWidth="5"
+                    markerHeight="5"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+                  </marker>
+                  <marker
+                    id="arrow-downward-red"
+                    viewBox="0 0 10 10"
+                    refX="7"
+                    refY="5"
+                    markerWidth="5"
+                    markerHeight="5"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171" />
+                  </marker>
                 </defs>
 
-                {/* 좌상단 황금 사분면 (저PBR <= 1.0배 & 고ROE >= 기준선) 하이라이트 배경 */}
-                {refX > padL && refY > padT && (
-                  <rect
-                    x={padL}
-                    y={padT}
-                    width={Math.max(0, Math.min(plotW, refX - padL))}
-                    height={Math.max(0, Math.min(plotH, refY - padT))}
-                    fill="rgba(16, 185, 129, 0.08)"
-                    clipPath="url(#tetris-scatter-clip)"
-                  />
+                {/* 성장주 우상향 모드일 때는 PBR > 1.0배 고PBR 영역까지 전체 상단(고ROE >= 기준선)을 하이라이트하고, 일반 가치주 모드일 때는 좌상단(저PBR <= 1.0배 & 고ROE) 하이라이트 */}
+                {(onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') ? (
+                  refY > padT && (
+                    <rect
+                      x={padL}
+                      y={padT}
+                      width={plotW}
+                      height={Math.max(0, Math.min(plotH, refY - padT))}
+                      fill="rgba(244, 63, 94, 0.07)"
+                      clipPath="url(#tetris-scatter-clip)"
+                    />
+                  )
+                ) : (
+                  refX > padL && refY > padT && (
+                    <rect
+                      x={padL}
+                      y={padT}
+                      width={Math.max(0, Math.min(plotW, refX - padL))}
+                      height={Math.max(0, Math.min(plotH, refY - padT))}
+                      fill="rgba(16, 185, 129, 0.08)"
+                      clipPath="url(#tetris-scatter-clip)"
+                    />
+                  )
                 )}
 
                 {/* 격자선 및 X축(PBR) / Y축(ROE) 눈금 */}
@@ -1558,15 +1751,18 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   />
                 )}
 
-                {/* 좌상단 사분면 워터마크 라벨 */}
+                {/* 상단 사분면 워터마크 라벨 */}
                 <text
                   x={padL + 10}
                   y={padT + 20}
-                  fill="#10b981"
+                  fill={onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD' ? '#fb7185' : '#10b981'}
                   fontSize="11"
                   fontWeight="bold"
                 >
-                  ★ Sweet Spot (저PBR · 고ROE 핵심 발굴 영역) {selectedSector !== 'ALL' ? `— [${selectedSector}] 섹터` : ''}
+                  {onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD'
+                    ? `📈 성장주 우상향 영역 (고PBR 시장프리미엄 허용 · 고ROE ≥ ${refRoe}% & 전분기비 기울기 ΔROE > 0 우상향만 채택)`
+                    : '★ Sweet Spot (저PBR · 고ROE 핵심 발굴 영역)'}{' '}
+                  {selectedSector !== 'ALL' ? `— [${selectedSector}] 섹터` : ''}
                 </text>
 
                 {/* 축 제목 */}
@@ -1635,22 +1831,46 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           });
                         }}
                       >
-                        {/* 전분기(prev_q) -> 현재(cur) 이동 궤적 점선 */}
-                        {(showQoqTrajectory || isHovered) &&
-                          (Math.abs(curX - prevX) > 2 || Math.abs(curY - prevY) > 2) && (
-                            <g opacity={isHovered ? 0.95 : 0.45} className="pointer-events-none">
-                              <circle cx={prevX} cy={prevY} r={2.2} fill="#94a3b8" />
+                        {/* 하나의 기업에 대해 전분기(2025.3Q~2026.2Q, 빈 원 ○) 점과 현재분기(2025.4Q~2026.3Q, 채운 원 ●) 점을 동시에 표시하고 우상향 기울기 벡터 화살표로 연결 */}
+                        {(showQoqTrajectory || isHovered || onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') && (
+                          <g opacity={isHovered ? 1.0 : 0.78} className="pointer-events-none">
+                            {/* 전분기(25.3Q~26.2Q) 시작점: 테두리가 있는 빈 원(○) */}
+                            <circle
+                              cx={prevX}
+                              cy={prevY}
+                              r={isHovered ? 5.2 : 3.6}
+                              fill="#070b12"
+                              stroke={dotColor}
+                              strokeWidth={isHovered ? '2.2' : '1.6'}
+                            />
+                            {/* 전분기 -> 현재분기 기울기 연결 벡터 화살표 */}
+                            {(Math.abs(curX - prevX) > 1.5 || Math.abs(curY - prevY) > 1.5) && (
                               <line
                                 x1={prevX}
                                 y1={prevY}
                                 x2={curX}
                                 y2={curY}
                                 stroke={qoqRoe >= 0 ? '#34d399' : '#f87171'}
-                                strokeWidth={isHovered ? '2.0' : '1.1'}
-                                strokeDasharray="2,2"
+                                strokeWidth={isHovered ? '2.4' : '1.5'}
+                                strokeDasharray={isHovered ? undefined : '4,2'}
+                                markerEnd={qoqRoe >= 0 ? 'url(#arrow-upward-green)' : 'url(#arrow-downward-red)'}
                               />
-                            </g>
-                          )}
+                            )}
+                            {/* 호버 시 전분기 좌표와 현재분기 좌표 텍스트를 점 옆에 직접 표시 */}
+                            {isHovered && (
+                              <text
+                                x={prevX - 6}
+                                y={prevY - 8}
+                                textAnchor="end"
+                                fill="#fcd34d"
+                                fontSize="10"
+                                fontWeight="bold"
+                              >
+                                전분기(25.3Q~26.2Q): PBR {it.prev_q_pbr}배, ROE {it.prev_q_roe}%
+                              </text>
+                            )}
+                          </g>
+                        )}
 
                         {/* 마우스 히트 영역 고정용 투명 원 */}
                         <circle cx={curX} cy={curY} r={10} fill="transparent" />
@@ -1667,7 +1887,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           className="pointer-events-none"
                         />
 
-                        {/* 종목명 라벨 */}
+                        {/* 종목명 라벨 (성장주 우상향 모드 또는 호버 시 전분기→현재분기 ROE 변화 함께 표기) */}
                         {showLabel && (
                           <text
                             x={curX + radius + 3}
@@ -1678,6 +1898,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                             className="pointer-events-none"
                           >
                             {getStockName(it)}
+                            {(isHovered || ((onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') && idx < 18))
+                              ? ` (${it.prev_q_roe}%→${it.roe}%, ${qoqRoe >= 0 ? '+' : ''}${it.qoq_roe_diff}%p↗)`
+                              : ''}
                           </text>
                         )}
                       </g>
@@ -1752,8 +1975,10 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   <th className="p-2.5 font-sans">순위 / 종목명 (코드)</th>
                   <th className="p-2.5 font-sans">시장 / 업종</th>
                   <th className="p-2.5 text-right">현재가 (시총)</th>
-                  <th className="p-2.5 text-right text-indigo-300">전분기 → 현재 ROE (%)</th>
-                  <th className="p-2.5 text-right text-emerald-300">전분기비 ΔROE</th>
+                  <th className="p-2.5 text-right text-indigo-300">
+                    전분기(25.3Q~26.2Q) → 현재(25.4Q~26.3Q) ROE
+                  </th>
+                  <th className="p-2.5 text-right text-emerald-300">기울기 (전분기비 ΔROE)</th>
                   <th className="p-2.5 text-right text-sky-300">전분기 → 현재 PBR (배)</th>
                   <th className="p-2.5 text-right text-amber-300">전분기비 ΔPBR (변동률)</th>
                   <th className="p-2.5 text-right text-purple-300">PER (배)</th>
@@ -1806,7 +2031,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       <td className="p-2.5 text-right">
                         <div className="font-extrabold text-indigo-300 text-sm">{item.roe}%</div>
                         <div className="text-[10px] text-gray-400">
-                          전분기 {item.prev_q_roe}% → 현재 {item.roe}%
+                          25.3Q~26.2Q ({item.prev_q_roe}%) → 25.4Q~26.3Q ({item.roe}%)
                         </div>
                       </td>
 
