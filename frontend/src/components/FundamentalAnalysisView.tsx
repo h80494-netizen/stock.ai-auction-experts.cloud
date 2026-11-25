@@ -57,18 +57,23 @@ export default function FundamentalAnalysisView({ ticker }: FundamentalAnalysisV
             return (qOrder[a.quarter] || 0) - (qOrder[b.quarter] || 0);
           });
 
-          // Format data for Recharts (최근 12분기)
+          // Format data for Recharts (최근 12분기: 이익은 4분기 롤링 합계 TTM, 자산/자본은 해당 분기말 시점 잔액)
           const recent12 = sorted.slice(-12);
-          const chartData = recent12.map((item: any) => ({
-            name: `${item.year.slice(2)}.${getQuarterLabel(item.quarter)}`,
-            fullName: `${item.year}년 ${getQuarterLabel(item.quarter)}`,
-            revenue: Math.round(item.revenue / 100000000), // 억원 단위 (분기*4 연환산)
-            operating_profit: Math.round(item.operating_profit / 100000000),
-            net_profit: Math.round(item.net_profit / 100000000),
-            assets: Math.round(item.assets / 100000000),
-            equity: Math.round(item.equity / 100000000),
-            liabilities: Math.round(item.liabilities / 100000000),
-          }));
+          const chartData = recent12.map((item: any) => {
+            const revVal = Number(item.revenue_ttm) ? Number(item.revenue_ttm) : Number(item.revenue || 0);
+            const opVal = Number(item.operating_profit_ttm) ? Number(item.operating_profit_ttm) : Number(item.operating_profit || 0);
+            const npVal = Number(item.net_profit_ttm) ? Number(item.net_profit_ttm) : Number(item.net_profit || 0);
+            return {
+              name: `${item.year.slice(2)}.${getQuarterLabel(item.quarter)}`,
+              fullName: `${item.year}년 ${getQuarterLabel(item.quarter)}`,
+              revenue: Math.round(revVal / 100000000), // 억원 단위 (직전 4분기 롤링 합계 TTM)
+              operating_profit: Math.round(opVal / 100000000),
+              net_profit: Math.round(npVal / 100000000),
+              assets: Math.round(Number(item.assets || 0) / 100000000), // 해당 분기말 시점 자산총계 (비합산)
+              equity: Math.round(Number(item.equity || 0) / 100000000), // 해당 분기말 시점 자본총계 (비합산)
+              liabilities: Math.round(Number(item.liabilities || 0) / 100000000),
+            };
+          });
           if (isMounted) setData(chartData);
         } else {
           if (isMounted) setError('재무 데이터가 없습니다.');
@@ -96,9 +101,9 @@ export default function FundamentalAnalysisView({ ticker }: FundamentalAnalysisV
         <div>
           <h3 className="font-bold text-lg text-white flex items-center gap-2">
             <span className="text-indigo-400">📊 OpenDART 펀더멘탈 분석</span>
-            <span className="text-xs bg-indigo-950/80 text-indigo-300 px-2 py-0.5 rounded border border-indigo-700/50">최근 12분기 (분기데이터×4 연환산)</span>
+            <span className="text-xs bg-indigo-950/80 text-indigo-300 px-2 py-0.5 rounded border border-indigo-700/50">최근 12분기 (이익: 4분기 롤링합계 TTM / 자본·자산: 분기말 시점 잔액)</span>
           </h3>
-          <p className="text-xs text-gray-400 mt-0.5">최근 3개년 12개 분기 단일 실적을 연환산(Quarterly × 4)하여 실적 추이를 비교합니다.</p>
+          <p className="text-xs text-gray-400 mt-0.5">매출·영업이익·순이익은 직전 4개 분기 롤링 합계(예: 작년 4Q~금년 3Q 합산)로, 자본·자산은 해당 분기말 시점 잔액(비합산)으로 표시합니다.</p>
         </div>
         {latest && (
           <div className="flex items-center gap-3 text-xs bg-black/40 px-3 py-1.5 rounded border border-gray-800">
@@ -137,15 +142,15 @@ export default function FundamentalAnalysisView({ ticker }: FundamentalAnalysisV
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-            <Bar yAxisId="left" dataKey="revenue" name="매출액(분기×4)" fill="#4f46e5" radius={[3, 3, 0, 0]} maxBarSize={28} />
-            <Bar yAxisId="left" dataKey="operating_profit" name="영업이익(분기×4)" fill="#10b981" radius={[3, 3, 0, 0]} maxBarSize={28} />
-            <Bar yAxisId="left" dataKey="net_profit" name="당기순이익(분기×4)" fill="#f59e0b" radius={[3, 3, 0, 0]} maxBarSize={28} />
-            <Line yAxisId="right" type="monotone" dataKey="equity" name="자본총계(분기말)" stroke="#ec4899" strokeWidth={2.5} dot={{ r: 3, fill: '#ec4899' }} />
+            <Bar yAxisId="left" dataKey="revenue" name="매출액(4분기 롤링합계)" fill="#4f46e5" radius={[3, 3, 0, 0]} maxBarSize={28} />
+            <Bar yAxisId="left" dataKey="operating_profit" name="영업이익(4분기 롤링합계)" fill="#10b981" radius={[3, 3, 0, 0]} maxBarSize={28} />
+            <Bar yAxisId="left" dataKey="net_profit" name="당기순이익(4분기 롤링합계)" fill="#f59e0b" radius={[3, 3, 0, 0]} maxBarSize={28} />
+            <Line yAxisId="right" type="monotone" dataKey="equity" name="자본총계(분기말 시점)" stroke="#ec4899" strokeWidth={2.5} dot={{ r: 3, fill: '#ec4899' }} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
       <div className="flex justify-between items-center text-[11px] text-gray-500 mt-2 px-1">
-        <span>* 단위: 억원 (각 분기 순수 실적을 4배한 연환산 규모 기준 / 자본총계는 해당 분기말 시점 잔액)</span>
+        <span>* 단위: 억원 (이익은 직전 4개 분기 롤링 합계[예: 작년 4Q~금년 3Q] 기준 / 자산·자본총계는 해당 분기말 시점 잔액으로 절대 합산하지 않음)</span>
         <span>최근 12분기 (3년 추이)</span>
       </div>
     </div>

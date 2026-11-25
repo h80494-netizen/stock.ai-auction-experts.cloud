@@ -90,34 +90,104 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
+  // 💾 필터 설정 영구 저장 상태 (서버 DB + 브라우저 localStorage 이중 고정)
+  const [configSavedAt, setConfigSavedAt] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string>('');
+  const [savingConfig, setSavingConfig] = useState<boolean>(false);
+
+  const getCurrentFilterPayload = () => ({
+    roe_filter_mode: roeFilterMode,
+    use_roe: useRoe,
+    min_roe: minRoe,
+    max_roe: maxRoe,
+    use_qoq_roe: useQoqRoe,
+    min_qoq_roe_diff: minQoqRoeDiff,
+    min_roe_floor_for_qoq: minRoeFloorForQoq,
+    use_pbr: usePbr,
+    min_pbr: minPbr,
+    max_pbr: maxPbr,
+    use_qoq_pbr_limit: useQoqPbrLimit,
+    max_qoq_pbr_diff: maxQoqPbrDiff,
+    max_qoq_pbr_growth_pct: maxQoqPbrGrowthPct,
+    use_per: usePer,
+    min_per: minPer,
+    max_per: maxPer,
+    use_roe_pbr_ratio: useRoePbrRatio,
+    min_roe_pbr_ratio: minRoePbrRatio,
+    use_price_change: usePriceChange,
+    min_price_change: minPriceChange,
+    max_price_change: maxPriceChange,
+    market_filter: marketFilter,
+    sort_by: sortBy,
+  });
+
+  const applyFilterConfigToState = (cfg: Record<string, any>) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    if (cfg.roe_filter_mode) setRoeFilterMode(cfg.roe_filter_mode);
+    if (cfg.use_roe !== undefined) setUseRoe(Boolean(cfg.use_roe));
+    if (cfg.min_roe !== undefined) setMinRoe(Number(cfg.min_roe));
+    if (cfg.max_roe !== undefined) setMaxRoe(Number(cfg.max_roe));
+    if (cfg.use_qoq_roe !== undefined) setUseQoqRoe(Boolean(cfg.use_qoq_roe));
+    if (cfg.min_qoq_roe_diff !== undefined) setMinQoqRoeDiff(Number(cfg.min_qoq_roe_diff));
+    if (cfg.min_roe_floor_for_qoq !== undefined) setMinRoeFloorForQoq(Number(cfg.min_roe_floor_for_qoq));
+    if (cfg.use_pbr !== undefined) setUsePbr(Boolean(cfg.use_pbr));
+    if (cfg.min_pbr !== undefined) setMinPbr(Number(cfg.min_pbr));
+    if (cfg.max_pbr !== undefined) setMaxPbr(Number(cfg.max_pbr));
+    if (cfg.use_qoq_pbr_limit !== undefined) setUseQoqPbrLimit(Boolean(cfg.use_qoq_pbr_limit));
+    if (cfg.max_qoq_pbr_diff !== undefined) setMaxQoqPbrDiff(Number(cfg.max_qoq_pbr_diff));
+    if (cfg.max_qoq_pbr_growth_pct !== undefined) setMaxQoqPbrGrowthPct(Number(cfg.max_qoq_pbr_growth_pct));
+    if (cfg.use_per !== undefined) setUsePer(Boolean(cfg.use_per));
+    if (cfg.min_per !== undefined) setMinPer(Number(cfg.min_per));
+    if (cfg.max_per !== undefined) setMaxPer(Number(cfg.max_per));
+    if (cfg.use_roe_pbr_ratio !== undefined) setUseRoePbrRatio(Boolean(cfg.use_roe_pbr_ratio));
+    if (cfg.min_roe_pbr_ratio !== undefined) setMinRoePbrRatio(Number(cfg.min_roe_pbr_ratio));
+    if (cfg.use_price_change !== undefined) setUsePriceChange(Boolean(cfg.use_price_change));
+    if (cfg.min_price_change !== undefined) setMinPriceChange(Number(cfg.min_price_change));
+    if (cfg.max_price_change !== undefined) setMaxPriceChange(Number(cfg.max_price_change));
+    if (cfg.market_filter) setMarketFilter(cfg.market_filter);
+    if (cfg.sort_by) setSortBy(cfg.sort_by);
+  };
+
+  const saveCurrentFilterConfig = async (applySearchAfterSave: boolean = true) => {
+    setSavingConfig(true);
+    setSaveMessage('');
+    const currentCfg = getCurrentFilterPayload();
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('tetris_roe_pbr_saved_config_v1', JSON.stringify(currentCfg));
+      }
+      const res = await fetch('/api/dart/screener-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: currentCfg }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setConfigSavedAt(data.updated_at || new Date().toLocaleString());
+        setSaveMessage('✅ 현재 필터 설정이 서버 DB에 영구 저장(고정)되었습니다!');
+      } else {
+        setSaveMessage('✅ 브라우저에 필터 설정이 저장되었습니다.');
+      }
+      if (applySearchAfterSave) {
+        await executeScreener(currentCfg);
+      }
+    } catch {
+      setSaveMessage('✅ 브라우저에 현재 필터 설정이 고정 저장되었습니다.');
+      if (applySearchAfterSave) {
+        await executeScreener(currentCfg);
+      }
+    } finally {
+      setSavingConfig(false);
+      setTimeout(() => setSaveMessage(''), 4000);
+    }
+  };
+
   const executeScreener = async (overrideParams?: Record<string, any>) => {
     setLoading(true);
     setError('');
     try {
       const payload = {
-        roe_filter_mode: roeFilterMode,
-        use_roe: useRoe,
-        min_roe: minRoe,
-        max_roe: maxRoe,
-        use_qoq_roe: useQoqRoe,
-        min_qoq_roe_diff: minQoqRoeDiff,
-        min_roe_floor_for_qoq: minRoeFloorForQoq,
-        use_pbr: usePbr,
-        min_pbr: minPbr,
-        max_pbr: maxPbr,
-        use_qoq_pbr_limit: useQoqPbrLimit,
-        max_qoq_pbr_diff: maxQoqPbrDiff,
-        max_qoq_pbr_growth_pct: maxQoqPbrGrowthPct,
-        use_per: usePer,
-        min_per: minPer,
-        max_per: maxPer,
-        use_roe_pbr_ratio: useRoePbrRatio,
-        min_roe_pbr_ratio: minRoePbrRatio,
-        use_price_change: usePriceChange,
-        min_price_change: minPriceChange,
-        max_price_change: maxPriceChange,
-        market_filter: marketFilter,
-        sort_by: sortBy,
+        ...getCurrentFilterPayload(),
         ...(overrideParams || {}),
       };
 
@@ -144,7 +214,42 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   };
 
   useEffect(() => {
-    executeScreener();
+    let mounted = true;
+    const initFromSavedConfig = async () => {
+      let loadedCfg: Record<string, any> | null = null;
+      try {
+        const res = await fetch('/api/dart/screener-config');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.config) {
+            loadedCfg = data.config;
+            if (mounted && data.updated_at) {
+              setConfigSavedAt(data.updated_at);
+            }
+          }
+        }
+      } catch {
+        // ignore network error and fallback to localStorage
+      }
+      if (!loadedCfg && typeof window !== 'undefined') {
+        try {
+          const raw = window.localStorage.getItem('tetris_roe_pbr_saved_config_v1');
+          if (raw) loadedCfg = JSON.parse(raw);
+        } catch {
+          loadedCfg = null;
+        }
+      }
+      if (mounted && loadedCfg) {
+        applyFilterConfigToState(loadedCfg);
+        await executeScreener(loadedCfg);
+      } else if (mounted) {
+        await executeScreener();
+      }
+    };
+    initFromSavedConfig();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const applyPreset = (preset: 'CORE_ROE_PBR' | 'QOQ_TURNAROUND' | 'DEEP_VALUE' | 'STRICT_BOTH') => {
@@ -352,17 +457,29 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
             <span>🧩 ROE · PBR · PER 밸류에이션 갭 종목 필터링 (Tetris Screener)</span>
           </h2>
           <p className="text-xs text-gray-400 mt-1">
-            <strong className="text-emerald-300">ROE/PBR 관점 핵심 전략:</strong> ROE가 높은 수준이거나 전분기 대비(QoQ) 증가하는 상황에서, 아직 주가(PBR)가 크게 늘어나지 않은 저평가 종목을 정밀 발굴합니다. (전 상장사 2,577개 종목 DB 연동)
+            <strong className="text-emerald-300">4분기 롤링 TTM 순이익 &amp; 분기말 자본 기준:</strong> 순이익·EPS는 분기마다 직전 4개 분기 합계(예: 작년 4Q~금년 3Q 합산)로 롤링하고, 자본·자산·BPS는 해당 분기말(예: 3분기말) 시점 잔액(비합산)을 적용해 ROE, PER, PBR 및 전분기 대비 개선폭(ΔROE)을 정밀 산출합니다.
           </p>
         </div>
-        <button
-          onClick={() => executeScreener()}
-          disabled={loading}
-          className="bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-white font-extrabold py-2.5 px-6 rounded-xl transition-all shadow-lg border border-emerald-400/40 active:scale-95 flex items-center gap-2 cursor-pointer"
-        >
-          <span>🔍</span>
-          <span>{loading ? '종목 발굴 중...' : 'ROE · PBR 조건 검색 실행'}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => saveCurrentFilterConfig(true)}
+            disabled={savingConfig || loading}
+            className="bg-amber-600 hover:bg-amber-500 text-slate-950 font-extrabold py-2.5 px-4 rounded-xl transition-all shadow-lg border border-amber-300/60 active:scale-95 flex items-center gap-1.5 cursor-pointer text-xs sm:text-sm"
+            title="현재 조정한 ROE·PBR·PER 핵심 밸류에이션 필터 값을 서버 DB에 영구 저장하여 고정합니다"
+          >
+            <span>💾</span>
+            <span>{savingConfig ? '필터 고정 저장 중...' : '현재 필터값 저장 (고정)'}</span>
+          </button>
+          <button
+            onClick={() => executeScreener()}
+            disabled={loading}
+            className="bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-white font-extrabold py-2.5 px-6 rounded-xl transition-all shadow-lg border border-emerald-400/40 active:scale-95 flex items-center gap-2 cursor-pointer text-xs sm:text-sm"
+          >
+            <span>🔍</span>
+            <span>{loading ? '종목 발굴 중...' : 'ROE · PBR 조건 검색 실행'}</span>
+          </button>
+        </div>
       </div>
 
       {/* 원클릭 전략 프리셋 & 시장/정렬 바 */}
@@ -435,36 +552,58 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       {/* 핵심 ROE / PBR / PER 6대 필터링 컨트롤 그리드 */}
       <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800 pb-3">
-          <div className="text-sm font-bold text-emerald-300 flex items-center gap-2">
+          <div className="text-sm font-bold text-emerald-300 flex flex-wrap items-center gap-2">
             <span>🎯 ROE · PBR · PER 핵심 밸류에이션 필터</span>
             <span className="text-xs text-gray-400 font-normal">
-              (ROE가 높거나 전분기 대비 상승하는데 PBR이 낮고 크게 늘어나지 않은 종목 추출)
+              (이익: 최근 4분기 롤링합계[TTM] ÷ 자본: 최신 분기말 시점 잔액 기준)
             </span>
+            {configSavedAt && (
+              <span className="px-2 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 text-[11px] font-mono">
+                📌 저장된 필터 고정됨 ({configSavedAt})
+              </span>
+            )}
+            {saveMessage && (
+              <span className="px-2.5 py-0.5 rounded bg-emerald-950 border border-emerald-400 text-emerald-200 text-xs font-extrabold">
+                {saveMessage}
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-2 text-xs bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1">
-            <span className="text-gray-300 font-bold">ROE 조건 결합방식:</span>
-            <label className="flex items-center gap-1 cursor-pointer text-emerald-300 font-bold">
-              <input
-                type="radio"
-                name="roeMode"
-                checked={roeFilterMode === 'HIGH_OR_UP'}
-                onChange={() => setRoeFilterMode('HIGH_OR_UP')}
-                className="accent-emerald-500"
-              />
-              <span>고ROE 이거나(OR) 전분기 대비 ROE 증가</span>
-            </label>
-            <span className="text-gray-600">|</span>
-            <label className="flex items-center gap-1 cursor-pointer text-indigo-300 font-bold">
-              <input
-                type="radio"
-                name="roeMode"
-                checked={roeFilterMode === 'HIGH_AND_UP'}
-                onChange={() => setRoeFilterMode('HIGH_AND_UP')}
-                className="accent-indigo-500"
-              />
-              <span>고ROE 이면서 동시에(AND) 전분기 대비 증가</span>
-            </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2 text-xs bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1">
+              <span className="text-gray-300 font-bold">ROE 조건 결합방식:</span>
+              <label className="flex items-center gap-1 cursor-pointer text-emerald-300 font-bold">
+                <input
+                  type="radio"
+                  name="roeMode"
+                  checked={roeFilterMode === 'HIGH_OR_UP'}
+                  onChange={() => setRoeFilterMode('HIGH_OR_UP')}
+                  className="accent-emerald-500"
+                />
+                <span>고ROE 이거나(OR) 전분기 대비 ROE 증가</span>
+              </label>
+              <span className="text-gray-600">|</span>
+              <label className="flex items-center gap-1 cursor-pointer text-indigo-300 font-bold">
+                <input
+                  type="radio"
+                  name="roeMode"
+                  checked={roeFilterMode === 'HIGH_AND_UP'}
+                  onChange={() => setRoeFilterMode('HIGH_AND_UP')}
+                  className="accent-indigo-500"
+                />
+                <span>고ROE 이면서 동시에(AND) 전분기 대비 증가</span>
+              </label>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => saveCurrentFilterConfig(true)}
+              disabled={savingConfig}
+              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-extrabold text-xs cursor-pointer transition shadow border border-amber-300/60 flex items-center gap-1"
+            >
+              <span>💾</span>
+              <span>{savingConfig ? '저장 중...' : '필터 설정 저장 (고정)'}</span>
+            </button>
           </div>
         </div>
 

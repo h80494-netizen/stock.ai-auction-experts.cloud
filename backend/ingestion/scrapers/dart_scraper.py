@@ -202,64 +202,62 @@ class DartScraper:
         if not collected_reports:
             return []
 
-        # 연도별 4Q 단일 실적 보정 계산
-        # 11011 (4Q)의 thstrm_amount는 연간 전체 누적이므로,
-        # 4Q 순수 분기 실적 = 연간 전체 실적 - 3분기 누적(11014 revenue_add)
-        calculated_list = []
-        for (y, q_code), r in collected_reports.items():
+        # 시간 오름차순 정렬 (연도 오름차순, 분기 오름차순) 후 4분기 롤링 합계(TTM) 산출
+        quarter_sort_weight = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+        sorted_keys = sorted(
+            collected_reports.keys(),
+            key=lambda k: (int(k[0]), quarter_sort_weight.get(k[1], 0)),
+        )
+
+        discrete_items = []
+        for y, q_code in sorted_keys:
+            r = collected_reports[(y, q_code)]
             if q_code == "11011":
-                # 연간 전체 실적
                 fy_rev = r["revenue_raw"]
                 fy_op = r["op_raw"]
                 fy_np = r["np_raw"]
-                
-                # 같은 해 3Q 누적 찾기
                 q3_rep = collected_reports.get((y, "11014"))
                 if q3_rep and q3_rep["revenue_add"] > 0:
                     q4_rev = max(0, fy_rev - q3_rep["revenue_add"])
                     q4_op = fy_op - q3_rep["op_add"]
                     q4_np = fy_np - q3_rep["np_add"]
                 else:
-                    # 3Q 누적이 없으면 1/4 균등 추정
                     q4_rev = fy_rev / 4.0
                     q4_op = fy_op / 4.0
                     q4_np = fy_np / 4.0
-                    
-                discrete_rev = q4_rev
-                discrete_op = q4_op
-                discrete_np = q4_np
+                discrete_rev, discrete_op, discrete_np = q4_rev, q4_op, q4_np
             else:
-                # 1Q, 2Q, 3Q는 DART에서 thstrm_amount가 순수 당해 3개월 분기 실적임
                 discrete_rev = r["revenue_raw"]
                 discrete_op = r["op_raw"]
                 discrete_np = r["np_raw"]
 
-            # 사용자 요구사항: "분기데이터 * 4" (연환산 규모)
-            annualized_rev = discrete_rev * 4.0
-            annualized_op = discrete_op * 4.0
-            annualized_np = discrete_np * 4.0
-
             q_label = "1Q" if q_code == "11013" else "2Q" if q_code == "11012" else "3Q" if q_code == "11014" else "4Q"
-
-            calculated_list.append({
+            discrete_items.append({
                 "ticker": ticker,
                 "year": y,
                 "quarter": q_code,
                 "quarter_label": q_label,
-                "assets": r["assets"],
-                "equity": r["equity"],
+                "assets": r["assets"],       # 해당 분기말 시점 자산총계 (절대 합산 안 함)
+                "equity": r["equity"],       # 해당 분기말 시점 자본총계 (절대 합산 안 함)
                 "liabilities": r["liabilities"],
-                "revenue": annualized_rev,              # 분기데이터 * 4
-                "operating_profit": annualized_op,    # 분기데이터 * 4
-                "net_profit": annualized_np,          # 분기데이터 * 4
                 "discrete_revenue": discrete_rev,
                 "discrete_operating_profit": discrete_op,
-                "discrete_net_profit": discrete_np
+                "discrete_net_profit": discrete_np,
             })
 
-        # 시간 오름차순 정렬 (연도 오름차순, 분기 오름차순)
-        quarter_sort_weight = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
-        calculated_list.sort(key=lambda x: (int(x["year"]), quarter_sort_weight.get(x["quarter"], 0)))
+        calculated_list = []
+        for idx, item in enumerate(discrete_items):
+            win = discrete_items[max(0, idx - 3) : idx + 1]
+            factor = 4.0 / len(win) if win else 1.0
+            ttm_rev = sum(w["discrete_revenue"] for w in win) * factor
+            ttm_op = sum(w["discrete_operating_profit"] for w in win) * factor
+            ttm_np = sum(w["discrete_net_profit"] for w in win) * factor
+            calculated_list.append({
+                **item,
+                "revenue": ttm_rev,              # 최근 4분기 롤링 합계 (TTM, 예: 작년 4Q~금년 3Q)
+                "operating_profit": ttm_op,      # 최근 4분기 롤링 합계 (TTM)
+                "net_profit": ttm_np,            # 최근 4분기 롤링 합계 (TTM)
+            })
 
         # 최근 12개 분기만 슬라이싱
         recent_12 = calculated_list[-12:]

@@ -279,10 +279,9 @@ def get_naver_fundamentals(code: str):
             top_bps = float(fund_data['bps']) if isinstance(fund_data.get('bps'), (int, float)) else 0.0
 
             is_q = (api_period == 'quarter')
-            annual_mult = 4.0 if is_q else 1.0
 
             sorted_keys = sorted(list(periods.keys()))
-            out_list = []
+            raw_list = []
             for k in sorted_keys:
                 p_obj = periods[k]
                 ym = p_obj.get('raw_ym', '')
@@ -290,8 +289,6 @@ def get_naver_fundamentals(code: str):
 
                 # DART DB 값(특히 2026년 3분기 202609 등 네이버에서 '-'로 비어있는 확정 공시 분기)으로 영업이익/순이익/자본총계 즉시 보강
                 if d_row:
-                    # DART 테이블의 revenue, operating_profit, net_profit은 (분기순수실적 * 4 연환산)으로 저장되어 있으므로
-                    # 분기 재무제표에서는 1/4(순수 분기 실적)로, 연간에서는 그대로 반영
                     d_div = 4.0 if is_q else 1.0
                     if not p_obj.get('revenue') and d_row.get('revenue'):
                         p_obj['revenue'] = float(d_row['revenue']) / d_div
@@ -301,11 +298,14 @@ def get_naver_fundamentals(code: str):
                         p_obj['net_profit'] = float(d_row['net_profit']) / d_div
                     if not p_obj.get('equity') and d_row.get('equity'):
                         p_obj['equity'] = float(d_row['equity'])
-                    # DART에 실제 공시된 분기(예: 202609 = 2026.3Q)는 추정치(E) 꼬리표 제거
                     p_obj['is_estimate'] = False
                     p_obj['period'] = ym
+                raw_list.append(p_obj)
 
+            out_list = []
+            for idx, p_obj in enumerate(raw_list):
                 np_val = float(p_obj.get('net_profit') or 0.0)
+                op_val = float(p_obj.get('operating_profit') or 0.0)
                 eq_val = float(p_obj.get('equity') or 0.0)
                 eps_val = float(p_obj.get('eps') or 0.0)
                 bps_val = float(p_obj.get('bps') or 0.0)
@@ -322,7 +322,7 @@ def get_naver_fundamentals(code: str):
                         shares = eq_val / bps_val
                         fund_data['shares'] = int(round(shares))
 
-                # 2) 자본총계(equity) 직접 계산: BPS * 발행주식수 또는 DART 자본총계
+                # 2) 자본총계(equity) 직접 계산: 해당 분기말 시점 자본총계 (BPS * 발행주식수 또는 DART 분기말 자본총계, 절대 합산하지 않음!)
                 if eq_val <= 0:
                     if bps_val > 0 and shares > 0:
                         eq_val = bps_val * shares
@@ -333,7 +333,7 @@ def get_naver_fundamentals(code: str):
                 if eq_val > 0:
                     p_obj['equity'] = eq_val
 
-                # 3) BPS 직접 계산: 자본총계 / 발행주식수 (또는 상단 BPS 폴백)
+                # 3) BPS 직접 계산: 해당 분기말 자본총계 / 발행주식수
                 if bps_val <= 0:
                     if eq_val > 0 and shares > 0:
                         bps_val = eq_val / shares
@@ -348,38 +348,79 @@ def get_naver_fundamentals(code: str):
                 if eps_val != 0:
                     p_obj['eps'] = round(eps_val, 0)
 
-                # 5) 해당 기간 기준 주가(ref_price): 네이버 PBR*BPS 또는 PER*EPS 역산 주가 우선, 없으면 현재주가 반영
+                # ★ 분기(quarter) 실적의 경우: 직전 4개 분기 롤링 합계(TTM, 예: 3분기는 작년 4Q~금년 3Q 4분기 합산)로
+                # net_profit_ttm, operating_profit_ttm, eps_ttm을 산출하고, 자본(equity/bps)은 해당 분기말 시점 값을 사용하여 ROE, PER, PBR을 계산!
+                if is_q:
+                    win = raw_list[max(0, idx - 3) : idx + 1]
+                    valid_np = [float(w.get('net_profit') or 0.0) for w in win if w.get('net_profit') is not None]
+                    valid_op = [float(w.get('operating_profit') or 0.0) for w in win if w.get('operating_profit') is not None]
+                    valid_eps = [float(w.get('eps') or 0.0) for w in win if w.get('eps') is not None]
+                    if len(valid_np) >= 2:
+                        ttm_np = sum(valid_np) * (4.0 / len(valid_np))
+                    else:
+                        ttm_np = np_val * 4.0
+                    if len(valid_op) >= 2:
+                        ttm_op = sum(valid_op) * (4.0 / len(valid_op))
+                    else:
+                        ttm_op = op_val * 4.0
+                    if shares > 0 and ttm_np != 0:
+                        ttm_eps = ttm_np / shares
+                    elif len(valid_eps) >= 2:
+                        ttm_eps = sum(valid_eps) * (4.0 / len(valid_eps))
+                    else:
+                        ttm_eps = eps_val * 4.0
+                    p_obj['net_profit_ttm'] = ttm_np
+                    p_obj['operating_profit_ttm'] = ttm_op
+                    p_obj['eps_ttm'] = round(ttm_eps, 0)
+                else:
+                    ttm_np = np_val
+                    ttm_op = op_val
+                    ttm_eps = eps_val
+                    p_obj['net_profit_ttm'] = ttm_np
+                    p_obj['operating_profit_ttm'] = ttm_op
+                    p_obj['eps_ttm'] = round(ttm_eps, 0)
+
+                # 5) 해당 기간 기준 주가(ref_price): 네이버 PBR*BPS 또는 현재주가 반영
                 ref_price = cur_price
                 if pbr_val > 0 and bps_val > 0:
                     ref_price = pbr_val * bps_val
-                elif per_val > 0 and eps_val > 0:
-                    ref_price = per_val * (eps_val * annual_mult)
+                elif per_val > 0 and ttm_eps > 0:
+                    ref_price = per_val * ttm_eps
 
-                # 6) PBR 직접 계산: 주가 / BPS
+                # 6) PBR 직접 계산: 주가 / 해당 분기말 BPS
                 if pbr_val <= 0 and ref_price > 0 and bps_val > 0:
                     pbr_val = ref_price / bps_val
                 if pbr_val > 0:
                     p_obj['pbr'] = round(pbr_val, 2)
 
-                # 7) ROE(%) 직접 계산: (연환산 순이익 / 자본총계)*100 또는 (연환산 EPS / BPS)*100
-                if roe_val == 0:
-                    if np_val != 0 and eq_val > 0:
-                        roe_val = ((np_val * annual_mult) / eq_val) * 100.0
-                    elif eps_val != 0 and bps_val > 0:
-                        roe_val = ((eps_val * annual_mult) / bps_val) * 100.0
+                # 7) ROE(%) 직접 계산: (최근 4분기 롤링 합산 순이익 TTM / 해당 분기말 자본총계)*100
+                if is_q:
+                    if ttm_np != 0 and eq_val > 0:
+                        roe_val = (ttm_np / eq_val) * 100.0
+                    elif ttm_eps != 0 and bps_val > 0:
+                        roe_val = (ttm_eps / bps_val) * 100.0
+                elif roe_val == 0:
+                    if ttm_np != 0 and eq_val > 0:
+                        roe_val = (ttm_np / eq_val) * 100.0
+                    elif ttm_eps != 0 and bps_val > 0:
+                        roe_val = (ttm_eps / bps_val) * 100.0
                 if roe_val != 0:
                     p_obj['roe'] = round(roe_val, 2)
 
-                # 8) PER 직접 계산: 주가 / 연환산 EPS (또는 PBR / (ROE/100))
-                if per_val == 0:
-                    if ref_price > 0 and eps_val != 0:
-                        per_val = ref_price / (eps_val * annual_mult)
+                # 8) PER 직접 계산: 주가 / 최근 4분기 롤링 합산 EPS(TTM)
+                if is_q:
+                    if ref_price > 0 and ttm_eps != 0:
+                        per_val = ref_price / ttm_eps
+                    elif pbr_val > 0 and roe_val != 0:
+                        per_val = pbr_val / (roe_val / 100.0)
+                elif per_val == 0:
+                    if ref_price > 0 and ttm_eps != 0:
+                        per_val = ref_price / ttm_eps
                     elif pbr_val > 0 and roe_val != 0:
                         per_val = pbr_val / (roe_val / 100.0)
                 if per_val != 0:
                     p_obj['per'] = round(per_val, 2)
 
-                # 영업이익/순이익/매출/EPS가 실제 존재하는 유효 실적 열만 포함 (미발표 빈 미래 컨센서스 열 제외)
                 has_any = any(
                     p_obj.get(fld) not in (None, 0, 0.0)
                     for fld in ('operating_profit', 'net_profit', 'revenue', 'eps')

@@ -177,6 +177,21 @@ def dart_screener(conditions: Dict[str, Any]):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+@app.get("/api/dart/screener-config")
+def api_get_dart_screener_config(request: Request, user_id: Optional[str] = None):
+    uid = _resolve_uid(user_id, request)
+    data = db.get_saved_tetris_screener_config(uid)
+    return {"success": True, **data}
+
+
+@app.post("/api/dart/screener-config")
+def api_save_dart_screener_config(payload: Dict[str, Any], request: Request):
+    uid = _resolve_uid(payload.get("user_id"), request)
+    cfg_input = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+    data = db.save_tetris_screener_config(cfg_input, uid)
+    return {"success": True, **data}
+
 @app.get("/api/dart/fundamentals/{ticker}")
 def get_dart_fundamentals(ticker: str):
     clean_ticker = to_pure_ticker(ticker)

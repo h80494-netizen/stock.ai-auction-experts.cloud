@@ -1050,6 +1050,99 @@ def get_dart_screener_results(conditions: dict):
 
     return results
 
+
+DEFAULT_TETRIS_SCREENER_CONFIG = {
+    "roe_filter_mode": "HIGH_OR_UP",
+    "use_roe": True,
+    "min_roe": 10.0,
+    "max_roe": 80.0,
+    "use_qoq_roe": True,
+    "min_qoq_roe_diff": 1.0,
+    "min_roe_floor_for_qoq": 4.0,
+    "use_pbr": True,
+    "min_pbr": 0.15,
+    "max_pbr": 1.2,
+    "use_qoq_pbr_limit": True,
+    "max_qoq_pbr_diff": 0.15,
+    "max_qoq_pbr_growth_pct": 15.0,
+    "use_per": True,
+    "min_per": 1.0,
+    "max_per": 15.0,
+    "use_roe_pbr_ratio": True,
+    "min_roe_pbr_ratio": 10.0,
+    "use_price_change": False,
+    "min_price_change": -20.0,
+    "max_price_change": 25.0,
+    "market_filter": "ALL",
+    "sort_by": "ROE_PBR_RATIO",
+}
+
+
+def get_saved_tetris_screener_config(user_id: str = "admin") -> dict:
+    uid = _norm_uid(user_id)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tetris_screener_saved_config (
+            user_id TEXT PRIMARY KEY,
+            config_json TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    c.execute("SELECT config_json, updated_at FROM tetris_screener_saved_config WHERE user_id = ?", (uid,))
+    row = c.fetchone()
+    conn.close()
+    cfg = dict(DEFAULT_TETRIS_SCREENER_CONFIG)
+    updated_at = None
+    if row and row["config_json"]:
+        try:
+            import json
+            loaded = json.loads(row["config_json"])
+            if isinstance(loaded, dict):
+                cfg.update(loaded)
+            updated_at = row["updated_at"]
+        except Exception:
+            pass
+    return {"config": cfg, "updated_at": updated_at}
+
+
+def save_tetris_screener_config(config_data: dict, user_id: str = "admin") -> dict:
+    import json
+    from datetime import datetime, timedelta
+    uid = _norm_uid(user_id)
+    merged = dict(DEFAULT_TETRIS_SCREENER_CONFIG)
+    if isinstance(config_data, dict):
+        for k in DEFAULT_TETRIS_SCREENER_CONFIG.keys():
+            if k in config_data and config_data[k] is not None:
+                merged[k] = config_data[k]
+    now_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tetris_screener_saved_config (
+            user_id TEXT PRIMARY KEY,
+            config_json TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    c.execute(
+        """
+        INSERT INTO tetris_screener_saved_config (user_id, config_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            config_json = excluded.config_json,
+            updated_at = excluded.updated_at
+        """,
+        (uid, json.dumps(merged, ensure_ascii=False), now_str),
+    )
+    conn.commit()
+    conn.close()
+    return {"config": merged, "updated_at": now_str}
+
 def _norm_uid(user_id: str = "admin") -> str:
     if not user_id or not str(user_id).strip():
         return "admin"

@@ -17,7 +17,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
   const [stockDetails, setStockDetails] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [businessSummary, setBusinessSummary] = useState<string>('');
-  const [financialPeriod, setFinancialPeriod] = useState<'annual'|'quarterly'>('annual');
+  const [financialPeriod, setFinancialPeriod] = useState<'annual'|'quarterly'>('quarterly');
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   const [liveQuotes, setLiveQuotes] = useState<Record<string, { price: number; change: number; changePct: number; volume?: number }>>({});
 
@@ -282,10 +282,12 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                   // If outstanding is 0 but we have mcap, calculate outstanding.
                   const outShares = s_shares > 0 ? s_shares : (mcap > 0 && currentPrice > 0 ? Math.floor(mcap / currentPrice) : 0);
                   
-                  // Get latest annual equity (자본총계)
-                  const annualFinancials = (stockDetails.financials || []).filter((f: any) => !f.period.includes('Q'));
-                  const latestEquity = annualFinancials.length > 0 ? annualFinancials[annualFinancials.length - 1].equity : 0;
-                  const latestBps = annualFinancials.length > 0 ? annualFinancials[annualFinancials.length - 1].bps : s.bps;
+                  // 최신 분기말(예: 3분기말) 시점의 자본총계(equity) 우선 반영 (자산/자본은 분기말 시점 기준이므로 절대 합산하지 않음)
+                  const quarterlyFinancials = (stockDetails.financials || []).filter((f: any) => String(f.period).includes('Q'));
+                  const annualFinancials = (stockDetails.financials || []).filter((f: any) => !String(f.period).includes('Q'));
+                  const refFinList = quarterlyFinancials.length > 0 ? quarterlyFinancials : annualFinancials;
+                  const latestEquity = refFinList.length > 0 ? refFinList[refFinList.length - 1].equity : 0;
+                  const latestBps = refFinList.length > 0 ? (refFinList[refFinList.length - 1].bps || s.bps) : s.bps;
                   const calculatedEquity = typeof latestBps === 'number' && latestBps > 0 ? latestBps * outShares : 0;
                   const totalEquity = latestEquity > 0 ? latestEquity : (calculatedEquity > 0 ? calculatedEquity : (s.capital || 0));
 
@@ -344,13 +346,17 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
 
             <div className="bg-[#111] border border-gray-800 p-4 rounded overflow-x-auto">
               <div className="flex justify-between items-center mb-3 border-b border-gray-700 pb-2">
-                <h3 className="font-bold">재무제표</h3>
+                <h3 className="font-bold">재무제표 {financialPeriod === 'quarterly' ? '(분기 4Q 롤링 TTM)' : '(연간)'}</h3>
                 <div className="flex gap-2">
-                  <button onClick={() => setFinancialPeriod('annual')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'annual' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>연간</button>
-                  <button onClick={() => setFinancialPeriod('quarterly')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'quarterly' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>분기</button>
+                  <button onClick={() => setFinancialPeriod('quarterly')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'quarterly' ? 'bg-blue-600 text-white font-bold' : 'bg-gray-800 text-gray-400'}`}>분기 (4Q 롤링합계)</button>
+                  <button onClick={() => setFinancialPeriod('annual')} className={`px-2 py-1 text-xs rounded cursor-pointer ${financialPeriod === 'annual' ? 'bg-blue-600 text-white font-bold' : 'bg-gray-800 text-gray-400'}`}>연간</button>
                 </div>
               </div>
-              <div className="text-right text-[10px] text-gray-500 mb-1">(단위: 억원, 원, %, 배 · 주가 및 발행주식수 연동 직접 계산)</div>
+              <div className="text-right text-[10px] text-gray-400 mb-1">
+                {financialPeriod === 'quarterly'
+                  ? '(* 이익/EPS: 직전 4개 분기 롤링 합계[예: 작년 4Q~금년 3Q 합산] · 자본/BPS: 해당 분기말 시점 잔액 [비합산] · ROE/PER/PBR: 4분기 롤링 이익 ÷ 분기말 자본)'
+                  : '(단위: 억원, 원, %, 배 · 주가 및 발행주식수 연동)'}
+              </div>
               {(() => {
                 const s = stockDetails.stock || {};
                 const curPrice = Number(livePrices[s.ticker] || s.price || s.currentPrice || 0);
@@ -358,68 +364,96 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                 const mcap = Number(s.marketCap || s.market_cap || (curPrice * rawShares) || 0);
                 const outShares = rawShares > 0 ? rawShares : (mcap > 0 && curPrice > 0 ? Math.floor(mcap / curPrice) : 0);
                 const isQuarterly = financialPeriod === 'quarterly';
-                const mult = isQuarterly ? 4.0 : 1.0;
 
-                const filteredFins = (stockDetails.financials || [])
-                  .filter((f: any) => (isQuarterly ? String(f.period).includes('Q') : !String(f.period).includes('Q')))
-                  .map((f: any) => {
-                    const op = Number(f.operating_profit ?? 0);
-                    const np = Number(f.net_profit ?? 0);
-                    let eq = Number(f.equity ?? 0);
-                    let eps = Number(f.eps ?? 0);
-                    let bps = Number(f.bps ?? 0);
-                    let per = Number(f.per ?? 0);
-                    let pbr = Number(f.pbr ?? 0);
-                    let roe = Number(f.roe ?? 0);
+                const rawFiltered = (stockDetails.financials || [])
+                  .filter((f: any) => (isQuarterly ? String(f.period).includes('Q') : !String(f.period).includes('Q')));
 
-                    // 1) EPS 직접 계산: 순이익 / 발행주식수
-                    if (!eps && np !== 0 && outShares > 0) {
+                const filteredFins = rawFiltered.map((f: any, idx: number) => {
+                  const singleOp = Number(f.operating_profit ?? 0);
+                  const singleNp = Number(f.net_profit ?? 0);
+                  let eq = Number(f.equity ?? 0);
+                  let singleEps = Number(f.eps ?? 0);
+                  let bps = Number(f.bps ?? 0);
+
+                  if (!singleEps && singleNp !== 0 && outShares > 0) {
+                    singleEps = singleNp / outShares;
+                  }
+                  // 자본(equity) 및 BPS는 해당 분기말 시점 값 그대로 사용 (절대 4분기 합산하지 않음)
+                  if (eq <= 0 && bps > 0 && outShares > 0) {
+                    eq = bps * outShares;
+                  }
+                  if (bps <= 0 && eq > 0 && outShares > 0) {
+                    bps = eq / outShares;
+                  }
+                  if (bps <= 0 && Number(s.bps) > 0) {
+                    bps = Number(s.bps);
+                    if (eq <= 0 && outShares > 0) eq = bps * outShares;
+                  }
+
+                  // 분기 모드에서는 이익(영업이익, 순이익, EPS)을 직전 4분기 롤링 합계(TTM)로 계산
+                  let op = singleOp;
+                  let np = singleNp;
+                  let eps = singleEps;
+                  if (isQuarterly) {
+                    if (f.net_profit_ttm !== undefined && Number(f.net_profit_ttm) !== 0) {
+                      np = Number(f.net_profit_ttm);
+                    } else {
+                      const win = rawFiltered.slice(Math.max(0, idx - 3), idx + 1);
+                      const vals = win.map((w: any) => Number(w.net_profit ?? 0));
+                      np = vals.length >= 2 ? vals.reduce((a: number, b: number) => a + b, 0) * (4.0 / vals.length) : singleNp * 4.0;
+                    }
+                    if (f.operating_profit_ttm !== undefined && Number(f.operating_profit_ttm) !== 0) {
+                      op = Number(f.operating_profit_ttm);
+                    } else {
+                      const win = rawFiltered.slice(Math.max(0, idx - 3), idx + 1);
+                      const vals = win.map((w: any) => Number(w.operating_profit ?? 0));
+                      op = vals.length >= 2 ? vals.reduce((a: number, b: number) => a + b, 0) * (4.0 / vals.length) : singleOp * 4.0;
+                    }
+                    if (f.eps_ttm !== undefined && Number(f.eps_ttm) !== 0) {
+                      eps = Number(f.eps_ttm);
+                    } else if (outShares > 0 && np !== 0) {
                       eps = np / outShares;
+                    } else {
+                      const win = rawFiltered.slice(Math.max(0, idx - 3), idx + 1);
+                      const vals = win.map((w: any) => Number(w.eps ?? 0));
+                      eps = vals.length >= 2 ? vals.reduce((a: number, b: number) => a + b, 0) * (4.0 / vals.length) : singleEps * 4.0;
                     }
-                    // 2) 자본(equity) 및 BPS 상호 역산 계산
-                    if (eq <= 0 && bps > 0 && outShares > 0) {
-                      eq = bps * outShares;
-                    }
-                    if (bps <= 0 && eq > 0 && outShares > 0) {
-                      bps = eq / outShares;
-                    }
-                    if (bps <= 0 && Number(s.bps) > 0) {
-                      bps = Number(s.bps);
-                      if (eq <= 0 && outShares > 0) eq = bps * outShares;
-                    }
-                    // 3) PBR 직접 계산: 주가 / BPS
-                    if (pbr <= 0 && curPrice > 0 && bps > 0) {
-                      pbr = curPrice / bps;
-                    }
-                    // 4) ROE(%) 직접 계산: (연환산 순이익 / 자본)*100 또는 (연환산 EPS / BPS)*100
-                    if (!roe) {
-                      if (np !== 0 && eq > 0) {
-                        roe = ((np * mult) / eq) * 100.0;
-                      } else if (eps !== 0 && bps > 0) {
-                        roe = ((eps * mult) / bps) * 100.0;
-                      }
-                    }
-                    // 5) PER 직접 계산: 주가 / 연환산 EPS 또는 PBR / (ROE/100)
-                    if (!per) {
-                      if (curPrice > 0 && eps !== 0) {
-                        per = curPrice / (eps * mult);
-                      } else if (pbr > 0 && roe !== 0) {
-                        per = pbr / (roe / 100.0);
-                      }
-                    }
+                  }
 
-                    return {
-                      ...f,
-                      _op: op,
-                      _np: np,
-                      _eq: eq,
-                      _eps: eps,
-                      _bps: bps,
-                      _per: per,
-                      _pbr: pbr,
-                      _roe: roe,
-                    };
-                  });
+                  // PBR: 현재 주가 / 해당 분기말 BPS
+                  let pbr = Number(f.pbr ?? 0);
+                  if (curPrice > 0 && bps > 0) {
+                    pbr = curPrice / bps;
+                  }
+
+                  // ROE(%): (4분기 롤링 합산 순이익 / 해당 분기말 자본) * 100
+                  let roe = Number(f.roe ?? 0);
+                  if (np !== 0 && eq > 0) {
+                    roe = (np / eq) * 100.0;
+                  } else if (eps !== 0 && bps > 0) {
+                    roe = (eps / bps) * 100.0;
+                  }
+
+                  // PER: 현재 주가 / 4분기 롤링 합산 EPS
+                  let per = Number(f.per ?? 0);
+                  if (curPrice > 0 && eps !== 0) {
+                    per = curPrice / eps;
+                  } else if (pbr > 0 && roe !== 0) {
+                    per = pbr / (roe / 100.0);
+                  }
+
+                  return {
+                    ...f,
+                    _op: op,
+                    _np: np,
+                    _eq: eq,
+                    _eps: eps,
+                    _bps: bps,
+                    _per: per,
+                    _pbr: pbr,
+                    _roe: roe,
+                  };
+                });
 
                 return (
                   <table className="w-full text-xs text-right whitespace-nowrap">
@@ -433,7 +467,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                     </thead>
                     <tbody className="font-mono">
                       <tr className="border-b border-gray-800">
-                        <td className="py-2 text-left text-gray-400">영업이익</td>
+                        <td className="py-2 text-left text-gray-400">{isQuarterly ? '영업이익(4Q합)' : '영업이익'}</td>
                         {filteredFins.map((f: any) => (
                           <td key={f.period} className="px-1">
                             {f._op !== 0 ? (f._op / 100000000).toFixed(1) : '-'}
@@ -441,7 +475,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                         ))}
                       </tr>
                       <tr className="border-b border-gray-800">
-                        <td className="py-2 text-left text-gray-400">순이익</td>
+                        <td className="py-2 text-left text-gray-400">{isQuarterly ? '순이익(4Q합)' : '순이익'}</td>
                         {filteredFins.map((f: any) => (
                           <td key={f.period} className="px-1">
                             {f._np !== 0 ? (f._np / 100000000).toFixed(1) : '-'}
@@ -449,7 +483,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                         ))}
                       </tr>
                       <tr className="border-b border-gray-800">
-                        <td className="py-2 text-left text-gray-400">자본</td>
+                        <td className="py-2 text-left text-gray-400">{isQuarterly ? '자본(분기말)' : '자본'}</td>
                         {filteredFins.map((f: any) => (
                           <td key={f.period} className="px-1">
                             {f._eq > 0 ? Math.round(f._eq / 100000000).toLocaleString() : '-'}
@@ -457,7 +491,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                         ))}
                       </tr>
                       <tr className="border-b border-gray-800">
-                        <td className="py-2 text-left text-gray-400">EPS</td>
+                        <td className="py-2 text-left text-gray-400">{isQuarterly ? 'EPS(4Q합)' : 'EPS'}</td>
                         {filteredFins.map((f: any) => (
                           <td key={f.period} className="px-1 text-green-400">
                             {f._eps !== 0 ? Math.round(f._eps).toLocaleString() : '-'}
@@ -465,7 +499,7 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                         ))}
                       </tr>
                       <tr className="border-b border-gray-800">
-                        <td className="py-2 text-left text-gray-400">BPS</td>
+                        <td className="py-2 text-left text-gray-400">{isQuarterly ? 'BPS(분기말)' : 'BPS'}</td>
                         {filteredFins.map((f: any) => (
                           <td key={f.period} className="px-1">
                             {f._bps > 0 ? Math.round(f._bps).toLocaleString() : '-'}
