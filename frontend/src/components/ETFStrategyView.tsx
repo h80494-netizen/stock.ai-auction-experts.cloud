@@ -867,6 +867,130 @@ export default function ETFStrategyView({
     };
   }, [simData, period]);
 
+  // 📜 ETF 투자전략 일별 매매(기존 ETF 매도 + 신규 ETF 동시 매수 / 미매매 시 Holding) 및 일별손익·수익률 원장 산출
+  const etfTradingLedgerRows = useMemo(() => {
+    if (!simData || !Array.isArray(simData.dates) || simData.dates.length < 2) return [];
+
+    let startDate = '1900-01-01';
+    const latestDateStr = simData.dates[simData.dates.length - 1];
+    const today = latestDateStr ? new Date(latestDateStr + 'T00:00:00') : new Date();
+
+    if (period === 'YTD(26.01~)') {
+      startDate = '2026-01-02';
+    } else if (period === '3개월') {
+      const d = new Date(today);
+      d.setMonth(d.getMonth() - 3);
+      startDate = d.toISOString().split('T')[0];
+    } else if (period === '6개월') {
+      const d = new Date(today);
+      d.setMonth(d.getMonth() - 6);
+      startDate = d.toISOString().split('T')[0];
+    } else if (period === '12개월') {
+      const d = new Date(today);
+      d.setFullYear(d.getFullYear() - 1);
+      startDate = d.toISOString().split('T')[0];
+    }
+
+    const budgetKrw = Math.max(100000, Number(kisOrderBudgetKrw) || 50000000);
+    const fx = usdKrwRate > 500 ? usdKrwRate : 1400;
+    const rawPricesMap: Record<string, number[]> = simData.etf_prices || {};
+    const livePriceMap: Record<string, number> = {};
+    data.forEach((it: any) => {
+      if (it?.ticker && Number(it.current_price) > 0) {
+        livePriceMap[it.ticker] = Number(it.current_price);
+      }
+    });
+
+    const getTickerPriceAt = (tkr: string, idx: number) => {
+      if (!tkr || tkr === 'CASH' || tkr === 'Waiting') return 0;
+      const arr = rawPricesMap[tkr];
+      if (arr && arr[idx] && Number(arr[idx]) > 0) return Number(arr[idx]);
+      return livePriceMap[tkr] || 100;
+    };
+
+    const indices: number[] = [];
+    for (let i = 0; i < simData.dates.length; i++) {
+      if (simData.dates[i] >= startDate && simData.selected_etf[i] !== 'Waiting') {
+        indices.push(i);
+      }
+    }
+    if (indices.length === 0) return [];
+
+    const baseStrat = Number(simData.strategy[indices[0]]) || 100;
+    let runningCumPnlKrw = 0;
+    const rowsChrono: any[] = [];
+
+    for (let k = 0; k < indices.length; k++) {
+      const idx = indices[k];
+      const prevIdx = idx > 0 ? idx - 1 : idx;
+      const dateStr = simData.dates[idx];
+      const prevHeldRaw = idx > 0 ? String(simData.selected_etf[prevIdx] || 'CASH') : 'CASH';
+      const prevHeld = prevHeldRaw === 'Waiting' || !prevHeldRaw ? 'CASH' : prevHeldRaw;
+      const targetRaw = String(simData.selected_etf[idx] || 'CASH');
+      const targetEtf = targetRaw === 'Waiting' || !targetRaw ? 'CASH' : targetRaw;
+
+      const prevStratVal = idx > 0 ? Number(simData.strategy[prevIdx]) || baseStrat : baseStrat;
+      const curStratVal = Number(simData.strategy[idx]) || prevStratVal;
+      const dailyRetPct = k === 0 ? 0 : prevStratVal > 0 ? ((curStratVal - prevStratVal) / prevStratVal) * 100 : 0;
+      const dailyPnlKrw = Math.round(budgetKrw * (dailyRetPct / 100));
+      runningCumPnlKrw += dailyPnlKrw;
+      const cumRetPct = baseStrat > 0 ? ((curStratVal / baseStrat) - 1) * 100 : 0;
+
+      const prevPriceUsd = getTickerPriceAt(prevHeld.split(',')[0].trim(), idx);
+      const targetPriceUsd = getTickerPriceAt(targetEtf.split(',')[0].trim(), idx);
+      const prevQty = prevPriceUsd > 0 ? Math.max(1, Math.floor(budgetKrw / (prevPriceUsd * fx))) : 0;
+      const targetQty = targetPriceUsd > 0 ? Math.max(1, Math.floor(budgetKrw / (targetPriceUsd * fx))) : 0;
+
+      const isSameHolding = prevHeld === targetEtf;
+      let tradeStatus = 'Holding';
+      let sellEtfDisplay = '-';
+      let buyEtfDisplay = '-';
+      let simultaneousOrderLabel = `🟢 Holding (${targetEtf === 'CASH' ? 'CASH 현금유지' : `${targetEtf} ${targetQty.toLocaleString()}주 계속 보유`})`;
+
+      if (!isSameHolding) {
+        if (prevHeld !== 'CASH' && targetEtf !== 'CASH') {
+          tradeStatus = 'ROTATE (동시 매도·매수)';
+          sellEtfDisplay = `${prevHeld} (${prevQty.toLocaleString()}주 @ $${prevPriceUsd.toFixed(2)})`;
+          buyEtfDisplay = `${targetEtf} (${targetQty.toLocaleString()}주 @ $${targetPriceUsd.toFixed(2)})`;
+          simultaneousOrderLabel = `⚡ [동시주문] 매도(SELL) ${prevHeld} ${prevQty.toLocaleString()}주 + 매수(BUY) ${targetEtf} ${targetQty.toLocaleString()}주`;
+        } else if (prevHeld === 'CASH' && targetEtf !== 'CASH') {
+          tradeStatus = 'NEW BUY (신규 매수)';
+          sellEtfDisplay = 'CASH (매도 없음)';
+          buyEtfDisplay = `${targetEtf} (${targetQty.toLocaleString()}주 @ $${targetPriceUsd.toFixed(2)})`;
+          simultaneousOrderLabel = `🚀 [신규매수] 매수(BUY) ${targetEtf} ${targetQty.toLocaleString()}주`;
+        } else if (prevHeld !== 'CASH' && targetEtf === 'CASH') {
+          tradeStatus = 'LIQUIDATE (전량 매도 → CASH)';
+          sellEtfDisplay = `${prevHeld} (${prevQty.toLocaleString()}주 @ $${prevPriceUsd.toFixed(2)})`;
+          buyEtfDisplay = 'CASH (현금 대피)';
+          simultaneousOrderLabel = `🛡️ [현금전환] 매도(SELL) ${prevHeld} ${prevQty.toLocaleString()}주 → CASH 보유`;
+        }
+      }
+
+      rowsChrono.push({
+        date: dateStr,
+        prevHeld,
+        targetEtf,
+        prevPriceUsd,
+        targetPriceUsd,
+        prevQty,
+        targetQty,
+        isHolding: isSameHolding,
+        tradeStatus,
+        sellEtfDisplay,
+        buyEtfDisplay,
+        simultaneousOrderLabel,
+        dailyRetPct: Number(dailyRetPct.toFixed(2)),
+        cumRetPct: Number(cumRetPct.toFixed(2)),
+        dailyPnlKrw,
+        cumPnlKrw: runningCumPnlKrw,
+        dailyPnlUsd: Number((dailyPnlKrw / fx).toFixed(2)),
+        strategyIndex: Number(((curStratVal / baseStrat) * 100).toFixed(2)),
+      });
+    }
+
+    return rowsChrono.reverse();
+  }, [simData, period, kisOrderBudgetKrw, usdKrwRate, data]);
+
   if (loading && (!data || data.length === 0)) {
     return <div className="p-4 animate-pulse text-xl font-bold text-indigo-300">⚡ ETF 전략 분석 및 백테스트 고속 로딩 중...</div>;
   }
@@ -2086,21 +2210,54 @@ export default function ETFStrategyView({
 
             <div className="bg-slate-900/90 border border-amber-500/40 rounded-xl p-3.5 space-y-1.5">
               <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                <span>③ 장마감 10분 전(15:50 ET) 최종신호 예약 &amp; 교체 판정</span>
+                <span>③ 장마감 10분 전(15:50 ET) 동시 주문(매도+매수) &amp; Holding 판정</span>
                 <span className="font-mono text-amber-300">
                   {kisAccount?.market_session?.et_time_str || 'US Market'}
                 </span>
               </div>
-              <div
-                className={`text-sm font-extrabold ${
-                  kisAccount?.rotation_needed ? 'text-amber-300' : 'text-emerald-300'
-                }`}
-              >
-                {kisAccount?.signal_status_label || '시그널 상태 조회 중...'}
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold font-mono border ${
+                    kisAccount?.rotation_needed
+                      ? 'bg-amber-500/20 border-amber-400 text-amber-200 animate-pulse'
+                      : 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                  }`}
+                >
+                  {kisAccount?.rotation_needed ? '⚡ ROTATION (매도+매수 동시주문)' : '🟢 Holding (현재 보유 ETF 유지)'}
+                </span>
+                <span
+                  className={`text-xs font-extrabold ${
+                    kisAccount?.rotation_needed ? 'text-amber-300' : 'text-emerald-300'
+                  }`}
+                >
+                  {kisAccount?.signal_status_label || '시그널 상태 조회 중...'}
+                </span>
               </div>
-              <div className="text-[11px] text-slate-300 leading-snug">
-                • <strong>예약 실행 시각:</strong> {kisAccount?.market_session?.auto_close_order_time_kst || '05:50 KST (15:50 ET · 장마감 10분 전)'}
-                <br />• <strong>예약 실행 규칙:</strong> 기존 보유({kisAccount?.HeldDisplay || 'CASH'}) 전량 매도 + 총 <strong>{formatKrwMan(kisOrderBudgetKrw)}</strong> 한도 내 최종 추천 ETF 가격별 산출 수량 동시 종가매수
+              <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-2 text-[11px] font-mono space-y-1">
+                {kisAccount?.rotation_needed ? (
+                  <>
+                    <div className="text-rose-300 font-bold">
+                      📤 [동시 매도(SELL) ETF]:{' '}
+                      {kisAccount?.sell_plan && kisAccount.sell_plan.length > 0
+                        ? kisAccount.sell_plan
+                            .map((s: any) => `${s.ticker} ${Number(s.qty).toLocaleString()}주(@$${Number(s.est_price_usd || 0).toFixed(2)})`)
+                            .join(', ')
+                        : '매도 대상 없음 (신규 진입)'}
+                    </div>
+                    <div className="text-emerald-300 font-bold">
+                      📥 [동시 매수(BUY) ETF]:{' '}
+                      {kisAccount?.buy_plan && kisAccount.buy_plan.length > 0
+                        ? kisAccount.buy_plan
+                            .map((b: any) => `${b.ticker} ${Number(b.qty).toLocaleString()}주(@$${Number(b.est_price_usd || 0).toFixed(2)})`)
+                            .join(', ')
+                        : 'CASH (현금 보유)'}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-emerald-300 font-bold">
+                    🟢 [Holding 상태]: 기존 보유 ETF({kisAccount?.HeldDisplay || 'CASH'})와 오늘 추천 ETF가 동일하므로 매도/매수 없이 Holding(보유 유지)합니다.
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2230,7 +2387,9 @@ export default function ETFStrategyView({
                 }
                 className="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-extrabold shadow-lg cursor-pointer"
               >
-                ⚡ 현재 시그널로 즉시 체결 ({formatKrwMan(kisOrderBudgetKrw)} 한도)
+                {kisAccount?.rotation_needed
+                  ? `⚡ 매도ETF + 매수ETF 동시 종가주문 즉시 실행 (${formatKrwMan(kisOrderBudgetKrw)} 한도)`
+                  : `🟢 Holding 확인 / 한도수량 즉시 동기화 (${formatKrwMan(kisOrderBudgetKrw)})`}
               </button>
               <button
                 type="button"
@@ -2618,6 +2777,180 @@ export default function ETFStrategyView({
           <p className="text-sm text-gray-400 mt-2 text-center">
             현재 모멘텀 랭킹 1위인 {topETF.ticker}의 해당 기간 단독 수익률(Base=100)입니다.
           </p>
+        </div>
+      </div>
+
+      {/* 🕒 ETF 투자전략 일별 교체매매(기존 ETF 매도 + 신규 ETF 동시 매수 / 미매매 시 Holding) & 일별손익·수익률 원장 표 */}
+      <div className="bg-slate-900/95 border border-emerald-500/40 rounded-xl p-4 shadow-xl space-y-3 mt-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+          <div>
+            <h3 className="text-base sm:text-lg font-extrabold text-white flex flex-wrap items-center gap-2">
+              <span>📋 ETF 투자전략 일별 매매(기존 ETF 매도 + 신규 ETF 동시 매수 / Holding) &amp; 일별손익·수익률 원장</span>
+              <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/50 text-emerald-300 text-xs font-mono">
+                조회구간: {period} ({etfTradingLedgerRows.length}거래일 · 기준원금 {formatKrwMan(kisOrderBudgetKrw)})
+              </span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-1">
+              추천 1위 ETF가 바뀌는 날에는 <strong className="text-amber-300">기존 보유 ETF 전량 매도(SELL)와 신규 추천 ETF 매수(BUY)가 동시 주문</strong>으로 집행되며, 현재 보유 ETF가 그대로 유지되어 매매가 없는 날은 <strong className="text-emerald-300">Holding</strong>으로 표시됩니다.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+            <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 text-slate-300">
+              구간 교체매매:{' '}
+              <strong className="text-amber-300">
+                {etfTradingLedgerRows.filter((r: any) => !r.isHolding).length}회
+              </strong>
+            </span>
+            <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 text-slate-300">
+              Holding 유지:{' '}
+              <strong className="text-emerald-300">
+                {etfTradingLedgerRows.filter((r: any) => r.isHolding).length}일
+              </strong>
+            </span>
+            <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 text-slate-300">
+              구간 누적손익:{' '}
+              <strong
+                className={
+                  (etfTradingLedgerRows[0]?.cumPnlKrw ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }
+              >
+                {(etfTradingLedgerRows[0]?.cumPnlKrw ?? 0) >= 0 ? '+' : ''}
+                {Number(etfTradingLedgerRows[0]?.cumPnlKrw ?? 0).toLocaleString()}원 (
+                {(etfTradingLedgerRows[0]?.cumRetPct ?? 0) >= 0 ? '+' : ''}
+                {Number(etfTradingLedgerRows[0]?.cumRetPct ?? 0).toFixed(2)}%)
+              </strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+          <table className="w-full text-xs text-left border-collapse font-mono whitespace-nowrap">
+            <thead>
+              <tr className="bg-slate-950 text-slate-300 border-b border-slate-700 sticky top-0 z-10">
+                <th className="p-2.5">거래일자</th>
+                <th className="p-2.5 text-center">전일 보유 ETF</th>
+                <th className="p-2.5 text-center">당일 목표 ETF</th>
+                <th className="p-2.5 text-center">매매 상태</th>
+                <th className="p-2.5 text-rose-300">매도 ETF (기존 매각)</th>
+                <th className="p-2.5 text-emerald-300">매수 ETF (신규 편입)</th>
+                <th className="p-2.5">동시 주문 / 보유 상세</th>
+                <th className="p-2.5 text-right text-emerald-300">일간 수익률(%)</th>
+                <th className="p-2.5 text-right">일별 손익(원 / USD)</th>
+                <th className="p-2.5 text-right text-sky-300">누적 수익률(%)</th>
+                <th className="p-2.5 text-right">누적 손익(원)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/80">
+              {etfTradingLedgerRows.map((row: any, idx: number) => (
+                <tr
+                  key={row.date}
+                  className={`hover:bg-slate-800/60 transition-colors ${
+                    !row.isHolding
+                      ? 'bg-amber-950/20'
+                      : idx === 0
+                      ? 'bg-emerald-950/15'
+                      : ''
+                  }`}
+                >
+                  <td className="p-2.5 font-bold text-white">
+                    {row.date}
+                    {idx === 0 && (
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-900/80 border border-emerald-400/50 text-emerald-200 text-[10px] font-sans font-extrabold">
+                        최신
+                      </span>
+                    )}
+                  </td>
+                  <td className="p-2.5 text-center">
+                    <span
+                      className="px-2 py-0.5 rounded font-bold text-xs"
+                      style={{
+                        backgroundColor: `${ETF_COLORS[row.prevHeld] || '#475569'}25`,
+                        color: ETF_COLORS[row.prevHeld] || '#cbd5e1',
+                        border: `1px solid ${ETF_COLORS[row.prevHeld] || '#475569'}60`,
+                      }}
+                    >
+                      {row.prevHeld}
+                    </span>
+                  </td>
+                  <td className="p-2.5 text-center">
+                    <span
+                      className="px-2 py-0.5 rounded font-bold text-xs"
+                      style={{
+                        backgroundColor: `${ETF_COLORS[row.targetEtf] || '#475569'}30`,
+                        color: ETF_COLORS[row.targetEtf] || '#f8fafc',
+                        border: `1px solid ${ETF_COLORS[row.targetEtf] || '#475569'}80`,
+                      }}
+                    >
+                      {row.targetEtf}
+                    </span>
+                  </td>
+                  <td className="p-2.5 text-center">
+                    {row.isHolding ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 font-extrabold text-[11px]">
+                        Holding
+                      </span>
+                    ) : (
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-500/25 border border-amber-400 text-amber-200 font-extrabold text-[11px]">
+                        {row.tradeStatus}
+                      </span>
+                    )}
+                  </td>
+                  <td className={`p-2.5 font-bold ${row.isHolding ? 'text-slate-500' : 'text-rose-300'}`}>
+                    {row.sellEtfDisplay}
+                  </td>
+                  <td className={`p-2.5 font-bold ${row.isHolding ? 'text-slate-500' : 'text-emerald-300'}`}>
+                    {row.buyEtfDisplay}
+                  </td>
+                  <td className="p-2.5 font-sans text-[11px] text-slate-200">
+                    {row.simultaneousOrderLabel}
+                  </td>
+                  <td
+                    className={`p-2.5 text-right font-bold ${
+                      row.dailyRetPct > 0
+                        ? 'text-emerald-400'
+                        : row.dailyRetPct < 0
+                        ? 'text-rose-400'
+                        : 'text-slate-400'
+                    }`}
+                  >
+                    {row.dailyRetPct > 0 ? '+' : ''}
+                    {row.dailyRetPct.toFixed(2)}%
+                  </td>
+                  <td
+                    className={`p-2.5 text-right font-bold ${
+                      row.dailyPnlKrw > 0
+                        ? 'text-emerald-400'
+                        : row.dailyPnlKrw < 0
+                        ? 'text-rose-400'
+                        : 'text-slate-400'
+                    }`}
+                  >
+                    {row.dailyPnlKrw > 0 ? '+' : ''}
+                    {row.dailyPnlKrw.toLocaleString()}원{' '}
+                    <span className="text-[10px] text-slate-400 font-normal">
+                      ({row.dailyPnlUsd >= 0 ? '+' : ''}${row.dailyPnlUsd.toLocaleString()})
+                    </span>
+                  </td>
+                  <td
+                    className={`p-2.5 text-right font-bold ${
+                      row.cumRetPct >= 0 ? 'text-sky-300' : 'text-rose-400'
+                    }`}
+                  >
+                    {row.cumRetPct >= 0 ? '+' : ''}
+                    {row.cumRetPct.toFixed(2)}%
+                  </td>
+                  <td
+                    className={`p-2.5 text-right font-bold ${
+                      row.cumPnlKrw >= 0 ? 'text-emerald-300' : 'text-rose-400'
+                    }`}
+                  >
+                    {row.cumPnlKrw >= 0 ? '+' : ''}
+                    {row.cumPnlKrw.toLocaleString()}원
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
