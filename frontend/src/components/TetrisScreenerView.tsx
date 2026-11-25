@@ -1,5 +1,33 @@
 'use client';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+
+const SECTOR_PALETTE: string[] = [
+  '#10b981', // emerald
+  '#38bdf8', // sky
+  '#f59e0b', // amber
+  '#a855f7', // purple
+  '#f43f5e', // rose
+  '#2dd4bf', // teal
+  '#fb923c', // orange
+  '#818cf8', // indigo
+  '#facc15', // yellow
+  '#ec4899', // pink
+  '#4ade80', // green
+  '#60a5fa', // blue
+  '#c084fc', // violet
+  '#f87171', // red
+  '#22d3ee', // cyan
+  '#a3e635', // lime
+];
+
+const getSectorColor = (sectorName: string, indexHint: number = 0) => {
+  if (!sectorName) return '#94a3b8';
+  let hash = 0;
+  for (let i = 0; i < sectorName.length; i++) {
+    hash = (hash * 31 + sectorName.charCodeAt(i)) >>> 0;
+  }
+  return SECTOR_PALETTE[(hash + indexHint) % SECTOR_PALETTE.length];
+};
 
 export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks, stocks }: any) {
   // 1. ROE 및 전분기 대비(QoQ) ROE 증가 결합 모드
@@ -42,14 +70,33 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   const [maxPriceChange, setMaxPriceChange] = useState<number>(25);
 
   const [marketFilter, setMarketFilter] = useState<'ALL' | 'KOSPI' | 'KOSDAQ'>('ALL');
+  const [selectedSector, setSelectedSector] = useState<string>('ALL');
+  const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
   const [sortBy, setSortBy] = useState<string>('ROE_PBR_RATIO');
 
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [hoveredStock, setHoveredStock] = useState<any | null>(null);
-  const [showQoqTrajectory, setShowQoqTrajectory] = useState<boolean>(true);
+  const [showQoqTrajectory, setShowQoqTrajectory] = useState<boolean>(false);
   const [showTopLabelsOnly, setShowTopLabelsOnly] = useState<boolean>(true);
+
+  // 🔍 산점도 줌인/줌아웃 & 박스 드래그 확대 & 팬(Pan) 상태
+  const [zoomBounds, setZoomBounds] = useState<{
+    xMin: number;
+    xMax: number;
+    yMin: number;
+    yMax: number;
+  } | null>(null);
+  const [interactionMode, setInteractionMode] = useState<'BOX_ZOOM' | 'PAN'>('BOX_ZOOM');
+  const [dragStartPt, setDragStartPt] = useState<{ x: number; y: number } | null>(null);
+  const [dragCurrPt, setDragCurrPt] = useState<{ x: number; y: number } | null>(null);
+  const [panStartState, setPanStartState] = useState<{
+    svgX: number;
+    svgY: number;
+    bounds: { xMin: number; xMax: number; yMin: number; yMax: number };
+  } | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
   const executeScreener = async (overrideParams?: Record<string, any>) => {
     setLoading(true);
@@ -92,6 +139,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       const data = await res.json();
       if (data.success) {
         setResults(data.results || []);
+        setZoomBounds(null);
       } else {
         throw new Error(data.error || '필터링 실패');
       }
@@ -272,6 +320,35 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
     const s = combined.find((x: any) => x.ticker === item.ticker || x.ticker?.includes(item.ticker));
     return s ? s.name : item.ticker;
   };
+
+  // 섹터별 종목 수 집계 및 섹터 필터링된 결과
+  const sectorStats = useMemo(() => {
+    const counts: Record<string, number> = {};
+    results.forEach((it: any) => {
+      const sec = String(it.sector || '기타').trim() || '기타';
+      counts[sec] = (counts[sec] || 0) + 1;
+    });
+    return Object.entries(counts)
+      .map(([sector, count], idx) => ({
+        sector,
+        count,
+        color: getSectorColor(sector, idx),
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [results]);
+
+  const sectorColorMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    sectorStats.forEach((s) => {
+      map[s.sector] = s.color;
+    });
+    return map;
+  }, [sectorStats]);
+
+  const filteredResults = useMemo(() => {
+    if (!selectedSector || selectedSector === 'ALL') return results;
+    return results.filter((it: any) => (String(it.sector || '기타').trim() || '기타') === selectedSector);
+  }, [results, selectedSector]);
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a] text-gray-200 p-4 sm:p-6 overflow-y-auto space-y-5">
@@ -817,46 +894,169 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         </div>
       </div>
 
-      {/* X축: PBR (배), Y축: ROE (%) 사분면 밸류에이션 산점도 (Interactive Scatter Plot) */}
+      {/* X축: PBR (배), Y축: ROE (%) 사분면 밸류에이션 산점도 (Interactive Zoom & Sector Scatter Plot) */}
       {results.length > 0 && (() => {
         const W = 960;
-        const H = 430;
-        const padL = 64;
+        const H = 460;
+        const padL = 68;
         const padR = 36;
         const padT = 32;
-        const padB = 50;
+        const padB = 52;
         const plotW = W - padL - padR;
         const plotH = H - padT - padB;
 
-        const plotItems = results.slice(0, 150);
-        const pbrVals = plotItems.flatMap((it: any) => [
-          Number(it.pbr) || 0,
-          showQoqTrajectory ? Number(it.prev_q_pbr) || Number(it.pbr) || 0 : Number(it.pbr) || 0,
-        ]).filter((v) => v > 0);
-        const roeVals = plotItems.flatMap((it: any) => [
-          Number(it.roe) || 0,
-          showQoqTrajectory ? Number(it.prev_q_roe) || Number(it.roe) || 0 : Number(it.roe) || 0,
-        ]);
+        const plotItems = filteredResults.slice(0, 220);
 
-        const minXRaw = pbrVals.length ? Math.min(...pbrVals, 0.1) : 0;
-        const maxXRaw = pbrVals.length ? Math.max(...pbrVals, 1.2) : 2.0;
-        const xMin = Math.max(0, Number((minXRaw - 0.08).toFixed(2)));
-        const xMax = Number((maxXRaw + Math.max(0.15, (maxXRaw - minXRaw) * 0.12)).toFixed(2));
-        const xRange = Math.max(0.1, xMax - xMin);
+        // 현재 위치(pbr, roe) 기준으로 기본 축 스케일을 잡아서 전분기 극단적 적자(-168% ROE 등) 때문에 점들이 한쪽에 찌그러지는 현상 방지
+        const curPbrVals = plotItems.map((it: any) => Number(it.pbr) || 0).filter((v) => v > 0);
+        const curRoeVals = plotItems.map((it: any) => Number(it.roe) || 0);
 
-        const minYRaw = roeVals.length ? Math.min(...roeVals, 0) : 0;
-        const maxYRaw = roeVals.length ? Math.max(...roeVals, 20) : 30;
-        const yMin = Number((minYRaw - Math.max(2, (maxYRaw - minYRaw) * 0.08)).toFixed(1));
-        const yMax = Number((maxYRaw + Math.max(4, (maxYRaw - minYRaw) * 0.12)).toFixed(1));
-        const yRange = Math.max(1, yMax - yMin);
+        const minXRaw = curPbrVals.length ? Math.min(...curPbrVals, 0.15) : 0.1;
+        const maxXRaw = curPbrVals.length ? Math.max(...curPbrVals, 1.05) : 1.5;
+        const defaultXMin = Math.max(0, Number((minXRaw - 0.06).toFixed(2)));
+        const defaultXMax = Number((maxXRaw + Math.max(0.1, (maxXRaw - minXRaw) * 0.1)).toFixed(2));
 
-        const toX = (pbrVal: number) => {
-          const clamped = Math.min(xMax, Math.max(xMin, pbrVal));
-          return padL + ((clamped - xMin) / xRange) * plotW;
+        const minYRaw = curRoeVals.length ? Math.min(...curRoeVals, 4) : 0;
+        const maxYRaw = curRoeVals.length ? Math.max(...curRoeVals, 22) : 35;
+        const defaultYMin = Number((minYRaw - Math.max(2, (maxYRaw - minYRaw) * 0.1)).toFixed(1));
+        const defaultYMax = Number((maxYRaw + Math.max(3, (maxYRaw - minYRaw) * 0.12)).toFixed(1));
+
+        const activeBounds = zoomBounds || {
+          xMin: defaultXMin,
+          xMax: defaultXMax,
+          yMin: defaultYMin,
+          yMax: defaultYMax,
         };
-        const toY = (roeVal: number) => {
-          const clamped = Math.min(yMax, Math.max(yMin, roeVal));
-          return padT + plotH - ((clamped - yMin) / yRange) * plotH;
+
+        const xMin = activeBounds.xMin;
+        const xMax = activeBounds.xMax;
+        const xRange = Math.max(0.04, xMax - xMin);
+
+        const yMin = activeBounds.yMin;
+        const yMax = activeBounds.yMax;
+        const yRange = Math.max(1.0, yMax - yMin);
+
+        const toX = (pbrVal: number) => padL + ((pbrVal - xMin) / xRange) * plotW;
+        const toY = (roeVal: number) => padT + plotH - ((roeVal - yMin) / yRange) * plotH;
+        const fromX = (svgX: number) => xMin + ((svgX - padL) / plotW) * xRange;
+        const fromY = (svgY: number) => yMin + ((padT + plotH - svgY) / plotH) * yRange;
+
+        const applyZoomStep = (factor: number, centerPbr?: number, centerRoe?: number) => {
+          const cx = centerPbr !== undefined ? centerPbr : (xMin + xMax) / 2;
+          const cy = centerRoe !== undefined ? centerRoe : (yMin + yMax) / 2;
+          const newXRange = Math.max(0.06, Math.min(5.0, xRange * factor));
+          const newYRange = Math.max(2.0, Math.min(200.0, yRange * factor));
+          const rxRatio = (cx - xMin) / xRange;
+          const ryRatio = (cy - yMin) / yRange;
+          const nextXMin = Math.max(0, Number((cx - rxRatio * newXRange).toFixed(3)));
+          const nextXMax = Number((nextXMin + newXRange).toFixed(3));
+          const nextYMin = Number((cy - ryRatio * newYRange).toFixed(2));
+          const nextYMax = Number((nextYMin + newYRange).toFixed(2));
+          setZoomBounds({ xMin: nextXMin, xMax: nextXMax, yMin: nextYMin, yMax: nextYMax });
+        };
+
+        // 밀집 구간(Dense Cluster: 분위수 P10~P85) 원클릭 자동 줌
+        const focusDenseCluster = () => {
+          if (curPbrVals.length < 3) return;
+          const sortedX = [...curPbrVals].sort((a, b) => a - b);
+          const sortedY = [...curRoeVals].sort((a, b) => a - b);
+          const q = (arr: number[], p: number) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * p)))];
+          const x1 = Math.max(0.05, q(sortedX, 0.05) - 0.04);
+          const x2 = Math.max(x1 + 0.15, q(sortedX, 0.8) + 0.05);
+          const y1 = q(sortedY, 0.08) - 1.5;
+          const y2 = Math.max(y1 + 6, q(sortedY, 0.85) + 2.5);
+          setZoomBounds({
+            xMin: Number(x1.toFixed(2)),
+            xMax: Number(x2.toFixed(2)),
+            yMin: Number(y1.toFixed(1)),
+            yMax: Number(y2.toFixed(1)),
+          });
+        };
+
+        const getSvgCoords = (e: React.MouseEvent<SVGSVGElement>) => {
+          const svg = svgRef.current;
+          if (!svg) return { x: padL, y: padT };
+          const rect = svg.getBoundingClientRect();
+          const scaleX = W / Math.max(1, rect.width);
+          const scaleY = H / Math.max(1, rect.height);
+          const rawX = (e.clientX - rect.left) * scaleX;
+          const rawY = (e.clientY - rect.top) * scaleY;
+          return {
+            x: Math.min(padL + plotW, Math.max(padL, rawX)),
+            y: Math.min(padT + plotH, Math.max(padT, rawY)),
+          };
+        };
+
+        const handleSvgWheel = (e: React.WheelEvent<SVGSVGElement>) => {
+          e.preventDefault();
+          const svg = svgRef.current;
+          if (!svg) return;
+          const rect = svg.getBoundingClientRect();
+          const scaleX = W / Math.max(1, rect.width);
+          const scaleY = H / Math.max(1, rect.height);
+          const svgX = Math.min(padL + plotW, Math.max(padL, (e.clientX - rect.left) * scaleX));
+          const svgY = Math.min(padT + plotH, Math.max(padT, (e.clientY - rect.top) * scaleY));
+          const cPbr = fromX(svgX);
+          const cRoe = fromY(svgY);
+          const factor = e.deltaY < 0 ? 0.78 : 1.28;
+          applyZoomStep(factor, cPbr, cRoe);
+        };
+
+        const handleSvgMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (e.button !== 0) return;
+          const pt = getSvgCoords(e);
+          if (interactionMode === 'PAN' || e.shiftKey) {
+            setPanStartState({ svgX: pt.x, svgY: pt.y, bounds: activeBounds });
+          } else {
+            setDragStartPt(pt);
+            setDragCurrPt(pt);
+          }
+        };
+
+        const handleSvgMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+          const pt = getSvgCoords(e);
+          if (panStartState) {
+            const dxSvg = pt.x - panStartState.svgX;
+            const dySvg = pt.y - panStartState.svgY;
+            const b = panStartState.bounds;
+            const bw = b.xMax - b.xMin;
+            const bh = b.yMax - b.yMin;
+            const dPbr = (dxSvg / plotW) * bw;
+            const dRoe = (dySvg / plotH) * bh;
+            const nextXMin = Math.max(0, Number((b.xMin - dPbr).toFixed(3)));
+            setZoomBounds({
+              xMin: nextXMin,
+              xMax: Number((nextXMin + bw).toFixed(3)),
+              yMin: Number((b.yMin + dRoe).toFixed(2)),
+              yMax: Number((b.yMax + dRoe).toFixed(2)),
+            });
+          } else if (dragStartPt) {
+            setDragCurrPt(pt);
+          }
+        };
+
+        const handleSvgMouseUp = () => {
+          if (panStartState) {
+            setPanStartState(null);
+            return;
+          }
+          if (dragStartPt && dragCurrPt) {
+            const boxW = Math.abs(dragCurrPt.x - dragStartPt.x);
+            const boxH = Math.abs(dragCurrPt.y - dragStartPt.y);
+            if (boxW >= 14 && boxH >= 14) {
+              const leftSvg = Math.min(dragStartPt.x, dragCurrPt.x);
+              const rightSvg = Math.max(dragStartPt.x, dragCurrPt.x);
+              const topSvg = Math.min(dragStartPt.y, dragCurrPt.y);
+              const botSvg = Math.max(dragStartPt.y, dragCurrPt.y);
+              const nxMin = Math.max(0, Number(fromX(leftSvg).toFixed(3)));
+              const nxMax = Number(Math.max(nxMin + 0.05, fromX(rightSvg)).toFixed(3));
+              const nyMin = Number(fromY(botSvg).toFixed(2));
+              const nyMax = Number(Math.max(nyMin + 1.5, fromY(topSvg)).toFixed(2));
+              setZoomBounds({ xMin: nxMin, xMax: nxMax, yMin: nyMin, yMax: nyMax });
+            }
+          }
+          setDragStartPt(null);
+          setDragCurrPt(null);
         };
 
         const refPbr = 1.0;
@@ -867,11 +1067,10 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1.0].map((t) => Number((xMin + t * xRange).toFixed(2)));
         const yTicks = [0, 0.25, 0.5, 0.75, 1.0].map((t) => Number((yMin + t * yRange).toFixed(1)));
 
-        // 등가성비 대각선 (ROE = slope * PBR -> ROE/PBR = 10, 20)
         const makeIsoLine = (slope: number) => {
           const pts: string[] = [];
-          for (let step = 0; step <= 20; step++) {
-            const px = xMin + (step / 20) * xRange;
+          for (let step = 0; step <= 25; step++) {
+            const px = xMin + (step / 25) * xRange;
             const py = slope * px;
             if (py >= yMin && py <= yMax) {
               pts.push(`${toX(px).toFixed(1)},${toY(py).toFixed(1)}`);
@@ -882,22 +1081,115 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const iso10Pts = makeIsoLine(10);
         const iso20Pts = makeIsoLine(20);
 
+        const visibleItems = plotItems.filter((it: any) => {
+          const px = Number(it.pbr) || 0;
+          const py = Number(it.roe) || 0;
+          return px >= xMin - xRange * 0.03 && px <= xMax + xRange * 0.03 && py >= yMin - yRange * 0.03 && py <= yMax + yRange * 0.03;
+        });
+
+        const zoomRatio = Number(((defaultXMax - defaultXMin) / Math.max(0.05, xRange)).toFixed(1));
+
         return (
           <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3">
               <div>
-                <h3 className="text-sm sm:text-base font-extrabold text-white flex items-center gap-2">
-                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 선택 종목 밸류에이션 매트릭스 산점도 (Scatter Plot)</span>
+                <h3 className="text-sm sm:text-base font-extrabold text-white flex flex-wrap items-center gap-2">
+                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 섹터별 &amp; 줌인(Zoom-In) 밸류에이션 매트릭스 산점도</span>
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-xs font-mono">
-                    좌상단(↖) = 저PBR · 고ROE 핵심 저평가 구간
+                    {selectedSector === 'ALL' ? `전체 섹터 (${filteredResults.length}종목)` : `[${selectedSector}] 섹터 단독 (${filteredResults.length}종목)`} · 배율 {zoomRatio}x
                   </span>
                 </h3>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  원을 클릭하면 해당 종목 상세 분석 페이지로 이동하며, 마우스를 올리면 전분기 대비 ROE·PBR 이동 궤적과 상세 지표를 확인할 수 있습니다.
+                  💡 <strong>줌인(확대) 사용법:</strong> 마우스 <strong>드래그로 몰려있는 영역을 박스 선택</strong>하거나, 차트 위에서 <strong>마우스 휠 스크롤</strong> 또는 우측 상단 <strong>[🔍 밀집구간 자동확대 / ➕ 줌인]</strong> 버튼을 누르면 겹쳐있는 종목들이 넓게 펼쳐집니다. 아래 섹터 버튼을 클릭하면 <strong>섹터별 단독 산점도</strong>로 즉시 전환됩니다.
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3 text-xs">
+              {/* 줌 컨트롤 & 색상 모드 & 궤적 표시 컨트롤 */}
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
+                  <button
+                    type="button"
+                    onClick={() => applyZoomStep(0.68)}
+                    className="px-2.5 py-1 rounded bg-indigo-600/80 hover:bg-indigo-500 text-white font-extrabold cursor-pointer"
+                    title="중심 기준 확대 (Zoom In)"
+                  >
+                    ➕ 줌인
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyZoomStep(1.45)}
+                    className="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
+                    title="중심 기준 축소 (Zoom Out)"
+                  >
+                    ➖ 줌아웃
+                  </button>
+                  <button
+                    type="button"
+                    onClick={focusDenseCluster}
+                    className="px-2.5 py-1 rounded bg-emerald-700/80 hover:bg-emerald-600 text-white font-extrabold cursor-pointer"
+                    title="종목이 가장 많이 몰려있는 저PBR·고ROE 밀집 구간을 자동으로 확대합니다"
+                  >
+                    🎯 밀집구간 확대
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setZoomBounds(null)}
+                    className="px-2.5 py-1 rounded bg-amber-700/70 hover:bg-amber-600 text-white font-bold cursor-pointer"
+                  >
+                    🔄 전체 초기화
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
+                  <button
+                    type="button"
+                    onClick={() => setInteractionMode('BOX_ZOOM')}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
+                      interactionMode === 'BOX_ZOOM'
+                        ? 'bg-sky-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    ⬚ 드래그 박스확대
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInteractionMode('PAN')}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
+                      interactionMode === 'PAN'
+                        ? 'bg-sky-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    ✋ 드래그 화면이동
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-1">
+                  <button
+                    type="button"
+                    onClick={() => setColorMode('SECTOR')}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
+                      colorMode === 'SECTOR'
+                        ? 'bg-purple-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    🎨 섹터별 색상구분
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setColorMode('ROE_STATUS')}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
+                      colorMode === 'ROE_STATUS'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    🟢 ROE상태별 색상
+                  </button>
+                </div>
+
                 <label className="flex items-center gap-1.5 cursor-pointer text-emerald-300 font-bold">
                   <input
                     type="checkbox"
@@ -905,7 +1197,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     onChange={(e) => setShowQoqTrajectory(e.target.checked)}
                     className="accent-emerald-500"
                   />
-                  <span>전분기 → 현재 (ΔPBR, ΔROE) 궤적 화살표 표시</span>
+                  <span>전분기 궤적선</span>
                 </label>
                 <label className="flex items-center gap-1.5 cursor-pointer text-sky-300 font-bold">
                   <input
@@ -914,26 +1206,100 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     onChange={(e) => setShowTopLabelsOnly(e.target.checked)}
                     className="accent-sky-500"
                   />
-                  <span>{showTopLabelsOnly ? '상위 25개 핵심 종목명 표시' : '전체 종목명 표시'}</span>
+                  <span>{showTopLabelsOnly ? '주요 종목명' : '전체 종목명'}</span>
                 </label>
+              </div>
+            </div>
+
+            {/* 🏭 섹터별 필터 & 섹터별 단독 산점도 전환 바 */}
+            <div className="bg-gray-900/90 border border-gray-800 rounded-xl p-2.5 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] text-gray-400">
+                <span className="font-bold text-gray-300">
+                  🏭 섹터별 산점도 선택 (클릭 시 해당 섹터 종목만 산점도 &amp; 하단 리스트에 단독 플롯):
+                </span>
+                {selectedSector !== 'ALL' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSector('ALL');
+                      setZoomBounds(null);
+                    }}
+                    className="text-amber-300 hover:underline font-bold cursor-pointer"
+                  >
+                    ✕ 섹터 필터 해제 (전체 {results.length}종목 보기)
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 max-h-24 overflow-y-auto pr-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSector('ALL');
+                    setZoomBounds(null);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer border transition ${
+                    selectedSector === 'ALL'
+                      ? 'bg-emerald-600 text-white border-emerald-400 shadow'
+                      : 'bg-gray-950 text-gray-300 border-gray-700 hover:bg-gray-800'
+                  }`}
+                >
+                  전체 섹터 ({results.length})
+                </button>
+                {sectorStats.map((sObj) => {
+                  const isSel = selectedSector === sObj.sector;
+                  return (
+                    <button
+                      key={sObj.sector}
+                      type="button"
+                      onClick={() => {
+                        const nextSec = isSel ? 'ALL' : sObj.sector;
+                        setSelectedSector(nextSec);
+                        setZoomBounds(null);
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border transition flex items-center gap-1.5 ${
+                        isSel
+                          ? 'bg-indigo-950 text-white border-white shadow-md ring-1 ring-white/50'
+                          : 'bg-gray-950/90 text-gray-200 border-gray-800 hover:border-gray-600 hover:bg-gray-800/80'
+                      }`}
+                    >
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: sObj.color }}
+                      />
+                      <span>{sObj.sector}</span>
+                      <span className="text-[10px] font-mono text-gray-400">({sObj.count})</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             {/* 범례 & 호버 종목 요약 바 (고정 높이 및 줄바꿈 방지로 마우스 호버 시 차트 위아래 흔들림 원천 차단) */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs bg-gray-900/80 border border-gray-800 rounded-lg px-3.5 py-2 min-h-[44px]">
               <div className="flex flex-wrap items-center gap-3 shrink-0">
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">고ROE &amp; 전분기비 ROE↑</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">고ROE 유지</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 border border-white/60" />
-                  <span className="text-gray-200 font-bold">전분기비 ROE 개선주</span>
-                </span>
+                {colorMode === 'SECTOR' ? (
+                  <>
+                    <span className="text-purple-300 font-bold">🎨 현재 색상: 섹터별 고유 색상</span>
+                    <span className="text-gray-400 text-[11px]">
+                      (위 섹터 버튼의 색상 점과 동일한 색으로 각 섹터 종목이 구분 표시됩니다)
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/60" />
+                      <span className="text-gray-200 font-bold">고ROE &amp; 전분기비 ROE↑</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-sky-400 border border-white/60" />
+                      <span className="text-gray-200 font-bold">고ROE 유지</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 border border-white/60" />
+                      <span className="text-gray-200 font-bold">전분기비 ROE 개선주</span>
+                    </span>
+                  </>
+                )}
               </div>
 
               <div className="h-7 flex items-center justify-end overflow-hidden">
@@ -941,6 +1307,15 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   <div className="flex items-center gap-2.5 font-mono text-xs bg-indigo-950/90 border border-indigo-400/60 px-3 py-1 rounded-lg whitespace-nowrap overflow-x-auto">
                     <span className="font-sans font-extrabold text-white">
                       {getStockName(hoveredStock)} ({hoveredStock.ticker})
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[10px] font-sans font-bold text-slate-950"
+                      style={{
+                        backgroundColor:
+                          sectorColorMap[String(hoveredStock.sector || '기타').trim() || '기타'] || '#38bdf8',
+                      }}
+                    >
+                      {hoveredStock.sector || '기타'}
                     </span>
                     <span className="text-sky-300 font-bold">
                       PBR: {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
@@ -953,7 +1328,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   </div>
                 ) : (
                   <span className="text-gray-400 whitespace-nowrap">
-                    💡 차트 위의 종목 점(Dot)에 마우스를 올리면 전분기 대비(QoQ) PBR·ROE 상세 수치가 표시됩니다.
+                    💡 마우스 드래그로 원하는 구역을 박스 확대하거나, 점(Dot) 위에 마우스를 올려 상세 수치를 확인하세요. (현재 화면 내 {visibleItems.length}개 표시)
                   </span>
                 )}
               </div>
@@ -961,9 +1336,24 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
 
             <div className="relative w-full">
               <svg
+                ref={svgRef}
                 viewBox={`0 0 ${W} ${H}`}
-                className="w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none"
+                onWheel={handleSvgWheel}
+                onMouseDown={handleSvgMouseDown}
+                onMouseMove={handleSvgMouseMove}
+                onMouseUp={handleSvgMouseUp}
+                onMouseLeave={handleSvgMouseUp}
+                onDoubleClick={() => setZoomBounds(null)}
+                className={`w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none ${
+                  interactionMode === 'PAN' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'
+                }`}
               >
+                <defs>
+                  <clipPath id="tetris-scatter-clip">
+                    <rect x={padL} y={padT} width={plotW} height={plotH} />
+                  </clipPath>
+                </defs>
+
                 {/* 좌상단 황금 사분면 (저PBR <= 1.0배 & 고ROE >= 기준선) 하이라이트 배경 */}
                 {refX > padL && refY > padT && (
                   <rect
@@ -972,6 +1362,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     width={Math.max(0, Math.min(plotW, refX - padL))}
                     height={Math.max(0, Math.min(plotH, refY - padT))}
                     fill="rgba(16, 185, 129, 0.08)"
+                    clipPath="url(#tetris-scatter-clip)"
                   />
                 )}
 
@@ -1070,6 +1461,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     strokeWidth="1.2"
                     strokeDasharray="3,3"
                     points={iso10Pts}
+                    clipPath="url(#tetris-scatter-clip)"
                   />
                 )}
                 {iso20Pts && (
@@ -1079,6 +1471,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     strokeWidth="1.2"
                     strokeDasharray="3,3"
                     points={iso20Pts}
+                    clipPath="url(#tetris-scatter-clip)"
                   />
                 )}
 
@@ -1090,7 +1483,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   fontSize="11"
                   fontWeight="bold"
                 >
-                  ★ Sweet Spot (저PBR · 고ROE 핵심 발굴 영역)
+                  ★ Sweet Spot (저PBR · 고ROE 핵심 발굴 영역) {selectedSector !== 'ALL' ? `— [${selectedSector}] 섹터` : ''}
                 </text>
 
                 {/* 축 제목 */}
@@ -1102,7 +1495,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                   fontSize="12"
                   fontWeight="bold"
                 >
-                  X축: PBR (주가순자산비율, 배) — 왼쪽일수록 자산대비 저평가 (← 저PBR)
+                  X축: PBR (주가순자산비율, 배) — 왼쪽일수록 자산대비 저평가 (← 저PBR) [더블클릭 시 줌 초기화]
                 </text>
                 <text
                   x={16}
@@ -1117,83 +1510,105 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 </text>
 
                 {/* 종목별 전분기 -> 현재 이동 궤적선 & 현재 위치 점(Point) 렌더링 */}
-                {plotItems.map((it: any, idx: number) => {
-                  const curX = toX(Number(it.pbr) || 0);
-                  const curY = toY(Number(it.roe) || 0);
-                  const prevX = toX(Number(it.prev_q_pbr) || Number(it.pbr) || 0);
-                  const prevY = toY(Number(it.prev_q_roe) || Number(it.roe) || 0);
+                <g clipPath="url(#tetris-scatter-clip)">
+                  {visibleItems.map((it: any, idx: number) => {
+                    const curX = toX(Number(it.pbr) || 0);
+                    const curY = toY(Number(it.roe) || 0);
+                    const prevX = toX(Number(it.prev_q_pbr) || Number(it.pbr) || 0);
+                    const prevY = toY(Number(it.prev_q_roe) || Number(it.roe) || 0);
 
-                  const isHovered = hoveredStock?.ticker === it.ticker;
-                  const qoqRoe = Number(it.qoq_roe_diff) || 0;
-                  const roeVal = Number(it.roe) || 0;
+                    const isHovered = hoveredStock?.ticker === it.ticker;
+                    const qoqRoe = Number(it.qoq_roe_diff) || 0;
+                    const roeVal = Number(it.roe) || 0;
+                    const secName = String(it.sector || '기타').trim() || '기타';
 
-                  const dotColor =
-                    roeVal >= 10 && qoqRoe >= 1.0
-                      ? '#10b981' // 고ROE + 전분기 대비 상승 (에메랄드)
-                      : roeVal >= 10
-                      ? '#38bdf8' // 고ROE 유지 (스카이블루)
-                      : '#f59e0b'; // 전분기 대비 ROE 개선 턴어라운드 (앰버)
+                    const dotColor =
+                      colorMode === 'SECTOR'
+                        ? sectorColorMap[secName] || '#38bdf8'
+                        : roeVal >= 10 && qoqRoe >= 1.0
+                        ? '#10b981'
+                        : roeVal >= 10
+                        ? '#38bdf8'
+                        : '#f59e0b';
 
-                  const radius = isHovered ? 8.5 : idx < 10 ? 6.0 : 4.6;
-                  const showLabel = isHovered || !showTopLabelsOnly || idx < 25;
+                    const radius = isHovered ? 8.5 : idx < 12 || visibleItems.length <= 35 ? 6.0 : 4.8;
+                    const showLabel =
+                      isHovered || !showTopLabelsOnly || visibleItems.length <= 40 || idx < 28;
 
-                  return (
-                    <g
-                      key={it.ticker}
-                      className="cursor-pointer"
-                      onMouseEnter={() => setHoveredStock(it)}
-                      onMouseLeave={() => setHoveredStock(null)}
-                      onClick={() => {
-                        if (setGlobalSearchTicker) setGlobalSearchTicker(it.ticker);
-                      }}
-                    >
-                      {/* 전분기(prev_q) -> 현재(cur) 이동 궤적 점선 */}
-                      {showQoqTrajectory && (Math.abs(curX - prevX) > 2 || Math.abs(curY - prevY) > 2) && (
-                        <g opacity={isHovered ? 0.95 : 0.4} className="pointer-events-none">
-                          <circle cx={prevX} cy={prevY} r={2.2} fill="#94a3b8" />
-                          <line
-                            x1={prevX}
-                            y1={prevY}
-                            x2={curX}
-                            y2={curY}
-                            stroke={qoqRoe >= 0 ? '#34d399' : '#f87171'}
-                            strokeWidth={isHovered ? '2.0' : '1.1'}
-                            strokeDasharray="2,2"
-                          />
-                        </g>
-                      )}
+                    return (
+                      <g
+                        key={it.ticker}
+                        className="cursor-pointer"
+                        onMouseEnter={() => setHoveredStock(it)}
+                        onMouseLeave={() => setHoveredStock(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (setGlobalSearchTicker) setGlobalSearchTicker(it.ticker);
+                        }}
+                      >
+                        {/* 전분기(prev_q) -> 현재(cur) 이동 궤적 점선 */}
+                        {(showQoqTrajectory || isHovered) &&
+                          (Math.abs(curX - prevX) > 2 || Math.abs(curY - prevY) > 2) && (
+                            <g opacity={isHovered ? 0.95 : 0.45} className="pointer-events-none">
+                              <circle cx={prevX} cy={prevY} r={2.2} fill="#94a3b8" />
+                              <line
+                                x1={prevX}
+                                y1={prevY}
+                                x2={curX}
+                                y2={curY}
+                                stroke={qoqRoe >= 0 ? '#34d399' : '#f87171'}
+                                strokeWidth={isHovered ? '2.0' : '1.1'}
+                                strokeDasharray="2,2"
+                              />
+                            </g>
+                          )}
 
-                      {/* 마우스 히트 영역 고정용 투명 원 (반지름이 변해도 onMouseLeave/Enter 진동이 발생하지 않도록 고정 r=10 유지) */}
-                      <circle cx={curX} cy={curY} r={10} fill="transparent" />
+                        {/* 마우스 히트 영역 고정용 투명 원 */}
+                        <circle cx={curX} cy={curY} r={10} fill="transparent" />
 
-                      {/* 현재 종목 위치 원 */}
-                      <circle
-                        cx={curX}
-                        cy={curY}
-                        r={radius}
-                        fill={dotColor}
-                        fillOpacity={isHovered ? 1.0 : 0.82}
-                        stroke={isHovered ? '#ffffff' : '#0f172a'}
-                        strokeWidth={isHovered ? '2.2' : '1.2'}
-                        className="pointer-events-none"
-                      />
-
-                      {/* 종목명 라벨 */}
-                      {showLabel && (
-                        <text
-                          x={curX + radius + 3}
-                          y={curY + 3}
-                          fill={isHovered ? '#ffffff' : idx < 10 ? '#a7f3d0' : '#cbd5e1'}
-                          fontSize={isHovered ? '11.5' : '9.5'}
-                          fontWeight={isHovered || idx < 10 ? 'bold' : 'normal'}
+                        {/* 현재 종목 위치 원 */}
+                        <circle
+                          cx={curX}
+                          cy={curY}
+                          r={radius}
+                          fill={dotColor}
+                          fillOpacity={isHovered ? 1.0 : 0.86}
+                          stroke={isHovered ? '#ffffff' : '#0f172a'}
+                          strokeWidth={isHovered ? '2.2' : '1.2'}
                           className="pointer-events-none"
-                        >
-                          {getStockName(it)}
-                        </text>
-                      )}
-                    </g>
-                  );
-                })}
+                        />
+
+                        {/* 종목명 라벨 */}
+                        {showLabel && (
+                          <text
+                            x={curX + radius + 3}
+                            y={curY + 3}
+                            fill={isHovered ? '#ffffff' : idx < 12 ? '#a7f3d0' : '#cbd5e1'}
+                            fontSize={isHovered ? '11.5' : '9.5'}
+                            fontWeight={isHovered || idx < 12 ? 'bold' : 'normal'}
+                            className="pointer-events-none"
+                          >
+                            {getStockName(it)}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+                </g>
+
+                {/* 드래그 박스 줌 선택 사각형 */}
+                {dragStartPt && dragCurrPt && (
+                  <rect
+                    x={Math.min(dragStartPt.x, dragCurrPt.x)}
+                    y={Math.min(dragStartPt.y, dragCurrPt.y)}
+                    width={Math.abs(dragCurrPt.x - dragStartPt.x)}
+                    height={Math.abs(dragCurrPt.y - dragStartPt.y)}
+                    fill="rgba(56, 189, 248, 0.18)"
+                    stroke="#38bdf8"
+                    strokeWidth="1.5"
+                    strokeDasharray="4,3"
+                  />
+                )}
               </svg>
             </div>
           </div>
@@ -1204,9 +1619,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
       <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-4 flex-1">
         <div className="flex flex-wrap justify-between items-center gap-2 border-b border-gray-800 pb-3">
           <h3 className="font-bold text-base text-white flex items-center gap-2">
-            <span>📋 ROE/PBR 저평가·실적개선 발굴 종목 리스트</span>
+            <span>📋 ROE/PBR 저평가·실적개선 발굴 종목 리스트 {selectedSector !== 'ALL' ? `([${selectedSector}] 섹터)` : ''}</span>
             <span className="text-xs bg-emerald-900/80 border border-emerald-500/40 text-emerald-200 px-3 py-0.5 rounded-full font-mono">
-              총 {results.length}개 종목 발굴
+              총 {filteredResults.length}개 종목 발굴
             </span>
           </h3>
           <span className="text-xs text-gray-400">
@@ -1239,7 +1654,7 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/80">
-                {results.map((item: any, idx: number) => {
+                {filteredResults.map((item: any, idx: number) => {
                   const roeUp = (item.qoq_roe_diff ?? 0) >= 0;
                   const pbrStable = (item.qoq_pbr_diff ?? 0) <= 0.15;
                   const qPriceG = Number(item.qoq_price_growth_pct ?? 0);

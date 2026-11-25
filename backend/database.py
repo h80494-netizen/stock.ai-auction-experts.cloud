@@ -913,6 +913,7 @@ def get_dart_screener_results(conditions: dict):
     min_mcap_eok = float(conditions.get("min_mcap_eok", 500.0))
 
     market_filter = str(conditions.get("market_filter", "ALL")).upper()
+    sector_filter = str(conditions.get("sector_filter", "ALL")).strip()
     sort_by = str(conditions.get("sort_by", "ROE_PBR_RATIO")).upper()
 
     results = []
@@ -930,10 +931,13 @@ def get_dart_screener_results(conditions: dict):
         yoy_price_g = float(r.get("yoy_price_growth_pct") or 0.0)
         mcap_eok = float(r.get("market_cap_eok") or 0.0)
         mkt = str(r.get("market") or "")
+        sec = str(r.get("sector") or "").strip()
 
         if market_filter == "KOSPI" and "코스피" not in mkt:
             continue
         if market_filter == "KOSDAQ" and "코스닥" not in mkt:
+            continue
+        if sector_filter and sector_filter != "ALL" and sec != sector_filter:
             continue
 
         # [핵심 조건 1] ROE 수준 & 전분기 대비 ROE 개선 필터
