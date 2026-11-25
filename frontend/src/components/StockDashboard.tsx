@@ -19,32 +19,47 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
   const [businessSummary, setBusinessSummary] = useState<string>('');
   const [financialPeriod, setFinancialPeriod] = useState<'annual'|'quarterly'>('annual');
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [liveQuotes, setLiveQuotes] = useState<Record<string, { price: number; change: number; changePct: number; volume?: number }>>({});
 
   useEffect(() => {
     const combined = [...globalStocks, ...stocks];
-    if (combined.length === 0) return;
     const fetchLivePrices = async () => {
       try {
         const topTickers = new Set(combined.slice(0, 50).map(s => s.ticker));
         if (selectedStock && selectedStock.ticker) {
           topTickers.add(selectedStock.ticker);
         }
+        if (stockDetails?.stock?.ticker) {
+          topTickers.add(stockDetails.stock.ticker);
+        }
+        if (topTickers.size === 0) return;
         const tickersStr = Array.from(topTickers).join(',');
-        const res = await fetch(`/api/realtime-prices?tickers=${encodeURIComponent(tickersStr)}`);
+        const res = await fetch(`/api/realtime-quotes?tickers=${encodeURIComponent(tickersStr)}`);
         if (!res.ok) {
-          console.error('Failed to fetch live prices:', res.status);
+          console.error('Failed to fetch live quotes:', res.status);
           return;
         }
         const data = await res.json();
         if (data && Object.keys(data).length > 0) {
-          setLivePrices(prev => ({ ...prev, ...data }));
+          setLiveQuotes(prev => ({ ...prev, ...data }));
+          const priceMap: Record<string, number> = {};
+          Object.entries(data).forEach(([k, v]: [string, any]) => {
+            if (v && typeof v === 'object' && Number(v.price) > 0) {
+              priceMap[k] = Number(v.price);
+            } else if (typeof v === 'number' && v > 0) {
+              priceMap[k] = v;
+            }
+          });
+          if (Object.keys(priceMap).length > 0) {
+            setLivePrices(prev => ({ ...prev, ...priceMap }));
+          }
         }
       } catch (e) { console.error('Live price fetch error:', e); }
     };
     fetchLivePrices();
-    const interval = setInterval(fetchLivePrices, 15000);
+    const interval = setInterval(fetchLivePrices, 10000);
     return () => clearInterval(interval);
-  }, [stocks, globalStocks, selectedStock]);
+  }, [stocks, globalStocks, selectedStock, stockDetails?.stock?.ticker]);
   
   // Separate domestic and foreign lists
   const domesticList = stocks.filter((s, idx, self) => 
@@ -160,6 +175,19 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
       
       setSelectedStock(data.stock);
       setStockDetails(data);
+      if (data.stock?.ticker && Number(data.stock?.price) > 0) {
+        const tk = data.stock.ticker;
+        const pVal = Number(data.stock.price);
+        setLivePrices(prev => ({ ...prev, [tk]: pVal }));
+        setLiveQuotes(prev => ({
+          ...prev,
+          [tk]: {
+            price: pVal,
+            change: Number(data.stock.change ?? 0),
+            changePct: Number(data.stock.changePct ?? 0),
+          },
+        }));
+      }
       setSearchResults([]); 
       setBusinessSummary('');
       // Fetch summary
@@ -223,15 +251,26 @@ export default function StockDashboard({ stocks = [], globalStocks = [], globalS
                       📄 애널리스트 리포트
                   </button>
               </div>
-              <div className="flex items-end gap-3 mb-4">
-                <div className="text-3xl font-mono text-white">{(livePrices[stockDetails.stock.ticker] || stockDetails.stock.price || 0).toLocaleString()} <span className="text-sm text-gray-500">{stockDetails.stock.currency || currencyInfo.basic}</span></div>
-                {stockDetails.stock.change !== undefined && (
-                  <div className={`text-lg font-bold mb-1 ${stockDetails.stock.change > 0 ? 'text-red-500' : stockDetails.stock.change < 0 ? 'text-blue-500' : 'text-gray-400'}`}>
-                    {stockDetails.stock.change > 0 ? '▲' : stockDetails.stock.change < 0 ? '▼' : ''} {Math.abs(stockDetails.stock.change).toLocaleString()} 
-                    <span className="text-sm ml-1">({stockDetails.stock.change > 0 ? '+' : ''}{Number(stockDetails.stock.changePct).toFixed(2)}%)</span>
+              {(() => {
+                const tk = stockDetails.stock.ticker;
+                const lq = liveQuotes[tk];
+                const dispPrice = (lq && lq.price > 0 ? lq.price : livePrices[tk] || stockDetails.stock.price || 0);
+                const dispChange = lq && lq.price > 0 ? lq.change : (stockDetails.stock.change ?? 0);
+                const dispChangePct = lq && lq.price > 0 ? lq.changePct : (stockDetails.stock.changePct ?? 0);
+                return (
+                  <div className="flex items-end gap-3 mb-4">
+                    <div className="text-3xl font-mono text-white">
+                      {dispPrice.toLocaleString()} <span className="text-sm text-gray-500">{stockDetails.stock.currency || currencyInfo.basic}</span>
+                    </div>
+                    {dispChange !== undefined && (
+                      <div className={`text-lg font-bold mb-1 ${dispChange > 0 ? 'text-red-500' : dispChange < 0 ? 'text-blue-500' : 'text-gray-400'}`}>
+                        {dispChange > 0 ? '▲' : dispChange < 0 ? '▼' : ''} {Math.abs(dispChange).toLocaleString()}
+                        <span className="text-sm ml-1">({dispChange > 0 ? '+' : ''}{Number(dispChangePct).toFixed(2)}%)</span>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                );
+              })()}
               
               <div className="grid grid-cols-2 gap-y-2 text-sm font-mono">
                 {(() => {

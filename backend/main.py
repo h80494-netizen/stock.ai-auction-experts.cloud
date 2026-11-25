@@ -943,51 +943,87 @@ def get_realtime_quote_dict(tickers_str: str) -> dict:
     지정된 종목들의 실시간 시세 및 전일대비 등락률, 거래량 상세 조회 공통 함수
     반환 포맷: { ticker: { "price": int/float, "change": int/float, "changePct": float, "volume": int } }
     """
-    if not tickers_str: return {}
-    
+    if not tickers_str:
+        return {}
+
     ticker_list = [t.strip() for t in tickers_str.split(",") if t.strip()]
     quotes = {}
-    
+
     from kis_instance import kis_client
     from naver_finance_scraper import naver_scraper
+    import requests
     import yfinance as yf
 
     missing_tickers = []
-    
+    kr_items = []
     for original_t in ticker_list:
-        pure_ticker = original_t.split(":")[-1]
-        if not is_korean_stock(original_t):
-            missing_tickers.append(original_t)
-            continue
-
-        detail = None
-        
-        # 1. KIS Client 상세 현재가 조회 시도 (전일대비 등락률 포함)
-        if kis_client:
-            try:
-                detail = kis_client.get_current_price_detail(pure_ticker)
-            except Exception:
-                detail = None
-                
-        # 2. KIS 실패 또는 주가 0일 때 Naver Scraper 상세 조회 (전일대비 등락률 포함)
-        if not detail or detail.get('price', 0) <= 0:
-            try:
-                detail = naver_scraper.get_current_price_detail(pure_ticker)
-            except Exception:
-                detail = None
-
-        if detail and detail.get('price', 0) > 0:
-            q_val = {
-                "price": detail.get('price', 0),
-                "change": detail.get('change', 0),
-                "changePct": round(float(detail.get('changePct', 0.0)), 2),
-                "volume": detail.get('volume', 0)
-            }
-            quotes[original_t] = q_val
-            quotes[pure_ticker] = q_val
-            quotes[f"KRX:{pure_ticker}"] = q_val
+        pure_ticker = to_pure_ticker(original_t)
+        if is_korean_stock(original_t):
+            kr_items.append((original_t, pure_ticker))
         else:
             missing_tickers.append(original_t)
+
+    # 1. 한국 주식: 네이버 초고속 실시간 폴링 API 일괄 조회 (단 1회 호출로 최대 100종목 실시간 주가·전일대비·등락률·거래량 동시 획득)
+    if kr_items:
+        clean_codes = list(dict.fromkeys([pt for _, pt in kr_items if pt]))
+        bulk_naver_map = {}
+        try:
+            for chunk_idx in range(0, len(clean_codes), 50):
+                chunk = clean_codes[chunk_idx : chunk_idx + 50]
+                poll_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{','.join(chunk)}"
+                poll_res = requests.get(poll_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.0)
+                if poll_res.status_code == 200:
+                    datas = poll_res.json().get("result", {}).get("areas", [{}])[0].get("datas", [])
+                    for d_it in datas:
+                        cd = str(d_it.get("cd") or "").strip()
+                        nv = int(d_it.get("nv") or 0)
+                        if cd and nv > 0:
+                            cv = int(d_it.get("cv") or 0)
+                            cr = float(d_it.get("cr") or 0.0)
+                            rf = str(d_it.get("rf") or "")
+                            pcv = int(d_it.get("pcv") or 0)
+                            if rf in ("4", "5") or (pcv > 0 and nv < pcv):
+                                cv = -abs(cv)
+                                cr = -abs(cr)
+                            elif rf in ("1", "2") or (pcv > 0 and nv > pcv):
+                                cv = abs(cv)
+                                cr = abs(cr)
+                            bulk_naver_map[cd] = {
+                                "price": nv,
+                                "change": cv,
+                                "changePct": round(cr, 2),
+                                "volume": int(d_it.get("aq") or 0),
+                            }
+        except Exception as poll_err:
+            print(f"[Realtime Polling Notice] {poll_err}")
+
+        for original_t, pure_ticker in kr_items:
+            q_val = bulk_naver_map.get(pure_ticker)
+            if not q_val or q_val.get("price", 0) <= 0:
+                detail = None
+                if kis_client:
+                    try:
+                        detail = kis_client.get_current_price_detail(pure_ticker)
+                    except Exception:
+                        detail = None
+                if not detail or detail.get("price", 0) <= 0:
+                    try:
+                        detail = naver_scraper.get_current_price_detail(pure_ticker)
+                    except Exception:
+                        detail = None
+                if detail and detail.get("price", 0) > 0:
+                    q_val = {
+                        "price": detail.get("price", 0),
+                        "change": detail.get("change", 0),
+                        "changePct": round(float(detail.get("changePct", 0.0)), 2),
+                        "volume": detail.get("volume", 0),
+                    }
+            if q_val and q_val.get("price", 0) > 0:
+                quotes[original_t] = q_val
+                quotes[pure_ticker] = q_val
+                quotes[f"KRX:{pure_ticker}"] = q_val
+            else:
+                missing_tickers.append(original_t)
 
     # 3. 해외주식/누락종목 고속 일괄 yfinance 조회 (0.8초 내 20~30종목 일괄 처리)
     if missing_tickers:
@@ -2942,6 +2978,52 @@ def api_get_fundamentals(ticker: str):
         else:
             resolved_name = yf_short_name or db_fallback_name or yf_ticker
 
+        # ★ 실시간 현재가·전일대비·등락률 정밀 조회:
+        # 한국 주식(KOSPI/KOSDAQ, 특히 .KQ 코스닥 종목)은 yfinance info가 0 또는 전일 종가를 반환하는 경우가 많으므로
+        # 네이버 실시간 폴링/모바일 API(naver_scraper.get_current_price_detail)를 최우선 적용하여 실시간 주가와 등락률을 100% 일치시킴
+        live_price_val = 0
+        live_change_val = 0
+        live_change_pct_val = 0.0
+        if is_krx:
+            try:
+                from naver_finance_scraper import naver_scraper
+                rt_detail = naver_scraper.get_current_price_detail(pure_ticker)
+                if rt_detail and rt_detail.get("price", 0) > 0:
+                    live_price_val = rt_detail["price"]
+                    live_change_val = rt_detail.get("change", 0)
+                    live_change_pct_val = float(rt_detail.get("changePct", 0.0))
+            except Exception as rt_err:
+                print(f"Realtime detail error for {pure_ticker}: {rt_err}")
+
+        if live_price_val <= 0:
+            live_price_val = (
+                (nv_fund.get("current_price", 0) if nv_fund else 0)
+                or info.get("currentPrice")
+                or info.get("regularMarketPrice")
+                or info.get("previousClose")
+                or krx_price
+                or db_fallback_price
+                or 0
+            )
+            live_change_val = info.get("regularMarketChange", 0) or (
+                (info.get("currentPrice", krx_price) - info.get("previousClose", krx_price))
+                if info.get("currentPrice", krx_price) and info.get("previousClose", krx_price)
+                else 0
+            )
+            live_change_pct_val = float(info.get("regularMarketChangePercent", 0) or 0.0)
+
+        resolved_shares = (
+            nv_fund.get("shares")
+            if nv_fund and isinstance(nv_fund.get("shares"), (int, float)) and nv_fund.get("shares") > 0
+            else info.get("sharesOutstanding", 0)
+        ) or 0
+        resolved_mcap = (
+            (live_price_val * resolved_shares if is_krx and live_price_val > 0 and resolved_shares > 0 else 0)
+            or (nv_fund.get("market_cap", 0) if nv_fund else 0)
+            or info.get("marketCap")
+            or (krx_price * resolved_shares if krx_price and resolved_shares else 0)
+        )
+
         import math
         def _sanitize_json(obj):
             if isinstance(obj, float):
@@ -2967,23 +3049,23 @@ def api_get_fundamentals(ticker: str):
             "targetHigh": info.get("targetHighPrice", 0),
             "targetMean": targetMean,
             "targetLow": info.get("targetLowPrice", 0),
-            "marketCap": info.get("marketCap") or (nv_fund.get("market_cap", 0) if nv_fund else 0) or (krx_price * nv_fund.get("shares", 0) if krx_price and isinstance(nv_fund.get("shares"), (int, float)) else 0),
+            "marketCap": resolved_mcap,
             "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", 0),
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", 0),
-            "currentPrice": info.get("currentPrice") or info.get("previousClose") or (nv_fund.get("current_price", 0) if nv_fund else 0) or krx_price or db_fallback_price,
+            "currentPrice": live_price_val,
             "analyst_count": info.get("numberOfAnalystOpinions", 0) or len(target_history),
             "price_chart": price_chart,
             "rs_chart": rs_chart,
             "eps_trend": eps_trend,
             "net_income_trend": nv_fund.get("net_income_trend", []),
             "payout_ratio": nv_fund.get("payout_ratio", "N/A"),
-            "shares": (nv_fund.get("shares") if nv_fund and isinstance(nv_fund.get("shares"), (int, float)) and nv_fund.get("shares") > 0 else info.get("sharesOutstanding", 0)) or 0,
-            "outstanding_shares": (nv_fund.get("shares") if nv_fund and isinstance(nv_fund.get("shares"), (int, float)) and nv_fund.get("shares") > 0 else info.get("sharesOutstanding", 0)) or 0,
+            "shares": resolved_shares,
+            "outstanding_shares": resolved_shares,
             "target_history": target_history,
             "financials": financials,
-            "price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose") or (nv_fund.get("current_price", 0) if nv_fund else 0) or krx_price or db_fallback_price,
-            "change": info.get("regularMarketChange", 0) or (info.get("currentPrice", krx_price) - info.get("previousClose", krx_price) if info.get("currentPrice", krx_price) and info.get("previousClose", krx_price) else 0),
-            "changePct": info.get("regularMarketChangePercent", 0) or 0,
+            "price": live_price_val,
+            "change": live_change_val,
+            "changePct": round(live_change_pct_val, 2),
             "currency": info.get("currency", "KRW" if is_krx else "USD")
         })
     except Exception as e:

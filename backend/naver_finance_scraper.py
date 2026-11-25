@@ -24,7 +24,32 @@ class NaverFinanceScraper:
         result = {"price": 0, "change": 0, "changePct": 0, "volume": 0}
         
         try:
-            # 1. 주가 및 등락률 (basic API)
+            # 0. 초고속 실시간 폴링 API (장중 실시간 현재가 nv, 전일대비 cv, 등락률 cr, 부호 rf, 거래량 aq)
+            poll_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{clean_ticker}"
+            poll_res = requests.get(poll_url, headers=self.headers, timeout=2.5)
+            if poll_res.status_code == 200:
+                p_items = poll_res.json().get("result", {}).get("areas", [{}])[0].get("datas", [])
+                if p_items:
+                    p_it = p_items[0]
+                    nv = int(p_it.get("nv") or 0)
+                    if nv > 0:
+                        cv = int(p_it.get("cv") or 0)
+                        cr = float(p_it.get("cr") or 0.0)
+                        rf = str(p_it.get("rf") or "")
+                        pcv = int(p_it.get("pcv") or 0)
+                        if rf in ("4", "5") or (pcv > 0 and nv < pcv):
+                            cv = -abs(cv)
+                            cr = -abs(cr)
+                        elif rf in ("1", "2") or (pcv > 0 and nv > pcv):
+                            cv = abs(cv)
+                            cr = abs(cr)
+                        result["price"] = nv
+                        result["change"] = cv
+                        result["changePct"] = round(cr, 2)
+                        result["volume"] = int(p_it.get("aq") or 0)
+                        return result
+
+            # 1. 주가 및 등락률 (basic API 폴백)
             basic_url = f"https://m.stock.naver.com/api/stock/{clean_ticker}/basic"
             basic_res = requests.get(basic_url, headers=self.headers, timeout=3)
             if basic_res.status_code == 200:
