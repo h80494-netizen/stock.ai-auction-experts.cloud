@@ -936,18 +936,21 @@ def inquire_kis_etf_us_account(
 
     rotation_needed = len(sell_plan) > 0 or len(buy_plan) > 0
     if not held_tickers and target_tickers:
-        signal_status_label = f"신규 진입 대기 (현재 미보유 → 총 {budget_man_str} 한도 내 {target_qty_disp} 종가매수 권장)"
+        signal_status_label = f"신규 매수 진입 대기 (현재 미보유 → 총 {budget_man_str} 한도 내 {target_qty_disp} 종가매수)"
     elif rotation_needed:
-        # 동일 종목 보유 중이나 실시간 가격/환율 미세 변동으로 수량만 차이 나는 경우 안내 명확화
+        # 동일 종목 보유 중이나 실시간 가격/환율 미세 변동으로 수량만 차이 나는 경우 Holding으로 유지
         if set(held_tickers) == set(target_tickers):
-            signal_status_label = f"✅ 추천 타겟 일치 ({', '.join(held_tickers)}) — {budget_man_str} 한도 기준 산출수량: {target_qty_disp}"
+            signal_status_label = f"🟢 Holding (현재 보유 ETF 유지: {', '.join(held_tickers)} · 매매 없음 / 목표수량: {target_qty_disp})"
             rotation_needed = False
             sell_plan = [s for s in sell_plan if s["ticker"] not in target_tickers]
             buy_plan = [b for b in buy_plan if b["ticker"] not in held_tickers]
         else:
-            signal_status_label = f"⚡ 교체 시그널 발생! (보유: {', '.join(held_tickers)} ➔ 목표: {target_qty_disp} · 총 {budget_man_str} 한도)"
+            signal_status_label = (
+                f"⚡ 교체 매매 발생! [매도(SELL): {', '.join(held_tickers) if held_tickers else '없음'} "
+                f"+ 매수(BUY): {target_qty_disp} 동시 종가주문 · 총 {budget_man_str} 한도]"
+            )
     else:
-        signal_status_label = f"✅ 포지션 일치·유지중 (보유: {', '.join(held_tickers) if held_tickers else 'CASH'} / 추가 매매 불필요)"
+        signal_status_label = f"🟢 Holding (현재 보유 ETF 유지: {', '.join(held_tickers) if held_tickers else 'CASH'} · 매매 없음)"
 
     total_eval_usd = round(sum(h["eval_amount_usd"] for h in effective_holdings), 2)
     total_pnl_usd = round(sum(h["eval_pnl_usd"] for h in effective_holdings), 2)
@@ -1464,36 +1467,42 @@ def execute_etf_us_rebalance_or_order(
             return {
                 "success": True,
                 "skipped": True,
-                "message": f"현재 보유 포지션({status_before.get('HeldDisplay', prev_str)})이 총 {budget_man_str} 한도 기준 추천 타겟({target_with_qty_str})과 이미 일치하여 추가 매매 없이 보유를 유지합니다. (다가오는 미국장 마감 10분 전 15:50 ET에 최종 신호 재점검)",
+                "holding": True,
+                "action_status": "Holding",
+                "message": f"🟢 [Holding · 현재 보유 ETF 유지] 현재 보유 포지션({status_before.get('HeldDisplay', prev_str)})이 추천 타겟({target_with_qty_str})과 동일하여 추가 매매 없이 Holding(보유 유지)합니다.",
                 "executed_orders": [],
                 "account_status": status_before,
             }
 
-        for s_item in sell_plan:
-            res = _submit_single_kis_us_order(
-                ticker=s_item["ticker"],
-                side="SELL",
-                qty=int(s_item["qty"]),
-                ord_dvsn=ord_dvsn,
-                prev_tickers_str=prev_str,
-                target_tickers_str=target_with_qty_str,
-                reason=s_item.get("reason") or reason,
-                user_id=uid,
-            )
-            executed_orders.append(res)
+        # 매도 ETF(기존 보유)와 매수 ETF(신규 추천)를 동시(병렬) 주문 전송하여 슬리피지 없이 동시 종가체결 수행
+        import concurrent.futures
 
+        combined_tasks = []
+        for s_item in sell_plan:
+            combined_tasks.append(("SELL", s_item))
         for b_item in buy_plan:
-            res = _submit_single_kis_us_order(
-                ticker=b_item["ticker"],
-                side="BUY",
-                qty=int(b_item["qty"]),
+            combined_tasks.append(("BUY", b_item))
+
+        def _exec_task(side_code: str, plan_item: Dict[str, Any]) -> Dict[str, Any]:
+            return _submit_single_kis_us_order(
+                ticker=plan_item["ticker"],
+                side=side_code,
+                qty=int(plan_item["qty"]),
                 ord_dvsn=ord_dvsn,
                 prev_tickers_str=prev_str,
                 target_tickers_str=target_with_qty_str,
-                reason=b_item.get("reason") or reason,
+                reason=plan_item.get("reason") or reason,
                 user_id=uid,
             )
-            executed_orders.append(res)
+
+        if len(combined_tasks) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(combined_tasks))) as pool_exec:
+                futs = [pool_exec.submit(_exec_task, sc, pi) for sc, pi in combined_tasks]
+                for f in futs:
+                    executed_orders.append(f.result())
+        elif len(combined_tasks) == 1:
+            sc, pi = combined_tasks[0]
+            executed_orders.append(_exec_task(sc, pi))
 
     us_today = _get_us_et_now().strftime("%Y-%m-%d")
     update_kis_etf_us_config({"last_auto_traded_us_date": us_today}, user_id=uid)

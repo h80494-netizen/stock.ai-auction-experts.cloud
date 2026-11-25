@@ -639,13 +639,18 @@ def get_etf_simulation(criteria="momentum", top_n=1, w1=0.5, w5=0.3, w20=0.2, pi
 
     kospi_series = precalc.get("kospi") if (precalc and "kospi" in precalc) else get_kospi_aligned_series(dates)
 
+    etf_raw_prices = {}
+    for c_idx, ticker in enumerate(cols):
+        etf_raw_prices[ticker] = [round(sanitize_val(v, 0.0), 2) for v in pivot_arr[:, c_idx].tolist()]
+
     result_obj = {
         "dates": dates,
         "strategy": strategy_returns,
         "kospi": kospi_series,
         "selected_etf": selected_etf,
         "selected_etf_list": selected_etf_lists,
-        "etfs": etf_normalized
+        "etfs": etf_normalized,
+        "etf_prices": etf_raw_prices,
     }
     if len(_SIM_RESULT_CACHE) > 128:
         _SIM_RESULT_CACHE.clear()
