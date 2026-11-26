@@ -67,8 +67,10 @@ export default function AnalystReportsView() {
     setCopied(false);
 
     try {
-      // 1. PDF 텍스트 추출
-      const parseRes = await fetch(`/api/reports/parse-pdf?pdf_url=${encodeURIComponent(report.pdf_url)}`);
+      // 1. PDF 텍스트 추출 (메타데이터 함께 전달)
+      const parseRes = await fetch(
+        `/api/reports/parse-pdf?pdf_url=${encodeURIComponent(report.pdf_url)}&title=${encodeURIComponent(report.title || "")}&broker=${encodeURIComponent(report.broker || "")}`
+      );
       if (!parseRes.ok) throw new Error("리포트 PDF 다운로드/텍스트 추출에 실패했습니다.");
       const { text } = await parseRes.json();
 
@@ -77,7 +79,13 @@ export default function AnalystReportsView() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: `종목/제목: ${report.title}\n증권사: ${report.broker} (${report.author})\n\n다음 증권사 리포트 본문에서 (1) 투자의견 및 목표주가 (2) 핵심 투자포인트 3가지 (3) EPS/실적 추정치 변화를 3줄 요약해줘:\n\n${text}`
+          title: report.title,
+          broker: report.broker,
+          target_price: report.target_price,
+          opinion: report.opinion,
+          date: report.date,
+          pdf_url: report.pdf_url,
+          prompt: `종목/제목: ${report.title}\n증권사: ${report.broker} (${report.author || ""})\n투자의견: ${report.opinion} | 목표주가: ${report.target_price}\n\n다음 증권사 리포트 본문에서 (1) 투자의견 및 목표주가 (2) 핵심 투자포인트 3가지 (3) EPS/실적 추정치 변화를 요약해줘:\n\n${text}`
         })
       });
 
