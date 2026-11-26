@@ -900,10 +900,8 @@ export default function IntegratedPnlSummaryView({
       };
     });
 
-    // 사용자 요청: "x축은 3개월의 경우 0부터 -90일이 될 것이고 6개월의 경우 0부터 -180일이 될꺼야"
-    // 좌측 0일(현재일)부터 우측 -90일(-180일, -30일) 순서로 정렬
-    const seriesZeroToMinusN = [...pointsFromStartToEnd].reverse();
-
+    // 사용자 요청: "통합손익의 오버레이 챠트에서 X축을 기준시점에서 현재시점을 오른쪽으로 펼쳐지도록 해줘"
+    // 좌측 -N일(기준시점, 수익률 0% 출발)부터 우측 0일(현재시점, 최종 누적수익률) 순서로 펼쳐지도록 배치
     return {
       windowDays,
       labelName,
@@ -913,7 +911,7 @@ export default function IntegratedPnlSummaryView({
       prevFinalRetPct: Number(((prevCumPnl / totalCapitalBase) * 100).toFixed(2)),
       curFinalPnlKrw: curCumPnl,
       prevFinalPnlKrw: prevCumPnl,
-      series: seriesZeroToMinusN,
+      series: pointsFromStartToEnd,
     };
   }, [allCombinedChrono, periodPreset, todayStr, etfBudgetKrw]);
 
@@ -1220,13 +1218,13 @@ export default function IntegratedPnlSummaryView({
         </div>
       </div>
 
-      {/* 2. 최근 구간(0 ~ -N일) vs 직전 구간(-N일 ~ -2N일) 동시 비교 오버레이 차트 (1개월: 0~-30일 / 3개월: 0~-90일 / 6개월: 0~-180일) */}
+      {/* 2. 최근 구간(-N일 ~ 0일) vs 직전 구간(-2N일 ~ -N일) 동시 비교 오버레이 차트 (1개월: -30~0일 / 3개월: -90~0일 / 6개월: -180~0일) */}
       <div className="bg-slate-900/95 border border-amber-500/40 rounded-2xl p-4 shadow-xl space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-2.5">
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-300 text-[11px] font-extrabold">
-                📊 기간별 수익률 연속성 비교 (X축: 0일[현재] → -{periodOverlayComparison.windowDays}일)
+                📊 기간별 수익률 연속성 비교 (X축: -{periodOverlayComparison.windowDays}일[기준시점] → 0일[현재시점])
               </span>
               <span className="text-xs font-mono text-emerald-300 font-bold">
                 ■ 최근 {periodOverlayComparison.labelName} ({periodOverlayComparison.curRangeLabel}):{" "}
@@ -1240,16 +1238,16 @@ export default function IntegratedPnlSummaryView({
               </span>
             </div>
             <h2 className="text-sm sm:text-base font-extrabold text-white mt-1">
-              📈 [최근 {periodOverlayComparison.labelName} vs 직전 {periodOverlayComparison.labelName}] 통합 수익률 오버레이 비교 그래프 (X축: 0일 ~ -{periodOverlayComparison.windowDays}일)
+              📈 [최근 {periodOverlayComparison.labelName} vs 직전 {periodOverlayComparison.labelName}] 통합 수익률 오버레이 비교 그래프 (X축: -{periodOverlayComparison.windowDays}일 ~ 0일)
             </h2>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {(
               [
-                { id: "1M", label: "1개월 (0 ~ -30일)" },
-                { id: "3M", label: "3개월 (0 ~ -90일)" },
-                { id: "6M", label: "6개월 (0 ~ -180일)" },
+                { id: "1M", label: "1개월 (-30 ~ 0일)" },
+                { id: "3M", label: "3개월 (-90 ~ 0일)" },
+                { id: "6M", label: "6개월 (-180 ~ 0일)" },
               ] as const
             ).map((b) => (
               <button
@@ -1310,7 +1308,7 @@ export default function IntegratedPnlSummaryView({
                   return (
                     <div className="bg-[#090d16] border border-slate-700 rounded-xl p-3 shadow-2xl text-xs font-mono space-y-1.5">
                       <div className="font-extrabold text-amber-300 border-b border-slate-800 pb-1">
-                        경과일: {pt.dayAxisLabel} (0일=종료일 ← -{periodOverlayComparison.windowDays}일=시작일)
+                        경과일: {pt.dayAxisLabel} (-{periodOverlayComparison.windowDays}일=기준시점 → 0일=현재시점)
                       </div>
                       <div className="text-emerald-400 font-bold">
                         ■ 최근 {periodOverlayComparison.labelName} ({pt.curDate}):{" "}

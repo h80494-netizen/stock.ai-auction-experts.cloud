@@ -18,7 +18,7 @@ import GlobalNewsRankingView from '@/components/GlobalNewsRankingView';
 import ETFStrategyView from '@/components/ETFStrategyView';
 import ETFSimulationHistoryView from '@/components/ETFSimulationHistoryView';
 import TetrisScreenerView from '@/components/TetrisScreenerView';
-import FCFComparisonView from '@/components/FCFComparisonView';
+import SectorRelativeStrengthView from '@/components/SectorRelativeStrengthView';
 import DartLabFinancialView from '@/components/DartLabFinancialView';
 import AnalystReportsView from '@/components/AnalystReportsView';
 import FuturesSimulationView from '@/components/FuturesSimulationView';
@@ -96,7 +96,8 @@ export default function Home() {
     return true;
   };
 
-  const [activeTab, setActiveTab] = useState<'integrated_pnl' | 'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('integrated_pnl');
+  const [activeTab, setActiveTab] = useState<'integrated_pnl' | 'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'sector_rs' | 'tetris'>('integrated_pnl');
+  const [selectedTetrisSector, setSelectedTetrisSector] = useState<string>('ALL');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
@@ -409,9 +410,9 @@ export default function Home() {
                 { id: 'globalnews', label: '🌐 글로벌 뉴스 랭킹', accent: 'border-indigo-500/50 text-indigo-200' },
                 { id: 'sector', label: '🏭 업종 분석 (Sectors)', accent: 'border-blue-500/50 text-blue-200' },
                 { id: 'competitor', label: '⚔️ 경쟁업체 분석', accent: 'border-amber-500/50 text-amber-200' },
-                { id: 'fcf_compare', label: '💰 FCF 비교 (SEC/NVDA)', accent: 'border-emerald-500/50 text-emerald-200' },
                 { id: 'global', label: '🌍 글로벌 지수', accent: 'border-orange-500/50 text-orange-200' },
                 { id: 'derivatives', label: '📊 파생/수급 랩', accent: 'border-teal-500/50 text-teal-200' },
+                { id: 'sector_rs', label: '📈 섹터 상대강도 (Sector RS)', accent: 'border-rose-500/60 text-rose-200' },
                 { id: 'tetris', label: '🧱 종목 필터링 (Tetris)', accent: 'border-purple-500/50 text-purple-200' },
                 { id: 'scanner', label: '🕷️ DB크롤링 스캐너', accent: 'border-blue-500/50 text-blue-200' },
               ].map(item => {
@@ -593,16 +594,6 @@ export default function Home() {
             경쟁업체 분석 (Competitors)
           </button>
           <button
-            onClick={() => setActiveTab('fcf_compare')}
-            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
-              activeTab === 'fcf_compare' 
-                ? 'bg-emerald-900/30 border-emerald-700 text-emerald-400' 
-                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            FCF 비교 (SEC vs NVDA)
-          </button>
-          <button
             onClick={() => setActiveTab('global')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
               activeTab === 'global' 
@@ -621,6 +612,16 @@ export default function Home() {
             }`}
           >
             파생/수급 랩
+          </button>
+          <button
+            onClick={() => setActiveTab('sector_rs')}
+            className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 ${
+              activeTab === 'sector_rs'
+                ? 'bg-rose-900/40 border-rose-500 text-rose-300 shadow-md shadow-rose-900/30'
+                : 'bg-transparent border-transparent text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            📈 섹터 상대강도 (Sector RS)
           </button>
           <button
             onClick={() => setActiveTab('tetris')}
@@ -754,10 +755,25 @@ export default function Home() {
           <MarketScannerView />
         ) : activeTab === 'globalnews' ? (
           <GlobalNewsRankingView onNavigateToSearch={(ticker) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} />
+        ) : activeTab === 'sector_rs' ? (
+          <SectorRelativeStrengthView
+            onExploreSectorInTetris={(secName) => {
+              setSelectedTetrisSector(secName);
+              setActiveTab('tetris');
+            }}
+            onSelectStockTicker={(tk) => {
+              setGlobalSearchTicker(tk);
+              setActiveTab('search');
+            }}
+          />
         ) : activeTab === 'tetris' ? (
-          <TetrisScreenerView setGlobalSearchTicker={(ticker: string) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }} globalStocks={globalData?.stocks || []} stocks={stocks} />
-        ) : activeTab === 'fcf_compare' ? (
-          <FCFComparisonView />
+          <TetrisScreenerView
+            setGlobalSearchTicker={(ticker: string) => { setGlobalSearchTicker(ticker); setActiveTab('search'); }}
+            globalStocks={globalData?.stocks || []}
+            stocks={stocks}
+            initialSector={selectedTetrisSector}
+            onNavigateSectorRS={() => setActiveTab('sector_rs')}
+          />
         ) : activeTab === 'dartlab' ? (
           <DartLabFinancialView initialTicker={globalSearchTicker || "005930"} onSelectTicker={(tk) => setGlobalSearchTicker(tk)} />
         ) : activeTab === 'reports' ? (

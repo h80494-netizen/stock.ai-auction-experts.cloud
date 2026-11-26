@@ -29,7 +29,13 @@ const getSectorColor = (sectorName: string, indexHint: number = 0) => {
   return SECTOR_PALETTE[(hash + indexHint) % SECTOR_PALETTE.length];
 };
 
-export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks, stocks }: any) {
+export default function TetrisScreenerView({
+  setGlobalSearchTicker,
+  globalStocks,
+  stocks,
+  initialSector,
+  onNavigateSectorRS,
+}: any) {
   // 1. ROE 및 전분기 대비(QoQ) ROE 증가(기울기 우상향) 결합 모드
   // HIGH_OR_UP: ROE가 높은 수준이거나(OR) 전분기 대비 ROE가 증가하는 종목
   // HIGH_AND_UP: ROE도 높고(AND) 전분기 대비 ROE도 증가하는 종목
@@ -72,9 +78,17 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
   const [maxPriceChange, setMaxPriceChange] = useState<number>(25);
 
   const [marketFilter, setMarketFilter] = useState<'ALL' | 'KOSPI' | 'KOSDAQ'>('ALL');
-  const [selectedSector, setSelectedSector] = useState<string>('ALL');
+  const [selectedSector, setSelectedSector] = useState<string>(initialSector || 'ALL');
   const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
   const [sortBy, setSortBy] = useState<string>('ROE_PBR_RATIO');
+
+  useEffect(() => {
+    if (initialSector) {
+      setSelectedSector(initialSector);
+      setZoomPercent(100);
+      setAnchorPoint(null);
+    }
+  }, [initialSector]);
 
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -528,6 +542,17 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {onNavigateSectorRS && (
+            <button
+              type="button"
+              onClick={() => onNavigateSectorRS()}
+              className="bg-rose-950/90 hover:bg-rose-900 text-rose-200 font-extrabold py-2.5 px-4 rounded-xl transition-all shadow-lg border border-rose-400/60 active:scale-95 flex items-center gap-1.5 cursor-pointer text-xs sm:text-sm"
+              title="시장지수 대비 섹터별 지수 추이 및 최강 주도 섹터 / 약세 섹터 상대강도를 먼저 판별합니다"
+            >
+              <span>📈</span>
+              <span>섹터 상대강도(RS) 추이 차트 보기</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => saveCurrentFilterConfig(true)}
