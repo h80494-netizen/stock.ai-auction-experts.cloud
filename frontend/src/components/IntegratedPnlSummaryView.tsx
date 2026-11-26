@@ -66,7 +66,7 @@ export default function IntegratedPnlSummaryView({
   const [lastSyncedAt, setLastSyncedAt] = useState<string>("");
 
   // 기간 필터
-  const [periodPreset, setPeriodPreset] = useState<"1M" | "3M" | "6M" | "YTD" | "ALL">("YTD");
+  const [periodPreset, setPeriodPreset] = useState<"TODAY" | "1M" | "3M" | "6M" | "YTD" | "ALL">("YTD");
   const [startDate, setStartDate] = useState<string>("2026-01-02");
   const [detailFilter, setDetailFilter] = useState<"ALL" | "TRADED_ONLY">("ALL");
   const [expandedDate, setExpandedDate] = useState<string | null>(null);
@@ -92,10 +92,12 @@ export default function IntegratedPnlSummaryView({
     return new Date(Date.now() + 9 * 3600 * 1000).toISOString().split("T")[0];
   }, []);
 
-  const applyPreset = (preset: "1M" | "3M" | "6M" | "YTD" | "ALL") => {
+  const applyPreset = (preset: "TODAY" | "1M" | "3M" | "6M" | "YTD" | "ALL") => {
     setPeriodPreset(preset);
     const baseD = new Date(todayStr + "T00:00:00");
-    if (preset === "YTD") {
+    if (preset === "TODAY") {
+      setStartDate(todayStr);
+    } else if (preset === "YTD") {
       setStartDate("2026-01-02");
     } else if (preset === "ALL") {
       setStartDate("2023-01-02");
@@ -365,10 +367,12 @@ export default function IntegratedPnlSummaryView({
       });
     });
 
-    // 당일 장중 매도확정 종목 포함
+    // 당일 장중 매도확정 종목 또는 금일 종가청산 종목 포함
     const todaySold = krDetailedLedger.filter(
       (r: any) => r.trade_date === todayStr && r.status === "SELL"
     );
+    const todaySettledHistory = krLedgerHistory.find((h: any) => h.date === todayStr);
+
     todaySold.forEach((r: any) => {
       const cleanTk = String(r.ticker || "").split(":").pop() || String(r.ticker || "");
       if (heldSet.has(cleanTk)) return;
@@ -378,11 +382,9 @@ export default function IntegratedPnlSummaryView({
       const bTotal = bp * q;
       const sTotal = sp * q;
       const pnlVal = r.pnl !== undefined && r.pnl !== null ? Number(r.pnl) : sTotal - bTotal;
-      if (krHoldings.length > 0) {
-        buyAmt += bTotal;
-        evalAmt += sTotal;
-        livePnl += pnlVal;
-      }
+      buyAmt += bTotal;
+      evalAmt += sTotal;
+      livePnl += pnlVal;
       stockItems.push({
         ticker: cleanTk,
         name: r.name || cleanTk,
@@ -394,6 +396,12 @@ export default function IntegratedPnlSummaryView({
         status: r.sell_type === "INTRADAY" ? "장중매도" : "종가청산",
       });
     });
+
+    if (krHoldings.length === 0 && todaySettledHistory) {
+      buyAmt = Number(todaySettledHistory.total_buy) || buyAmt;
+      evalAmt = Number(todaySettledHistory.total_sell) || evalAmt;
+      livePnl = Number(todaySettledHistory.net_pnl) || livePnl;
+    }
 
     return {
       buyAmt: Math.round(buyAmt),
@@ -763,6 +771,7 @@ export default function IntegratedPnlSummaryView({
             <div className="flex items-center bg-slate-950 border border-slate-800 rounded-xl p-1 gap-1">
               {(
                 [
+                  { id: "TODAY", label: "당일" },
                   { id: "1M", label: "최근 1개월" },
                   { id: "3M", label: "3개월" },
                   { id: "6M", label: "6개월" },
@@ -797,8 +806,27 @@ export default function IntegratedPnlSummaryView({
           </div>
         </div>
 
-        {/* 상단 통합 누적 손익 & 당일 실시간 합산 손익 배너 */}
+        {/* 상단 통합 누적 손익 & 당일 실시간 합산 손익 배너 (금일 실시간 합산손익을 맨 앞으로 배치) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2 border-t border-slate-800/80">
+          <div className="bg-slate-950/90 border-2 border-indigo-500/60 rounded-xl p-3.5 shadow-lg">
+            <div className="flex items-center justify-between text-[11px] text-indigo-300 font-extrabold">
+              <span>⚡ 당일({todayStr}) 3대 전략 실시간 합산손익</span>
+              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-[10px]">TODAY</span>
+            </div>
+            <div
+              className={`text-xl sm:text-2xl font-black font-mono mt-1 ${
+                summaryStats.todayCombinedPnl >= 0 ? "text-emerald-400" : "text-rose-400"
+              }`}
+            >
+              {formatKrw(summaryStats.todayCombinedPnl)}
+            </div>
+            <div className="text-[11px] text-slate-400 font-mono mt-1">
+              선물 {formatKrw(summaryStats.todayFut?.dailyPnlKrw ?? 0)} · 주식{" "}
+              {formatKrw(summaryStats.todayKr?.netPnlKrw ?? 0)} · ETF{" "}
+              {formatKrw(summaryStats.todayEtf?.dailyPnlKrw ?? 0)}
+            </div>
+          </div>
+
           <div className="bg-slate-950/90 border-2 border-amber-500/60 rounded-xl p-3.5 shadow-lg">
             <div className="flex items-center justify-between text-[11px] text-amber-300 font-extrabold">
               <span>🏆 3대 전략 통합 누적손익 ({startDate}~)</span>
@@ -821,40 +849,38 @@ export default function IntegratedPnlSummaryView({
             </div>
           </div>
 
-          <div className="bg-slate-950/90 border border-indigo-500/50 rounded-xl p-3.5">
-            <div className="text-[11px] text-indigo-300 font-extrabold">
-              ⚡ 금일({todayStr}) 3대 전략 실시간 합산손익
-            </div>
-            <div
-              className={`text-xl font-black font-mono mt-1 ${
-                summaryStats.todayCombinedPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {formatKrw(summaryStats.todayCombinedPnl)}
-            </div>
-            <div className="text-[11px] text-slate-400 font-mono mt-1">
-              선물 {formatKrw(summaryStats.todayFut?.dailyPnlKrw ?? 0)} · 주식{" "}
-              {formatKrw(summaryStats.todayKr?.netPnlKrw ?? 0)}
-            </div>
-          </div>
-
           <div
             onClick={() => onNavigateTab && onNavigateTab("futures_sim")}
             className="bg-slate-950/90 border border-emerald-500/40 hover:border-emerald-400 rounded-xl p-3.5 cursor-pointer transition"
           >
             <div className="flex items-center justify-between text-[11px] text-emerald-300 font-extrabold">
-              <span>🚀 ① 선물오버나잇 누적손익</span>
+              <span>🚀 ① 선물오버나잇 (당일 / 누적)</span>
               <span className="text-[10px] underline">바로가기 →</span>
             </div>
-            <div
-              className={`text-lg font-black font-mono mt-1 ${
-                summaryStats.totalFutPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {formatKrw(summaryStats.totalFutPnl)}
+            <div className="flex items-baseline justify-between gap-2 mt-1 font-mono">
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">당일:</span>
+                <span
+                  className={`text-sm font-black ${
+                    (summaryStats.todayFut?.dailyPnlKrw ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.todayFut?.dailyPnlKrw ?? 0)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">누적:</span>
+                <span
+                  className={`text-sm font-black ${
+                    summaryStats.totalFutPnl >= 0 ? "text-emerald-300" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.totalFutPnl)}
+                </span>
+              </div>
             </div>
             <div className="text-[11px] text-slate-400 font-mono mt-1">
-              현재 포지션:{" "}
+              포지션:{" "}
               <strong className="text-white">
                 전일 {summaryStats.todayFut?.prevContracts ?? 0}계약 → 당일 목표{" "}
                 {summaryStats.todayFut?.targetContracts ?? 0}계약
@@ -867,15 +893,30 @@ export default function IntegratedPnlSummaryView({
             className="bg-slate-950/90 border border-rose-500/40 hover:border-rose-400 rounded-xl p-3.5 cursor-pointer transition"
           >
             <div className="flex items-center justify-between text-[11px] text-rose-300 font-extrabold">
-              <span>🚨 ② 매수주문(국내주식) 누적손익</span>
+              <span>🚨 ② 매수주문 (당일 / 누적)</span>
               <span className="text-[10px] underline">바로가기 →</span>
             </div>
-            <div
-              className={`text-lg font-black font-mono mt-1 ${
-                summaryStats.totalKrPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {formatKrw(summaryStats.totalKrPnl)}
+            <div className="flex items-baseline justify-between gap-2 mt-1 font-mono">
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">당일:</span>
+                <span
+                  className={`text-sm font-black ${
+                    (summaryStats.todayKr?.netPnlKrw ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.todayKr?.netPnlKrw ?? 0)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">누적:</span>
+                <span
+                  className={`text-sm font-black ${
+                    summaryStats.totalKrPnl >= 0 ? "text-emerald-300" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.totalKrPnl)}
+                </span>
+              </div>
             </div>
             <div className="text-[11px] text-slate-400 font-mono mt-1 truncate">
               금일 매수:{" "}
@@ -890,15 +931,30 @@ export default function IntegratedPnlSummaryView({
             className="bg-slate-950/90 border border-sky-500/40 hover:border-sky-400 rounded-xl p-3.5 cursor-pointer transition"
           >
             <div className="flex items-center justify-between text-[11px] text-sky-300 font-extrabold">
-              <span>⚡ ③ ETF투자전략 누적손익</span>
+              <span>⚡ ③ ETF투자전략 (당일 / 누적)</span>
               <span className="text-[10px] underline">바로가기 →</span>
             </div>
-            <div
-              className={`text-lg font-black font-mono mt-1 ${
-                summaryStats.totalEtfPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {formatKrw(summaryStats.totalEtfPnl)}
+            <div className="flex items-baseline justify-between gap-2 mt-1 font-mono">
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">당일:</span>
+                <span
+                  className={`text-sm font-black ${
+                    (summaryStats.todayEtf?.dailyPnlKrw ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.todayEtf?.dailyPnlKrw ?? 0)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 mr-1">누적:</span>
+                <span
+                  className={`text-sm font-black ${
+                    summaryStats.totalEtfPnl >= 0 ? "text-emerald-300" : "text-rose-400"
+                  }`}
+                >
+                  {formatKrw(summaryStats.totalEtfPnl)}
+                </span>
+              </div>
             </div>
             <div className="text-[11px] text-slate-400 font-mono mt-1">
               현재 선택 ETF:{" "}
