@@ -1366,6 +1366,12 @@ export default function IntegratedPnlSummaryView({
               <thead>
                 <tr className="bg-slate-950 text-slate-300 border-b-2 border-slate-700 sticky top-0 z-10">
                   <th className="p-2.5">거래일자</th>
+                  <th className="p-2.5 border-l border-slate-800 text-right text-amber-300 font-extrabold bg-amber-950/20">
+                    🏆 당일 통합 합산손익
+                  </th>
+                  <th className="p-2.5 text-right text-white font-extrabold bg-amber-950/20">
+                    누적 통합손익
+                  </th>
                   <th className="p-2.5 border-l border-slate-800 text-emerald-300">
                     ① 선물오버나잇 포지션 (주문)
                   </th>
@@ -1378,10 +1384,6 @@ export default function IntegratedPnlSummaryView({
                     ③ ETF투자전략 선택 ETF (상태)
                   </th>
                   <th className="p-2.5 text-right text-sky-300">ETF 일일손익</th>
-                  <th className="p-2.5 border-l border-slate-800 text-right text-amber-300 font-extrabold">
-                    🏆 당일 통합 합산손익
-                  </th>
-                  <th className="p-2.5 text-right text-white font-extrabold">누적 통합손익</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80">
@@ -1412,6 +1414,32 @@ export default function IntegratedPnlSummaryView({
                               </span>
                             )}
                           </div>
+                        </td>
+
+                        {/* 당일 통합 합산손익 (맨 앞 배치) */}
+                        <td
+                          className={`p-2.5 border-l border-slate-800/80 text-right font-black text-sm bg-amber-950/10 ${
+                            row.dayTotalPnl > 0
+                              ? "text-emerald-400"
+                              : row.dayTotalPnl < 0
+                              ? "text-rose-400"
+                              : "text-slate-400"
+                          }`}
+                        >
+                          {formatKrw(row.dayTotalPnl)}
+                        </td>
+
+                        {/* 누적 통합손익 (맨 앞 배치) */}
+                        <td
+                          className={`p-2.5 text-right font-black bg-amber-950/10 ${
+                            row.cumTotalKrw >= 0 ? "text-amber-300" : "text-rose-400"
+                          }`}
+                        >
+                          {formatKrw(row.cumTotalKrw)}
+                          <span className="text-[10px] text-slate-400 ml-1">
+                            ({row.cumTotalRetPct >= 0 ? "+" : ""}
+                            {row.cumTotalRetPct}%)
+                          </span>
                         </td>
 
                         {/* ① 선물오버나잇 포지션 */}
@@ -1551,32 +1579,6 @@ export default function IntegratedPnlSummaryView({
                           ) : (
                             "0원"
                           )}
-                        </td>
-
-                        {/* 당일 통합 합산손익 */}
-                        <td
-                          className={`p-2.5 border-l border-slate-800/80 text-right font-black text-sm ${
-                            row.dayTotalPnl > 0
-                              ? "text-emerald-400"
-                              : row.dayTotalPnl < 0
-                              ? "text-rose-400"
-                              : "text-slate-400"
-                          }`}
-                        >
-                          {formatKrw(row.dayTotalPnl)}
-                        </td>
-
-                        {/* 누적 통합손익 */}
-                        <td
-                          className={`p-2.5 text-right font-black ${
-                            row.cumTotalKrw >= 0 ? "text-amber-300" : "text-rose-400"
-                          }`}
-                        >
-                          {formatKrw(row.cumTotalKrw)}
-                          <span className="text-[10px] text-slate-400 ml-1">
-                            ({row.cumTotalRetPct >= 0 ? "+" : ""}
-                            {row.cumTotalRetPct}%)
-                          </span>
                         </td>
                       </tr>
 
