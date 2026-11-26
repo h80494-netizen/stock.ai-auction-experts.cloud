@@ -1231,6 +1231,47 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
         const fromX = (svgX: number) => xMin + ((svgX - padL) / plotW) * xRange;
         const fromY = (svgY: number) => yMin + ((padT + plotH - svgY) / plotH) * yRange;
 
+        const handleSvgMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+          const svg = svgRef.current;
+          if (!svg || visibleItems.length === 0) return;
+          const rect = svg.getBoundingClientRect();
+          const scaleX = W / Math.max(1, rect.width);
+          const scaleY = H / Math.max(1, rect.height);
+          const mx = (e.clientX - rect.left) * scaleX;
+          const my = (e.clientY - rect.top) * scaleY;
+          if (mx < padL || mx > padL + plotW || my < padT || my > padT + plotH) {
+            if (hoveredStock !== null) setHoveredStock(null);
+            return;
+          }
+
+          let nearest: any = null;
+          let minDistSq = 18 * 18; // 반경 18px 이내 가장 가까운 종목 탐색
+          for (let i = 0; i < visibleItems.length; i++) {
+            const it = visibleItems[i];
+            const cx = toX(Number(it.pbr) || 0);
+            const cy = toY(Number(it.roe) || 0);
+            const dSq = (mx - cx) * (mx - cx) + (my - cy) * (my - cy);
+            if (dSq < minDistSq) {
+              minDistSq = dSq;
+              nearest = it;
+            }
+          }
+
+          // 히스테리시스(Hysteresis): 이미 호버 중인 종목이 반경 20px 이내에 있고 새 종목과의 거리 차이가 미세하면 기존 종목을 유지하여 떨림(Jitter) 방지
+          if (hoveredStock && nearest && hoveredStock.ticker !== nearest.ticker) {
+            const curHovX = toX(Number(hoveredStock.pbr) || 0);
+            const curHovY = toY(Number(hoveredStock.roe) || 0);
+            const curDistSq = (mx - curHovX) * (mx - curHovX) + (my - curHovY) * (my - curHovY);
+            if (curDistSq <= 20 * 20 && Math.sqrt(curDistSq) - Math.sqrt(minDistSq) < 3.5) {
+              return;
+            }
+          }
+
+          if ((nearest?.ticker || null) !== (hoveredStock?.ticker || null)) {
+            setHoveredStock(nearest);
+          }
+        };
+
         const handleSvgClick = (e: React.MouseEvent<SVGSVGElement>) => {
           const svg = svgRef.current;
           if (!svg) return;
@@ -1240,6 +1281,16 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
           const rawX = (e.clientX - rect.left) * scaleX;
           const rawY = (e.clientY - rect.top) * scaleY;
           if (rawX < padL || rawX > padL + plotW || rawY < padT || rawY > padT + plotH) return;
+          if (hoveredStock) {
+            const pbrV = Number((Number(hoveredStock.pbr) || 0).toFixed(2));
+            const roeV = Number((Number(hoveredStock.roe) || 0).toFixed(1));
+            setAnchorPoint({
+              pbr: pbrV,
+              roe: roeV,
+              label: `${getStockName(hoveredStock)} (${hoveredStock.ticker})`,
+            });
+            return;
+          }
           const clickedPbr = Number(Math.max(0, fromX(rawX)).toFixed(2));
           const clickedRoe = Number(fromY(rawY).toFixed(1));
           setAnchorPoint({
@@ -1533,19 +1584,19 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
 
             {/* 🏆 차트 맨위: 마우스 호버 툴팁 & 주요 종목 라벨 겹침 없는 전용 상단 대시보드 바 */}
             <div className="bg-[#0b101b] border border-indigo-500/40 rounded-xl p-3 space-y-2.5 shadow-inner">
-              {/* 1단: 마우스 호버 툴팁 고정 패널 (차트 위 글씨 겹침 원천 차단) */}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800/90 pb-2 min-h-[36px]">
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="px-2 py-0.5 rounded bg-indigo-600/30 border border-indigo-400/50 text-indigo-200 font-extrabold">
+              {/* 1단: 마우스 호버 툴팁 고정 패널 (높이 고정으로 차트 상하 떨림 원천 차단) */}
+              <div className="flex items-center justify-between gap-2 border-b border-gray-800/90 pb-2 h-[42px] overflow-x-auto overflow-y-hidden whitespace-nowrap">
+                <div className="flex items-center gap-2 text-xs whitespace-nowrap">
+                  <span className="px-2 py-0.5 rounded bg-indigo-600/30 border border-indigo-400/50 text-indigo-200 font-extrabold shrink-0">
                     🎯 선택·호버 종목 상세 툴팁
                   </span>
                   {hoveredStock ? (
-                    <div className="flex flex-wrap items-center gap-2 font-mono text-xs bg-indigo-950/90 border border-indigo-400/70 px-3 py-1 rounded-lg shadow">
-                      <span className="font-sans font-extrabold text-white text-sm">
+                    <div className="flex items-center gap-2 font-mono text-xs bg-indigo-950/90 border border-indigo-400/70 px-2.5 py-0.5 rounded-lg shadow whitespace-nowrap">
+                      <span className="font-sans font-extrabold text-white text-xs">
                         {getStockName(hoveredStock)} ({hoveredStock.ticker})
                       </span>
                       <span
-                        className="px-2 py-0.5 rounded text-[11px] font-sans font-extrabold text-slate-950"
+                        className="px-1.5 py-0.5 rounded text-[10px] font-sans font-extrabold text-slate-950"
                         style={{
                           backgroundColor:
                             sectorColorMap[String(hoveredStock.sector || '기타').trim() || '기타'] || '#38bdf8',
@@ -1554,11 +1605,11 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         {hoveredStock.sector || '기타'}
                       </span>
                       <span className="text-sky-300 font-bold">
-                        PBR: {hoveredStock.prev_q_pbr}배 → {hoveredStock.pbr}배 (
+                        PBR: {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 (
                         {hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
                       </span>
                       <span className="text-emerald-300 font-extrabold">
-                        ROE(25.3Q~26.2Q → 25.4Q~26.3Q): {hoveredStock.prev_q_roe}% → {hoveredStock.roe}% (
+                        ROE(25.3Q~26.2Q→25.4Q~26.3Q): {hoveredStock.prev_q_roe}%→{hoveredStock.roe}% (
                         {hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p{' '}
                         {hoveredStock.qoq_roe_diff >= 0 ? '↗' : '↘'})
                       </span>
@@ -1568,20 +1619,20 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                         <button
                           type="button"
                           onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
-                          className="px-2.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-extrabold text-[11px] cursor-pointer"
+                          className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-extrabold text-[10px] cursor-pointer"
                         >
                           상세 리포트 →
                         </button>
                       )}
                     </div>
                   ) : (
-                    <span className="text-gray-400 text-xs">
-                      아래 주요 종목 라벨 배지 또는 차트의 점(●) 위에 마우스를 올리면 전분기(25.3Q~26.2Q)→현재분기(25.4Q~26.3Q) 상세 수치가 이곳에 겹침 없이 표시됩니다.
+                    <span className="text-gray-400 text-xs truncate">
+                      아래 주요 종목 라벨 배지 또는 차트의 점(●) 위에 마우스를 올리면 전분기(25.3Q~26.2Q)→현재분기(25.4Q~26.3Q) 상세 수치가 이곳에 고정 표시됩니다.
                     </span>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-300 shrink-0">
+                <div className="hidden xl:flex items-center gap-3 text-[11px] text-gray-300 shrink-0">
                   <span className="flex items-center gap-1">
                     <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-emerald-400 bg-transparent" />
                     <span>빈 원(○): 전분기(25.3Q~26.2Q)</span>
@@ -1613,8 +1664,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                       <button
                         key={`top-lbl-${it.ticker}`}
                         type="button"
-                        onMouseEnter={() => setHoveredStock(it)}
-                        onMouseLeave={() => setHoveredStock(null)}
+                        onMouseEnter={() => {
+                          if (hoveredStock?.ticker !== it.ticker) setHoveredStock(it);
+                        }}
                         onClick={() => {
                           const pbrV = Number((Number(it.pbr) || 0).toFixed(2));
                           const roeV = Number((Number(it.roe) || 0).toFixed(1));
@@ -1625,9 +1677,9 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           });
                           setHoveredStock(it);
                         }}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 border ${
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-colors cursor-pointer flex items-center gap-1.5 border ${
                           isHov
-                            ? 'bg-indigo-900 border-white text-white shadow-lg scale-[1.02]'
+                            ? 'bg-indigo-900 border-white text-white shadow-md'
                             : 'bg-[#121826] border-gray-700/80 text-gray-200 hover:border-indigo-400 hover:bg-gray-800/80'
                         }`}
                       >
@@ -1652,6 +1704,10 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${W} ${H}`}
+                onMouseMove={handleSvgMouseMove}
+                onMouseLeave={() => {
+                  if (hoveredStock !== null) setHoveredStock(null);
+                }}
                 onClick={handleSvgClick}
                 onWheel={handleSvgWheel}
                 onDoubleClick={() => {
@@ -1887,23 +1943,11 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                     return (
                       <g
                         key={it.ticker}
-                        className="cursor-pointer"
-                        onMouseEnter={() => setHoveredStock(it)}
-                        onMouseLeave={() => setHoveredStock(null)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const pbrV = Number((Number(it.pbr) || 0).toFixed(2));
-                          const roeV = Number((Number(it.roe) || 0).toFixed(1));
-                          setAnchorPoint({
-                            pbr: pbrV,
-                            roe: roeV,
-                            label: `${getStockName(it)} (${it.ticker})`,
-                          });
-                        }}
+                        className="pointer-events-none"
                       >
                         {/* 하나의 기업에 대해 전분기(2025.3Q~2026.2Q, 빈 원 ○) 점과 현재분기(2025.4Q~2026.3Q, 채운 원 ●) 점을 동시에 표시하고 우상향 기울기 벡터 화살표로 연결 */}
                         {(showQoqTrajectory || isHovered || onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') && (
-                          <g opacity={isHovered ? 1.0 : 0.78} className="pointer-events-none">
+                          <g opacity={isHovered ? 1.0 : 0.78}>
                             {/* 전분기(25.3Q~26.2Q) 시작점: 테두리가 있는 빈 원(○) */}
                             <circle
                               cx={prevX}
@@ -1929,9 +1973,6 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           </g>
                         )}
 
-                        {/* 마우스 히트 영역 고정용 투명 원 */}
-                        <circle cx={curX} cy={curY} r={10} fill="transparent" />
-
                         {/* 현재 종목 위치 원 */}
                         <circle
                           cx={curX}
@@ -1941,7 +1982,6 @@ export default function TetrisScreenerView({ setGlobalSearchTicker, globalStocks
                           fillOpacity={isHovered ? 1.0 : 0.86}
                           stroke={isHovered ? '#ffffff' : '#0f172a'}
                           strokeWidth={isHovered ? '2.2' : '1.2'}
-                          className="pointer-events-none"
                         />
 
                         {/* 차트 내부에서는 서로 겹치지 않는(Collision-Free) 종목명만 간결하게 표시 (상세 수치는 차트 맨위 고정 패널에 표시) */}
