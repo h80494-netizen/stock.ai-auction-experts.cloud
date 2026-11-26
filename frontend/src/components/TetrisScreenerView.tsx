@@ -1306,16 +1306,30 @@ export default function TetrisScreenerView({
           const rawX = (e.clientX - rect.left) * scaleX;
           const rawY = (e.clientY - rect.top) * scaleY;
           if (rawX < padL || rawX > padL + plotW || rawY < padT || rawY > padT + plotH) return;
-          if (hoveredStock) {
-            const pbrV = Number((Number(hoveredStock.pbr) || 0).toFixed(2));
-            const roeV = Number((Number(hoveredStock.roe) || 0).toFixed(1));
-            setAnchorPoint({
-              pbr: pbrV,
-              roe: roeV,
-              label: `${getStockName(hoveredStock)} (${hoveredStock.ticker})`,
-            });
+
+          // 클릭 시점의 마우스 좌표에서 가장 가까운 종목(반경 20px 이내) 또는 현재 호버 종목이 있으면 종목조회(search) 화면으로 즉시 이동
+          let clickedStock = hoveredStock;
+          if (!clickedStock && visibleItems.length > 0) {
+            let minDistSq = 20 * 20;
+            for (let i = 0; i < visibleItems.length; i++) {
+              const it = visibleItems[i];
+              const cx = toX(Number(it.pbr) || 0);
+              const cy = toY(Number(it.roe) || 0);
+              const dSq = (rawX - cx) * (rawX - cx) + (rawY - cy) * (rawY - cy);
+              if (dSq < minDistSq) {
+                minDistSq = dSq;
+                clickedStock = it;
+              }
+            }
+          }
+
+          if (clickedStock) {
+            if (setGlobalSearchTicker) {
+              setGlobalSearchTicker(clickedStock.ticker);
+            }
             return;
           }
+
           const clickedPbr = Number(Math.max(0, fromX(rawX)).toFixed(2));
           const clickedRoe = Number(fromY(rawY).toFixed(1));
           setAnchorPoint({
@@ -1673,7 +1687,7 @@ export default function TetrisScreenerView({
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="font-extrabold text-emerald-300">
-                    🏷️ 화면 내 주요 핵심 종목 라벨 (마우스 호버 시 차트 위치 하이라이트 · 클릭 시 해당 종목 기준점 고정):
+                    🏷️ 화면 내 주요 핵심 종목 라벨 (마우스 호버 시 차트 위치 하이라이트 · 클릭 시 종목조회 화면으로 즉시 이동):
                   </span>
                   <span className="text-gray-400 font-mono">
                     화면 표시 {visibleItems.length}종목 중 상위 {topHeaderStocks.length}개 라벨 정렬
@@ -1693,14 +1707,9 @@ export default function TetrisScreenerView({
                           if (hoveredStock?.ticker !== it.ticker) setHoveredStock(it);
                         }}
                         onClick={() => {
-                          const pbrV = Number((Number(it.pbr) || 0).toFixed(2));
-                          const roeV = Number((Number(it.roe) || 0).toFixed(1));
-                          setAnchorPoint({
-                            pbr: pbrV,
-                            roe: roeV,
-                            label: `${getStockName(it)} (${it.ticker})`,
-                          });
-                          setHoveredStock(it);
+                          if (setGlobalSearchTicker) {
+                            setGlobalSearchTicker(it.ticker);
+                          }
                         }}
                         className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-colors cursor-pointer flex items-center gap-1.5 border ${
                           isHov
@@ -1739,7 +1748,9 @@ export default function TetrisScreenerView({
                   setZoomPercent(100);
                   setAnchorPoint(null);
                 }}
-                className="w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none cursor-crosshair"
+                className={`w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none ${
+                  hoveredStock ? 'cursor-pointer' : 'cursor-crosshair'
+                }`}
               >
                 <defs>
                   <clipPath id="tetris-scatter-clip">
