@@ -2503,6 +2503,7 @@ def admin_update_user_password(request_id: int, new_password: str):
 
 
 RESTRICTED_MENU_ITEMS = [
+    ("integrated_pnl", "📋 통합손익관리표"),
     ("futures_sim", "🚀 선물오버나잇자동매매"),
     ("order", "🚨 매수주문 (Orders)"),
     ("etf_strategy", "⚡ ETF 투자전략"),

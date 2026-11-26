@@ -22,6 +22,7 @@ import FCFComparisonView from '@/components/FCFComparisonView';
 import DartLabFinancialView from '@/components/DartLabFinancialView';
 import AnalystReportsView from '@/components/AnalystReportsView';
 import FuturesSimulationView from '@/components/FuturesSimulationView';
+import IntegratedPnlSummaryView from '@/components/IntegratedPnlSummaryView';
 import PrivateAccessGate from '@/components/PrivateAccessGate';
 import AdminApprovalModal from '@/components/AdminApprovalModal';
 import ChangePasswordModal from '@/components/ChangePasswordModal';
@@ -86,13 +87,16 @@ export default function Home() {
 
   const isMenuAllowed = (tabId: string) => {
     if (isAdmin) return true;
+    if (tabId === 'integrated_pnl') {
+      return Boolean(menuPermissions['integrated_pnl'] ?? (menuPermissions['futures_sim'] || menuPermissions['order'] || menuPermissions['etf_strategy']));
+    }
     if (['futures_sim', 'order', 'etf_strategy', 'etf_history'].includes(tabId)) {
       return Boolean(menuPermissions[tabId]);
     }
     return true;
   };
 
-  const [activeTab, setActiveTab] = useState<'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('dartlab');
+  const [activeTab, setActiveTab] = useState<'integrated_pnl' | 'search' | 'price' | 'dartlab' | 'reports' | 'order' | 'competitor' | 'sector' | 'target' | 'heatmap' | 'global' | 'trending' | 'etf' | 'derivatives' | 'futures_sim' | 'scanner' | 'globalnews' | 'etf_strategy' | 'etf_history' | 'tetris' | 'fcf_compare'>('integrated_pnl');
   const [etfWeights, setEtfWeights] = useState({ w1: 0.5, w5: 0.3, w20: 0.2 });
   const [globalSearchTicker, setGlobalSearchTicker] = useState("");
   const [stocks, setStocks] = useState<any[]>([]);
@@ -389,6 +393,7 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-2 gap-1.5 max-h-[60vh] overflow-y-auto">
               {[
+                { id: 'integrated_pnl', label: '📋 통합손익관리표 (3대전략)', accent: 'border-amber-500/70 text-amber-200' },
                 { id: 'futures_sim', label: '🚀 선물오버나잇자동매매', accent: 'border-emerald-500/60 text-emerald-200' },
                 { id: 'order', label: '🚨 매수주문 (Orders)', accent: 'border-red-500/60 text-red-300' },
                 { id: 'etf_strategy', label: '⚡ ETF 투자전략', accent: 'border-sky-500/50 text-sky-200' },
@@ -436,6 +441,19 @@ export default function Home() {
         )}
 
         <div className="flex items-center gap-1 w-full md:flex-1 md:min-w-0 overflow-x-auto top-nav-scroll pb-2">
+          <button
+            onClick={() => setActiveTab('integrated_pnl')}
+            className={`px-3 py-1.5 rounded font-extrabold text-xs border whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
+              activeTab === 'integrated_pnl'
+                ? 'bg-amber-900/50 border-amber-400 text-amber-200 shadow-md shadow-amber-900/40'
+                : !isMenuAllowed('integrated_pnl')
+                ? 'bg-gray-900/60 border-gray-800 text-gray-500'
+                : 'bg-amber-950/35 border-amber-700/60 text-amber-300 hover:text-amber-100'
+            }`}
+          >
+            <span>📋 통합손익관리표</span>
+            {!isMenuAllowed('integrated_pnl') && <span className="text-[10px] text-rose-400">🔒</span>}
+          </button>
           <button
             onClick={() => setActiveTab('futures_sim')}
             className={`px-3 py-1.5 rounded font-bold text-xs border whitespace-nowrap flex-shrink-0 flex items-center gap-1 ${
@@ -684,6 +702,15 @@ export default function Home() {
               </div>
             </div>
           </div>
+        ) : activeTab === 'integrated_pnl' ? (
+          <IntegratedPnlSummaryView
+            userId={activeUserId}
+            userName={activeUserName}
+            isAdmin={isAdmin}
+            etfWeights={etfWeights}
+            stocks={stocks}
+            onNavigateTab={(tabId) => setActiveTab(tabId as any)}
+          />
         ) : activeTab === 'search' ? (
           <StockDashboard stocks={stocks} globalStocks={globalData?.stocks || []} globalSearchTicker={globalSearchTicker} setGlobalSearchTicker={setGlobalSearchTicker} />
         ) : activeTab === 'price' ? (
@@ -750,10 +777,10 @@ export default function Home() {
       {/* 모바일 전용 하단 퀵 내비게이션 탭 바 (스마트폰 한 손 조작 최적화) */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0b0f19]/95 backdrop-blur-md border-t border-gray-800 grid grid-cols-5 h-14 px-1">
         {[
+          { id: 'integrated_pnl', icon: '📋', label: '통합손익' },
           { id: 'futures_sim', icon: '🚀', label: '선물모델' },
           { id: 'order', icon: '🚨', label: '매수주문' },
           { id: 'etf_strategy', icon: '⚡', label: 'ETF전략' },
-          { id: 'target', icon: '🎯', label: 'AI목표가' },
         ].map(tab => (
           <button
             key={tab.id}

@@ -81,6 +81,7 @@ interface AdminApprovalModalProps {
 }
 
 const RESTRICTED_MENU_META = [
+  { id: 'integrated_pnl', label: '📋 통합손익관리표', shortLabel: '통합손익관리표' },
   { id: 'futures_sim', label: '🚀 선물오버나잇자동매매', shortLabel: '선물오버나잇' },
   { id: 'order', label: '🚨 매수주문 (Orders)', shortLabel: '매수주문' },
   { id: 'etf_strategy', label: '⚡ ETF 투자전략', shortLabel: 'ETF투자전략' },
