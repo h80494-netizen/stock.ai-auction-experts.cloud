@@ -1071,6 +1071,53 @@ def calculate_series_metrics(
     }
 
 
+def load_daily_signal_locks() -> Dict[str, Dict[str, Any]]:
+    """
+    SQLite daily_signal_lock 테이블에 봉인된 15:30 확정 시그널 및 목표 포지션 레코드를 로드합니다.
+    한번 15:30에 확정(Lock)된 거래일의 개별 모델 시그널과 합산 목표 포지션(base_position_sum)은
+    이후 15:46 종가 반영이나 익일(T+1) 이후 롤링 재계산 시에도 절대 사후 변경되지 않도록 불변(Immutable) 보장합니다.
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM daily_signal_lock ORDER BY lock_date ASC")
+        rows = c.fetchall()
+        conn.close()
+        locks: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            d_str = str(r["lock_date"] or "").strip()
+            if not d_str:
+                continue
+            try:
+                act_5 = json.loads(r["active_5_models_json"]) if r["active_5_models_json"] else []
+            except Exception:
+                act_5 = []
+            try:
+                sigs_10 = json.loads(r["all_10_signals_json"]) if r["all_10_signals_json"] else {}
+            except Exception:
+                sigs_10 = {}
+            locks[d_str] = {
+                "lock_date": d_str,
+                "locked_at_kst": str(r["locked_at_kst"] or ""),
+                "lock_status": str(r["lock_status"] or "LOCKED_AT_1530"),
+                "active_5_models": act_5,
+                "all_10_signals": sigs_10,
+                "base_position_sum": int(r["base_position_sum"] or 0),
+                "multiplier": max(1, int(r["multiplier"] or 1)),
+                "prev_contracts": int(r["prev_contracts"] or 0),
+                "target_contracts": int(r["target_contracts"] or 0),
+                "order_delta_contracts": int(r["order_delta_contracts"] or 0),
+                "order_action": str(r["order_action"] or ""),
+                "futures_price_at_lock": float(r["futures_price_at_lock"] or 0.0),
+            }
+        return locks
+    except Exception:
+        return {}
+
+
 def run_futures_simulation(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1212,6 +1259,8 @@ def run_futures_simulation(
     k200_close = df["k200_close"].values
     dates = df["date"].tolist()
     n_days = len(dates)
+    locked_history_map = load_daily_signal_locks()
+    date_to_idx = {d_s: idx_d for idx_d, d_s in enumerate(dates)}
 
     fut_pct_ret = np.zeros(n_days)
     fut_pt_diff = np.zeros(n_days)
@@ -1240,9 +1289,19 @@ def run_futures_simulation(
     model_comb_sig_arrays: Dict[str, np.ndarray] = {}
 
     for m_id in all_model_ids:
-        sigs = sig_df[m_id].values
-        pure_sigs = sig_df[f"{m_id}__pure"].values if f"{m_id}__pure" in sig_df.columns else sigs
-        comb_sigs = sig_df[f"{m_id}__combined"].values if f"{m_id}__combined" in sig_df.columns else sigs
+        sigs = sig_df[m_id].values.copy()
+        pure_sigs = sig_df[f"{m_id}__pure"].values.copy() if f"{m_id}__pure" in sig_df.columns else sigs.copy()
+        comb_sigs = sig_df[f"{m_id}__combined"].values.copy() if f"{m_id}__combined" in sig_df.columns else sigs.copy()
+        # ★ 15:30 확정(Lock)된 거래일의 개별 모델 시그널 영구 봉인 반영 (사후 종가/익일 데이터에 의한 과거 시그널 변조 방지)
+        if combine_supply and abs(float(supply_weight) - 0.35) < 1e-4 and locked_history_map:
+            for lk_date, lk_obj in locked_history_map.items():
+                lk_idx = date_to_idx.get(lk_date)
+                if lk_idx is not None:
+                    m_lk = lk_obj.get("all_10_signals", {}).get(m_id)
+                    if isinstance(m_lk, dict) and "signal" in m_lk:
+                        locked_s_val = int(m_lk["signal"])
+                        sigs[lk_idx] = locked_s_val
+                        comb_sigs[lk_idx] = locked_s_val
         model_sig_arrays[m_id] = sigs
         model_pure_sig_arrays[m_id] = pure_sigs
         model_comb_sig_arrays[m_id] = comb_sigs
@@ -1511,7 +1570,12 @@ def run_futures_simulation(
 
         # 3. 15:35 ~ 15:45 종가 동시호가 포지션 산출:
         #    ★ 채택된 5개 주력 모델(sim_active_set)의 시그널 합계(-5 ~ +5)와 매매원장 합산포지션이 항상 100% 일치하도록 산출
-        sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
+        #    ★ 이미 15:30 시그널 Lock이 완료된 거래일(daily_signal_lock)은 봉인된 base_position_sum을 최우선 적용하여 사후 변조 원천 차단
+        lk_entry = locked_history_map.get(dates[i]) if (combine_supply and abs(float(supply_weight) - 0.35) < 1e-4) else None
+        if lk_entry is not None and set(lk_entry.get("active_5_models") or []) == set(sim_active_set):
+            sum_sig = int(lk_entry["base_position_sum"])
+        else:
+            sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
         sum_sig = max(-5, min(5, sum_sig))
         base_positions[i] = sum_sig
         target_contracts[i] = sum_sig * mult
@@ -1732,10 +1796,10 @@ def run_futures_simulation(
         p_stat = calculate_series_metrics(pd.Series(model_pure_rets[m_id][1:]), annual_days=annual_days, rf_annual=rf_annual)
         c_stat = calculate_series_metrics(pd.Series(model_comb_rets[m_id][1:]), annual_days=annual_days, rf_annual=rf_annual)
 
-        s_arr = sig_df[m_id].values
-        pure_arr = sig_df[f"{m_id}__pure"].values if f"{m_id}__pure" in sig_df.columns else s_arr
+        s_arr = model_sig_arrays[m_id]
+        pure_arr = model_pure_sig_arrays[m_id]
         sup_arr = sig_df[f"{m_id}__supply"].values if f"{m_id}__supply" in sig_df.columns else np.zeros_like(s_arr)
-        comb_arr = sig_df[f"{m_id}__combined"].values if f"{m_id}__combined" in sig_df.columns else s_arr
+        comb_arr = model_comb_sig_arrays[m_id]
 
         latest_sig = int(s_arr[-1])
         prev_sig = int(s_arr[-2]) if n_days > 1 else 0
@@ -2538,21 +2602,59 @@ def evaluate_period_consistency_and_rotate_pool(
 
 def lock_1530_daily_signals(
     multiplier: int = 1,
-    mdd_threshold_pct: float = 12.0,
+    mdd_threshold_pct: float = 15.0,
     sync_live_first: bool = True,
     update_excel: bool = True,
     point_value_krw: float = 50000.0,
     initial_capital_krw: float = 100000000.0,
+    force_relock: bool = False,
 ) -> Dict[str, Any]:
     """
     [15:30 시그널 최종 확정(Lock) 엔진]
     1) 당일 실시간 기초데이터를 즉시 동기화(sync_intraday_realtime_tick)하여 rawdata.xlsx 및 futures_simulation.db에 반영하고,
     2) 15:30 기준 10대 모델 시그널, MDD 초과 자동 교체, 활성 5개 모델 합산 포지션(-5~+5),
        투자금액 멀티플 적용 목표 계약수 및 전일 보유분 대비 동시호가 매매 수량(order_delta_contracts)을 확정(Lock)하여
-       SQLite daily_signal_lock 테이블에 기록합니다.
-    3) 이를 통해 15:35 ~ 15:45 선물 종가 동시호가 시간에 흔들림 없이 확정된 수량만큼 포지션 조정을 수행할 수 있습니다.
+       SQLite daily_signal_lock 테이블에 영구 봉인 기록합니다.
+    3) 이미 해당 거래일의 15:30 Lock이 존재하면(force_relock=False) 기존 확정된 시그널과 포지션을 그대로 반환하여
+       15:30 이후 종가 동시호가나 야간/익일 데이터 동기화로 인해 확정 포지션이 절대 사후 변경되지 않도록 보장합니다.
     """
     init_sim_tables()
+    conn_chk = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn_chk.row_factory = sqlite3.Row
+    c_chk = conn_chk.cursor()
+    c_chk.execute("SELECT date FROM futures_daily_data ORDER BY date DESC LIMIT 1")
+    latest_dt_row = c_chk.fetchone()
+    latest_dt_str = str(latest_dt_row["date"]) if latest_dt_row else ""
+    existing_lock = None
+    if latest_dt_str and not force_relock:
+        c_chk.execute("SELECT * FROM daily_signal_lock WHERE lock_date = ?", (latest_dt_str,))
+        existing_lock = c_chk.fetchone()
+    conn_chk.close()
+
+    if existing_lock is not None and not force_relock:
+        saved_base = int(existing_lock["base_position_sum"])
+        saved_mult = max(1, int(existing_lock["multiplier"]))
+        saved_prev = int(existing_lock["prev_contracts"]) // saved_mult * multiplier
+        saved_target = saved_base * multiplier
+        saved_delta = saved_target - saved_prev
+        return {
+            "success": True,
+            "lock_date": existing_lock["lock_date"],
+            "locked_at_kst": existing_lock["locked_at_kst"],
+            "lock_status": existing_lock["lock_status"],
+            "execution_schedule": "15:30 시그널 확정 완료 (영구 봉인됨) -> 15:35~15:45 종가 동시호가 포지션 조정 집행",
+            "futures_price_at_lock": float(existing_lock["futures_price_at_lock"]),
+            "active_5_models": json.loads(existing_lock["active_5_models_json"]),
+            "all_10_models_signals": json.loads(existing_lock["all_10_signals_json"]),
+            "base_position_sum": saved_base,
+            "multiplier": multiplier,
+            "prev_contracts": saved_prev,
+            "target_contracts": saved_target,
+            "order_delta_contracts": saved_delta,
+            "order_action": existing_lock["order_action"],
+            "live_sync_info": {"status": "locked_immutable"},
+        }
+
     live_sync_info = None
     if sync_live_first:
         try:
@@ -2899,22 +3001,35 @@ def get_intraday_and_1530_lock_status(
             else "🚀 추세+수급 5대모델 가동"
         )
 
-    # 매매원장(recent_trading_ledger)과 상단 포지션 카드(① 전일 보유 / ② 당일 목표 / ③ 동시호가 주문수량 / ④ 일별손익)를 100% 일치시킴
-    if prev_ledger and "base_position_sum" in prev_ledger:
+    # 매매원장(recent_trading_ledger) 및 15:30 확정 봉인 테이블(daily_signal_lock)과 상단 포지션 카드(① 전일 보유 / ② 당일 목표 / ③ 동시호가 주문수량 / ④ 일별손익)를 100% 일치시킴
+    locked_history_all = load_daily_signal_locks()
+    prev_date_str = str(today_rawdata.get("prev_date") or prev_ledger.get("date") or "")
+    today_date_str = str(today_rawdata.get("date") or latest_date or "")
+
+    if prev_date_str and prev_date_str in locked_history_all:
+        prev_base_pos = int(locked_history_all[prev_date_str]["base_position_sum"])
+    elif prev_ledger and "base_position_sum" in prev_ledger:
         prev_base_pos = int(prev_ledger.get("base_position_sum", prev_base_pos))
-    if today_ledger and "base_position_sum" in today_ledger:
+
+    if today_date_str and today_date_str in locked_history_all and phase_code != "INTRADAY_LIVE":
+        today_base_pos = int(locked_history_all[today_date_str]["base_position_sum"])
+    elif today_ledger and "base_position_sum" in today_ledger:
         today_base_pos = int(today_ledger.get("base_position_sum", today_base_pos))
 
     prev_base_pos = max(-5, min(5, prev_base_pos))
     today_base_pos = max(-5, min(5, today_base_pos))
-    if today_ledger and "prev_contracts" in today_ledger:
+    if prev_date_str and prev_date_str in locked_history_all:
+        prev_contracts = int(prev_base_pos * multiplier)
+    elif today_ledger and "prev_contracts" in today_ledger:
         prev_contracts = int(today_ledger["prev_contracts"])
     elif prev_ledger and "target_contracts" in prev_ledger:
         prev_contracts = int(prev_ledger["target_contracts"])
     else:
         prev_contracts = prev_base_pos * multiplier
 
-    if today_ledger and "target_contracts" in today_ledger:
+    if today_date_str and today_date_str in locked_history_all and phase_code != "INTRADAY_LIVE":
+        today_target_contracts = int(today_base_pos * multiplier)
+    elif today_ledger and "target_contracts" in today_ledger:
         today_target_contracts = int(today_ledger["target_contracts"])
     else:
         today_target_contracts = today_base_pos * multiplier
