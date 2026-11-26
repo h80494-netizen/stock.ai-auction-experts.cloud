@@ -825,24 +825,42 @@ export default function IntegratedPnlSummaryView({
     const curStartStr = fmtDate(curStartDt);
     const prevStartStr = fmtDate(prevStartDt);
 
-    // 날짜별 일간 손익 맵
-    const dailyMap = new Map<string, { dayTotalPnl: number; fPnl: number; kPnl: number; ePnl: number }>();
+    // 날짜별 일간 손익 및 KOSPI(k200Close) 지수 맵
+    const dailyMap = new Map<string, { dayTotalPnl: number; fPnl: number; kPnl: number; ePnl: number; k200Close: number }>();
+    let lastValidK200 = 0;
     allCombinedChrono.forEach((r) => {
+      const k200 = Number(r.futures?.k200Close || 0);
+      if (k200 > 0) lastValidK200 = k200;
       dailyMap.set(r.date, {
         dayTotalPnl: r.dayTotalPnl,
         fPnl: r.fPnl,
         kPnl: r.kPnl,
         ePnl: r.ePnl,
+        k200Close: k200 > 0 ? k200 : lastValidK200,
       });
     });
 
     const totalCapitalBase = 100000000 + 100000000 + etfBudgetKrw;
-    const etfCapBase = etfBudgetKrw;
 
-    // 1) 최근 구간(-windowDays ~ 0일)과 직전 구간(-2*windowDays ~ -windowDays일)을 각각 시작점(-windowDays)에서 0%로 누적 계산한 뒤
-    //    X축을 0일(현재/종료일)부터 -windowDays(시작일)까지 표시
-    const curDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; etfPnl: number }> = [];
-    const prevDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; etfPnl: number }> = [];
+    // 1) 최근 구간(-windowDays ~ 0일)과 직전 구간(-2*windowDays ~ -windowDays일)을 각각 기준시점(-windowDays)에서 0%로 누적 계산한 뒤
+    //    X축을 -windowDays(기준시점)부터 0일(현재시점)까지 오른쪽으로 펼쳐지도록 표시
+    const curDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; k200Close: number }> = [];
+    const prevDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; k200Close: number }> = [];
+
+    let curCarryK200 = 0;
+    let prevCarryK200 = 0;
+    // 기준시점 이전 가장 가까운 거래일 KOSPI 지수 탐색 (주말/휴일 시작일 보정)
+    for (let lookback = windowDays + 7; lookback >= windowDays; lookback--) {
+      const dt1 = new Date(refToday);
+      dt1.setDate(dt1.getDate() - lookback);
+      const obj1 = dailyMap.get(fmtDate(dt1));
+      if (obj1 && obj1.k200Close > 0) curCarryK200 = obj1.k200Close;
+
+      const dt2 = new Date(curStartDt);
+      dt2.setDate(dt2.getDate() - lookback);
+      const obj2 = dailyMap.get(fmtDate(dt2));
+      if (obj2 && obj2.k200Close > 0) prevCarryK200 = obj2.k200Close;
+    }
 
     for (let step = windowDays; step >= 0; step--) {
       // step = windowDays (구간 시작일, X축 = -windowDays) -> step = 0 (구간 종료일, X축 = 0)
@@ -850,41 +868,48 @@ export default function IntegratedPnlSummaryView({
       cDt.setDate(cDt.getDate() - step);
       const cStr = fmtDate(cDt);
       const cObj = dailyMap.get(cStr);
+      if (cObj && cObj.k200Close > 0) curCarryK200 = cObj.k200Close;
       curDailyList.push({
         offsetFromEnd: -step,
         dateStr: cStr,
         pnl: cObj ? cObj.dayTotalPnl : 0,
-        etfPnl: cObj ? cObj.ePnl : 0,
+        k200Close: curCarryK200,
       });
 
       const pDt = new Date(curStartDt);
       pDt.setDate(pDt.getDate() - step);
       const pStr = fmtDate(pDt);
       const pObj = dailyMap.get(pStr);
+      if (pObj && pObj.k200Close > 0) prevCarryK200 = pObj.k200Close;
       prevDailyList.push({
         offsetFromEnd: -step,
         dateStr: pStr,
         pnl: pObj ? pObj.dayTotalPnl : 0,
-        etfPnl: pObj ? pObj.ePnl : 0,
+        k200Close: prevCarryK200,
       });
     }
 
+    const baseCurK200 = curDailyList.find((x) => x.k200Close > 0)?.k200Close || 0;
+    const basePrevK200 = prevDailyList.find((x) => x.k200Close > 0)?.k200Close || 0;
+
     let curCumPnl = 0;
     let prevCumPnl = 0;
-    let curEtfCumPnl = 0;
-    let prevEtfCumPnl = 0;
 
     const pointsFromStartToEnd = curDailyList.map((cItem, idx) => {
       const pItem = prevDailyList[idx];
       curCumPnl += cItem.pnl;
       prevCumPnl += pItem.pnl;
-      curEtfCumPnl += cItem.etfPnl;
-      prevEtfCumPnl += pItem.etfPnl;
 
       const curRetPct = Number(((curCumPnl / totalCapitalBase) * 100).toFixed(2));
       const prevRetPct = Number(((prevCumPnl / totalCapitalBase) * 100).toFixed(2));
-      const curEtfRetPct = Number(((curEtfCumPnl / etfCapBase) * 100).toFixed(2));
-      const prevEtfRetPct = Number(((prevEtfCumPnl / etfCapBase) * 100).toFixed(2));
+      const curKospiRetPct =
+        baseCurK200 > 0 && cItem.k200Close > 0
+          ? Number((((cItem.k200Close - baseCurK200) / baseCurK200) * 100).toFixed(2))
+          : 0;
+      const prevKospiRetPct =
+        basePrevK200 > 0 && pItem.k200Close > 0
+          ? Number((((pItem.k200Close - basePrevK200) / basePrevK200) * 100).toFixed(2))
+          : 0;
 
       return {
         dayAxisLabel: `${cItem.offsetFromEnd}일`,
@@ -895,8 +920,8 @@ export default function IntegratedPnlSummaryView({
         직전구간_통합수익률: prevRetPct,
         최근구간_통합손익_만원: Math.round(curCumPnl / 10000),
         직전구간_통합손익_만원: Math.round(prevCumPnl / 10000),
-        최근구간_ETF세후수익률: curEtfRetPct,
-        직전구간_ETF세후수익률: prevEtfRetPct,
+        최근구간_KOSPI상승률: curKospiRetPct,
+        직전구간_KOSPI상승률: prevKospiRetPct,
       };
     });
 
@@ -1323,10 +1348,10 @@ export default function IntegratedPnlSummaryView({
                         {pt.직전구간_통합손익_만원.toLocaleString()}만원)
                       </div>
                       <div className="text-sky-300 text-[11px] border-t border-slate-800 pt-1">
-                        ⚡ ETF({includeUsCapitalGainsTax ? "세후 22% 반영" : "세전"}): 최근{" "}
-                        {pt.최근구간_ETF세후수익률 >= 0 ? "+" : ""}
-                        {pt.최근구간_ETF세후수익률}% vs 직전 {pt.직전구간_ETF세후수익률 >= 0 ? "+" : ""}
-                        {pt.직전구간_ETF세후수익률}%
+                        📊 KOSPI 상승률: 최근{" "}
+                        {pt.최근구간_KOSPI상승률 >= 0 ? "+" : ""}
+                        {pt.최근구간_KOSPI상승률}% vs 직전 {pt.직전구간_KOSPI상승률 >= 0 ? "+" : ""}
+                        {pt.직전구간_KOSPI상승률}%
                       </div>
                     </div>
                   );
@@ -1355,10 +1380,10 @@ export default function IntegratedPnlSummaryView({
                   />
                   <Line
                     type="monotone"
-                    dataKey="최근구간_ETF세후수익률"
-                    name={`⚡ 최근 ${periodOverlayComparison.labelName} ETF 수익률 (${includeUsCapitalGainsTax ? "미국 자본차익세 22% 차감" : "세전"})`}
+                    dataKey="최근구간_KOSPI상승률"
+                    name={`📊 최근 ${periodOverlayComparison.labelName} KOSPI 상승률 (${periodOverlayComparison.curRangeLabel})`}
                     stroke="#38bdf8"
-                    strokeWidth={1.8}
+                    strokeWidth={2}
                     dot={false}
                   />
                 </>
