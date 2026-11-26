@@ -1572,7 +1572,7 @@ def run_futures_simulation(
         #    ★ 채택된 5개 주력 모델(sim_active_set)의 시그널 합계(-5 ~ +5)와 매매원장 합산포지션이 항상 100% 일치하도록 산출
         #    ★ 이미 15:30 시그널 Lock이 완료된 거래일(daily_signal_lock)은 봉인된 base_position_sum을 최우선 적용하여 사후 변조 원천 차단
         lk_entry = locked_history_map.get(dates[i]) if (combine_supply and abs(float(supply_weight) - 0.35) < 1e-4) else None
-        if lk_entry is not None and set(lk_entry.get("active_5_models") or []) == set(sim_active_set):
+        if lk_entry is not None:
             sum_sig = int(lk_entry["base_position_sum"])
         else:
             sum_sig = int(sum(int(model_sig_arrays[m_id][i]) for m_id in sim_active_set))
