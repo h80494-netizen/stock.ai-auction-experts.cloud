@@ -5,6 +5,8 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -52,6 +54,10 @@ const ETF_NAMES: Record<string, string> = {
   CASH: "현금 대피 (CASH)",
 };
 
+// 해외주식(미국 상장 ETF) 연간 양도소득세 기준: 기본공제 250만원 초과분에 대해 22% (양도세 20% + 지방소득세 2%)
+const US_ANNUAL_DEDUCTION_KRW = 2500000;
+const US_CAPITAL_GAINS_TAX_RATE = 0.22;
+
 export default function IntegratedPnlSummaryView({
   userId = "admin",
   userName = "",
@@ -66,10 +72,16 @@ export default function IntegratedPnlSummaryView({
   const [lastSyncedAt, setLastSyncedAt] = useState<string>("");
 
   // 기간 필터
-  const [periodPreset, setPeriodPreset] = useState<"TODAY" | "1M" | "3M" | "6M" | "YTD" | "ALL">("YTD");
-  const [startDate, setStartDate] = useState<string>("2026-01-02");
+  const [periodPreset, setPeriodPreset] = useState<"TODAY" | "1M" | "3M" | "6M" | "YTD" | "ALL">("1M");
+  const [startDate, setStartDate] = useState<string>(() => {
+    const d = new Date(Date.now() + 9 * 3600 * 1000);
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().split("T")[0];
+  });
   const [detailFilter, setDetailFilter] = useState<"ALL" | "TRADED_ONLY">("ALL");
   const [expandedDate, setExpandedDate] = useState<string | null>(null);
+  const [includeUsCapitalGainsTax, setIncludeUsCapitalGainsTax] = useState<boolean>(true);
+  const [compareMetricMode, setCompareMetricMode] = useState<"RETURN_PCT" | "PNL_MAN">("RETURN_PCT");
 
   // 1) 선물오버나잇자동매매 상태
   const [futuresSim, setFuturesSim] = useState<any>(null);
@@ -100,10 +112,10 @@ export default function IntegratedPnlSummaryView({
     } else if (preset === "YTD") {
       setStartDate("2026-01-02");
     } else if (preset === "ALL") {
-      setStartDate("2023-01-02");
+      setStartDate("2025-01-02");
     } else {
-      const m = preset === "1M" ? 1 : preset === "3M" ? 3 : 6;
-      baseD.setMonth(baseD.getMonth() - m);
+      const days = preset === "1M" ? 30 : preset === "3M" ? 90 : 180;
+      baseD.setDate(baseD.getDate() - days);
       setStartDate(baseD.toISOString().split("T")[0]);
     }
   };
@@ -137,7 +149,7 @@ export default function IntegratedPnlSummaryView({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              start_date: "2025-01-02",
+              start_date: "2024-01-02",
               end_date: "CURRENT",
               multiplier: 1,
               point_value_krw: 50000,
@@ -251,6 +263,36 @@ export default function IntegratedPnlSummaryView({
     }, 20000);
     return () => clearInterval(timer);
   }, [fetchAllIntegratedData]);
+
+  // ============================================================================
+  // 0) 일자별 실제 원/달러(USD/KRW) 환율 시계열 및 최신 적용 환율 산출
+  // ============================================================================
+  const fxByDateMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    const ledger: any[] = futuresSim?.recent_trading_ledger || [];
+    ledger.forEach((r: any) => {
+      const d = String(r.date || "");
+      const fx = Number(r.fx_close || 0);
+      if (d && fx > 800) {
+        map[d] = fx;
+      }
+    });
+    const rawFx = Number(futuresLock?.today_rawdata?.fx_close || 0);
+    if (rawFx > 800) {
+      map[todayStr] = rawFx;
+    }
+    return map;
+  }, [futuresSim, futuresLock, todayStr]);
+
+  const usdKrwRate = useMemo(() => {
+    const rawFx = Number(futuresLock?.today_rawdata?.fx_close || 0);
+    if (rawFx > 800) return rawFx;
+    const kisFx = Number(etfKisAccount?.signal?.usd_krw_rate || etfKisAccount?.config?.usd_krw_rate || 0);
+    if (kisFx > 800) return kisFx;
+    const dates = Object.keys(fxByDateMap).sort();
+    if (dates.length > 0) return fxByDateMap[dates[dates.length - 1]];
+    return 1400;
+  }, [futuresLock, etfKisAccount, fxByDateMap]);
 
   // ============================================================================
   // 1) 선물오버나잇자동매매 일별 손익 및 당일 포지션 요약
@@ -410,7 +452,7 @@ export default function IntegratedPnlSummaryView({
       retPct: buyAmt > 0 ? Number(((livePnl / buyAmt) * 100).toFixed(2)) : 0,
       stockItems,
     };
-  }, [krHoldings, krDetailedLedger, krLivePrices, stocks, todayStr]);
+  }, [krHoldings, krDetailedLedger, krLedgerHistory, krLivePrices, stocks, todayStr]);
 
   const krByDate = useMemo(() => {
     const map: Record<
@@ -428,7 +470,6 @@ export default function IntegratedPnlSummaryView({
       }
     > = {};
 
-    // 종목별 상세 원장을 일자별로 그룹핑
     const detailsByDate: Record<string, any[]> = {};
     krDetailedLedger.forEach((r: any) => {
       const d = String(r.trade_date || "");
@@ -481,7 +522,6 @@ export default function IntegratedPnlSummaryView({
       };
     });
 
-    // 당일 미청산 보유 종목이 있으면 실시간 평가손익 반영
     if (krHoldings.length > 0 || (krStockLiveSummary.stockItems.length > 0 && !map[todayStr])) {
       const sList = krStockLiveSummary.stockItems.map((it) => ({
         ticker: it.ticker,
@@ -518,14 +558,13 @@ export default function IntegratedPnlSummaryView({
   }, [krLedgerHistory, krDetailedLedger, krHoldings, krStockLiveSummary, todayStr]);
 
   // ============================================================================
-  // 3) ETF 투자전략 일별 손익 및 선택 ETF 요약 (기준원금 5,000만원 디폴트)
+  // 3) ETF 투자전략:
+  //    - 국내시간(KST) 기준 오늘 손익에 미국 ETF 최신 거래일 손익을 자동 정렬/합산
+  //    - 일자별 적용 원/달러 환율(fxRate) 명시
+  //    - 미국의 매년 자본차익세(해외주식 양도소득세: 연간 250만원 기본공제 후 22%)를 감안한 세후 실질 손익/수익률 산출
   // ============================================================================
   const etfBudgetKrw = useMemo(() => {
     return Math.max(100000, Number(etfKisAccount?.config?.order_budget_krw || 50000000));
-  }, [etfKisAccount]);
-
-  const usdKrwRate = useMemo(() => {
-    return Number(etfKisAccount?.signal?.usd_krw_rate || etfKisAccount?.config?.usd_krw_rate || 1400);
   }, [etfKisAccount]);
 
   const etfByDate = useMemo(() => {
@@ -533,12 +572,21 @@ export default function IntegratedPnlSummaryView({
       string,
       {
         date: string;
+        usTradeDate: string;
         prevHeld: string;
         targetEtf: string;
         targetEtfName: string;
         isHolding: boolean;
         tradeStatus: string;
         orderDetail: string;
+        fxRate: number;
+        grossDailyPnlUsd: number;
+        grossDailyPnlKrw: number;
+        grossDailyRetPct: number;
+        annualTaxAccruedKrw: number;
+        dailyTaxKrw: number;
+        netDailyPnlKrw: number;
+        netDailyRetPct: number;
         dailyPnlKrw: number;
         dailyRetPct: number;
         priceUsd: number;
@@ -569,95 +617,124 @@ export default function IntegratedPnlSummaryView({
     const stratArr: number[] = etfSimData.strategy || [];
     const selArr: string[] = etfSimData.selected_etf || [];
 
+    // 국내 거래일 목록 (미국장 마감일 T_US -> 한국시간 익일 아침 06:00 KST 확정이므로, 최신 미국 거래일이 오늘 KST보다 이전이면 국내시간 기준 오늘(todayStr) 손익에 합산)
+    const lastValidIdx = dates.length - 1;
+    const lastUsDate = String(dates[lastValidIdx] || "");
+
+    // 연도별 누적 세전 양도차익 및 기반영 세액 추적 (매년 250만원 공제 후 22% 과세)
+    const yearCumGainMap: Record<string, number> = {};
+    const yearCumTaxMap: Record<string, number> = {};
+
     for (let i = 1; i < dates.length; i++) {
-      const d = String(dates[i] || "");
-      if (!d || selArr[i] === "Waiting") continue;
+      const usDate = String(dates[i] || "");
+      if (!usDate || selArr[i] === "Waiting") continue;
+
+      // 국내시간(KST) 기준 매핑: 최신 미국장 거래일(예: 11/25 미국장 마감 -> 11/26 06:00 KST 확정)을 오늘(todayStr) 행에 정렬하여 오늘 통합손익에 합산
+      const kstDate = i === lastValidIdx && lastUsDate < todayStr ? todayStr : usDate;
+      const yearKey = kstDate.slice(0, 4);
+
       const prevRaw = String(selArr[i - 1] || "CASH");
       const prevHeld = prevRaw === "Waiting" || !prevRaw ? "CASH" : prevRaw;
       const tgtRaw = String(selArr[i] || "CASH");
       const targetEtf = tgtRaw === "Waiting" || !tgtRaw ? "CASH" : tgtRaw;
 
+      const fxAtDate = Number(fxByDateMap[kstDate] || fxByDateMap[usDate] || usdKrwRate || 1400);
       const prevVal = Number(stratArr[i - 1]) || 100;
       const curVal = Number(stratArr[i]) || prevVal;
-      const dailyRetPct = prevVal > 0 ? ((curVal - prevVal) / prevVal) * 100 : 0;
-      const dailyPnlKrw = Math.round(etfBudgetKrw * (dailyRetPct / 100));
+      const grossDailyRetPct = prevVal > 0 ? ((curVal - prevVal) / prevVal) * 100 : 0;
+      const grossDailyPnlKrw = Math.round(etfBudgetKrw * (grossDailyRetPct / 100));
+      const grossDailyPnlUsd = Number((grossDailyPnlKrw / fxAtDate).toFixed(2));
+
+      // 연간 미국 ETF 자본차익세(양도소득세 22%, 연 250만원 기본공제) 일별 누적 정산
+      const prevYearGain = yearCumGainMap[yearKey] || 0;
+      const nextYearGain = prevYearGain + grossDailyPnlKrw;
+      yearCumGainMap[yearKey] = nextYearGain;
+
+      const prevYearTax = yearCumTaxMap[yearKey] || 0;
+      const taxableAnnualGain = Math.max(0, nextYearGain - US_ANNUAL_DEDUCTION_KRW);
+      const targetYearTax = Math.round(taxableAnnualGain * US_CAPITAL_GAINS_TAX_RATE);
+      const dailyTaxKrw = targetYearTax - prevYearTax;
+      yearCumTaxMap[yearKey] = targetYearTax;
+
+      const netDailyPnlKrw = grossDailyPnlKrw - dailyTaxKrw;
+      const netDailyRetPct = Number(((netDailyPnlKrw / etfBudgetKrw) * 100).toFixed(2));
+
+      const activeDailyPnlKrw = includeUsCapitalGainsTax ? netDailyPnlKrw : grossDailyPnlKrw;
+      const activeDailyRetPct = includeUsCapitalGainsTax ? netDailyRetPct : Number(grossDailyRetPct.toFixed(2));
 
       const priceUsd = getTickerPriceAt(targetEtf.split(",")[0].trim(), i);
-      const qty = priceUsd > 0 ? Math.max(1, Math.floor(etfBudgetKrw / (priceUsd * usdKrwRate))) : 0;
+      const qty = priceUsd > 0 ? Math.max(1, Math.floor(etfBudgetKrw / (priceUsd * fxAtDate))) : 0;
       const isSame = prevHeld === targetEtf;
 
       let tradeStatus = "Holding";
       let orderDetail =
         targetEtf === "CASH"
           ? "CASH 현금 보유 유지"
-          : `${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)}) 계속 보유`;
+          : `${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)} · 환율 ${fxAtDate.toLocaleString()}원) 계속 보유`;
       if (!isSame) {
         if (prevHeld !== "CASH" && targetEtf !== "CASH") {
           tradeStatus = `교체 (${prevHeld}→${targetEtf})`;
-          orderDetail = `매도 ${prevHeld} + 매수 ${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)})`;
+          orderDetail = `매도 ${prevHeld} + 매수 ${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)} · 환율 ${fxAtDate.toLocaleString()}원)`;
         } else if (prevHeld === "CASH" && targetEtf !== "CASH") {
           tradeStatus = `신규편입 (${targetEtf})`;
-          orderDetail = `신규매수 ${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)})`;
+          orderDetail = `신규매수 ${targetEtf} ${qty.toLocaleString()}주 ($${priceUsd.toFixed(2)} · 환율 ${fxAtDate.toLocaleString()}원)`;
         } else {
           tradeStatus = `현금전환 (${prevHeld}→CASH)`;
           orderDetail = `전량매도 ${prevHeld} → CASH 대피`;
         }
       }
 
-      map[d] = {
-        date: d,
+      map[kstDate] = {
+        date: kstDate,
+        usTradeDate: usDate,
         prevHeld,
         targetEtf,
         targetEtfName: ETF_NAMES[targetEtf] || targetEtf,
         isHolding: isSame,
         tradeStatus,
         orderDetail,
-        dailyPnlKrw,
-        dailyRetPct: Number(dailyRetPct.toFixed(2)),
+        fxRate: fxAtDate,
+        grossDailyPnlUsd,
+        grossDailyPnlKrw,
+        grossDailyRetPct: Number(grossDailyRetPct.toFixed(2)),
+        annualTaxAccruedKrw: targetYearTax,
+        dailyTaxKrw,
+        netDailyPnlKrw,
+        netDailyRetPct,
+        dailyPnlKrw: activeDailyPnlKrw,
+        dailyRetPct: activeDailyRetPct,
         priceUsd,
         qty,
       };
     }
 
     return map;
-  }, [etfSimData, etfRanking, etfBudgetKrw, usdKrwRate]);
+  }, [etfSimData, etfRanking, etfBudgetKrw, usdKrwRate, fxByDateMap, todayStr, includeUsCapitalGainsTax]);
 
   // ============================================================================
-  // 4) 3대 전략 통합 일별 손익 마스터 테이블 및 누적 차트 데이터 생성
+  // 4) 전체 일자별 통합 시계열 (직전 1개월/3개월/6개월 비교 및 마스터 요약표 공용)
   // ============================================================================
-  const integratedRowsDesc = useMemo(() => {
+  const allCombinedChrono = useMemo(() => {
     const allDatesSet = new Set<string>([
       ...Object.keys(futuresByDate),
       ...Object.keys(krByDate),
       ...Object.keys(etfByDate),
     ]);
-    const sortedAsc = Array.from(allDatesSet)
-      .filter((d) => d >= startDate)
-      .sort((a, b) => a.localeCompare(b));
+    const sortedAsc = Array.from(allDatesSet).sort((a, b) => a.localeCompare(b));
+    const totalCapitalBase = 100000000 + 100000000 + etfBudgetKrw; // 선물 1억 + 매수주문 1억 + ETF 5천만 = 2.5억
 
-    let cumFutKrw = 0;
-    let cumKrKrw = 0;
-    let cumEtfKrw = 0;
-    let cumTotalKrw = 0;
-    const totalCapitalBase = 100000000 + 100000000 + etfBudgetKrw; // 선물 1억 + 매수주문 1억 + ETF 5천만 = 2.5억 기준
-
-    const rowsAsc = sortedAsc.map((d) => {
-      const f = futuresByDate[d];
-      const k = krByDate[d];
-      const e = etfByDate[d];
+    return sortedAsc.map((d) => {
+      const f = futuresByDate[d] || null;
+      const k = krByDate[d] || null;
+      const e = etfByDate[d] || null;
 
       const fPnl = f ? f.dailyPnlKrw : 0;
       const kPnl = k ? k.netPnlKrw : 0;
       const ePnl = e ? e.dailyPnlKrw : 0;
+      const eGrossPnl = e ? e.grossDailyPnlKrw : 0;
+      const eTaxKrw = e ? e.dailyTaxKrw : 0;
       const dayTotalPnl = fPnl + kPnl + ePnl;
-
-      cumFutKrw += fPnl;
-      cumKrKrw += kPnl;
-      cumEtfKrw += ePnl;
-      cumTotalKrw += dayTotalPnl;
-
       const dayTotalRetPct = Number(((dayTotalPnl / totalCapitalBase) * 100).toFixed(3));
-      const cumTotalRetPct = Number(((cumTotalKrw / totalCapitalBase) * 100).toFixed(2));
 
       const hasAnyActivity =
         (f && (f.prevContracts !== 0 || f.targetContracts !== 0 || f.deltaContracts !== 0 || f.dailyPnlKrw !== 0)) ||
@@ -666,27 +743,179 @@ export default function IntegratedPnlSummaryView({
 
       return {
         date: d,
-        futures: f || null,
-        krOrder: k || null,
-        etf: e || null,
+        futures: f,
+        krOrder: k,
+        etf: e,
         fPnl,
         kPnl,
         ePnl,
+        eGrossPnl,
+        eTaxKrw,
         dayTotalPnl,
         dayTotalRetPct,
+        hasAnyActivity: Boolean(hasAnyActivity),
+      };
+    });
+  }, [futuresByDate, krByDate, etfByDate, etfBudgetKrw]);
+
+  // 선택된 기간(startDate ~ 현재)의 통합손익관리 마스터 요약표 행 산출
+  const integratedRowsDesc = useMemo(() => {
+    const filteredAsc = allCombinedChrono.filter((r) => r.date >= startDate);
+    let cumFutKrw = 0;
+    let cumKrKrw = 0;
+    let cumEtfKrw = 0;
+    let cumEtfGrossKrw = 0;
+    let cumEtfTaxKrw = 0;
+    let cumTotalKrw = 0;
+    const totalCapitalBase = 100000000 + 100000000 + etfBudgetKrw;
+
+    const withCumAsc = filteredAsc.map((r) => {
+      cumFutKrw += r.fPnl;
+      cumKrKrw += r.kPnl;
+      cumEtfKrw += r.ePnl;
+      cumEtfGrossKrw += r.eGrossPnl;
+      cumEtfTaxKrw += r.eTaxKrw;
+      cumTotalKrw += r.dayTotalPnl;
+      const cumTotalRetPct = Number(((cumTotalKrw / totalCapitalBase) * 100).toFixed(2));
+      return {
+        ...r,
         cumFutKrw,
         cumKrKrw,
         cumEtfKrw,
+        cumEtfGrossKrw,
+        cumEtfTaxKrw,
         cumTotalKrw,
         cumTotalRetPct,
-        hasAnyActivity: Boolean(hasAnyActivity),
       };
     });
 
     const filtered =
-      detailFilter === "TRADED_ONLY" ? rowsAsc.filter((r) => r.hasAnyActivity) : rowsAsc;
+      detailFilter === "TRADED_ONLY" ? withCumAsc.filter((r) => r.hasAnyActivity) : withCumAsc;
     return [...filtered].reverse();
-  }, [futuresByDate, krByDate, etfByDate, startDate, etfBudgetKrw, detailFilter]);
+  }, [allCombinedChrono, startDate, etfBudgetKrw, detailFilter]);
+
+  // ============================================================================
+  // 5) 최근 구간(0 ~ -N일) vs 직전 구간(-N일 ~ -2N일) 오버레이 비교 그래프 데이터
+  //    - 1개월: X축 0일 ~ -30일 (최근 1개월 vs 직전 1개월[-30일~-60일])
+  //    - 3개월: X축 0일 ~ -90일 (최근 3개월 vs 직전 3개월[-90일~-180일])
+  //    - 6개월: X축 0일 ~ -180일 (최근 6개월 vs 직전 6개월[-180일~-360일])
+  // ============================================================================
+  const periodOverlayComparison = useMemo(() => {
+    const windowDays =
+      periodPreset === "1M"
+        ? 30
+        : periodPreset === "3M"
+        ? 90
+        : periodPreset === "6M"
+        ? 180
+        : periodPreset === "TODAY"
+        ? 30
+        : 90;
+    const labelName =
+      windowDays === 30 ? "1개월(30일)" : windowDays === 90 ? "3개월(90일)" : "6개월(180일)";
+
+    const refToday = new Date(todayStr + "T00:00:00");
+    const fmtDate = (dt: Date) => dt.toISOString().split("T")[0];
+
+    const curStartDt = new Date(refToday);
+    curStartDt.setDate(curStartDt.getDate() - windowDays);
+    const prevStartDt = new Date(refToday);
+    prevStartDt.setDate(prevStartDt.getDate() - windowDays * 2);
+
+    const curStartStr = fmtDate(curStartDt);
+    const prevStartStr = fmtDate(prevStartDt);
+
+    // 날짜별 일간 손익 맵
+    const dailyMap = new Map<string, { dayTotalPnl: number; fPnl: number; kPnl: number; ePnl: number }>();
+    allCombinedChrono.forEach((r) => {
+      dailyMap.set(r.date, {
+        dayTotalPnl: r.dayTotalPnl,
+        fPnl: r.fPnl,
+        kPnl: r.kPnl,
+        ePnl: r.ePnl,
+      });
+    });
+
+    const totalCapitalBase = 100000000 + 100000000 + etfBudgetKrw;
+    const etfCapBase = etfBudgetKrw;
+
+    // 1) 최근 구간(-windowDays ~ 0일)과 직전 구간(-2*windowDays ~ -windowDays일)을 각각 시작점(-windowDays)에서 0%로 누적 계산한 뒤
+    //    X축을 0일(현재/종료일)부터 -windowDays(시작일)까지 표시
+    const curDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; etfPnl: number }> = [];
+    const prevDailyList: Array<{ offsetFromEnd: number; dateStr: string; pnl: number; etfPnl: number }> = [];
+
+    for (let step = windowDays; step >= 0; step--) {
+      // step = windowDays (구간 시작일, X축 = -windowDays) -> step = 0 (구간 종료일, X축 = 0)
+      const cDt = new Date(refToday);
+      cDt.setDate(cDt.getDate() - step);
+      const cStr = fmtDate(cDt);
+      const cObj = dailyMap.get(cStr);
+      curDailyList.push({
+        offsetFromEnd: -step,
+        dateStr: cStr,
+        pnl: cObj ? cObj.dayTotalPnl : 0,
+        etfPnl: cObj ? cObj.ePnl : 0,
+      });
+
+      const pDt = new Date(curStartDt);
+      pDt.setDate(pDt.getDate() - step);
+      const pStr = fmtDate(pDt);
+      const pObj = dailyMap.get(pStr);
+      prevDailyList.push({
+        offsetFromEnd: -step,
+        dateStr: pStr,
+        pnl: pObj ? pObj.dayTotalPnl : 0,
+        etfPnl: pObj ? pObj.ePnl : 0,
+      });
+    }
+
+    let curCumPnl = 0;
+    let prevCumPnl = 0;
+    let curEtfCumPnl = 0;
+    let prevEtfCumPnl = 0;
+
+    const pointsFromStartToEnd = curDailyList.map((cItem, idx) => {
+      const pItem = prevDailyList[idx];
+      curCumPnl += cItem.pnl;
+      prevCumPnl += pItem.pnl;
+      curEtfCumPnl += cItem.etfPnl;
+      prevEtfCumPnl += pItem.etfPnl;
+
+      const curRetPct = Number(((curCumPnl / totalCapitalBase) * 100).toFixed(2));
+      const prevRetPct = Number(((prevCumPnl / totalCapitalBase) * 100).toFixed(2));
+      const curEtfRetPct = Number(((curEtfCumPnl / etfCapBase) * 100).toFixed(2));
+      const prevEtfRetPct = Number(((prevEtfCumPnl / etfCapBase) * 100).toFixed(2));
+
+      return {
+        dayAxisLabel: `${cItem.offsetFromEnd}일`,
+        dayOffset: cItem.offsetFromEnd,
+        curDate: cItem.dateStr,
+        prevDate: pItem.dateStr,
+        최근구간_통합수익률: curRetPct,
+        직전구간_통합수익률: prevRetPct,
+        최근구간_통합손익_만원: Math.round(curCumPnl / 10000),
+        직전구간_통합손익_만원: Math.round(prevCumPnl / 10000),
+        최근구간_ETF세후수익률: curEtfRetPct,
+        직전구간_ETF세후수익률: prevEtfRetPct,
+      };
+    });
+
+    // 사용자 요청: "x축은 3개월의 경우 0부터 -90일이 될 것이고 6개월의 경우 0부터 -180일이 될꺼야"
+    // 좌측 0일(현재일)부터 우측 -90일(-180일, -30일) 순서로 정렬
+    const seriesZeroToMinusN = [...pointsFromStartToEnd].reverse();
+
+    return {
+      windowDays,
+      labelName,
+      curRangeLabel: `${curStartStr} ~ ${todayStr}`,
+      prevRangeLabel: `${prevStartStr} ~ ${curStartStr}`,
+      curFinalRetPct: Number(((curCumPnl / totalCapitalBase) * 100).toFixed(2)),
+      prevFinalRetPct: Number(((prevCumPnl / totalCapitalBase) * 100).toFixed(2)),
+      curFinalPnlKrw: curCumPnl,
+      prevFinalPnlKrw: prevCumPnl,
+      series: seriesZeroToMinusN,
+    };
+  }, [allCombinedChrono, periodPreset, todayStr, etfBudgetKrw]);
 
   const chartSeriesAsc = useMemo(() => {
     return [...integratedRowsDesc].reverse().map((r) => ({
@@ -704,6 +933,8 @@ export default function IntegratedPnlSummaryView({
     const totalFutPnl = latestRow ? latestRow.cumFutKrw : 0;
     const totalKrPnl = latestRow ? latestRow.cumKrKrw : 0;
     const totalEtfPnl = latestRow ? latestRow.cumEtfKrw : 0;
+    const totalEtfGrossPnl = latestRow ? latestRow.cumEtfGrossKrw : 0;
+    const totalEtfTaxKrw = latestRow ? latestRow.cumEtfTaxKrw : 0;
     const grandTotalPnl = totalFutPnl + totalKrPnl + totalEtfPnl;
 
     const todayFut = futuresByDate[todayStr] || (integratedRowsDesc[0]?.futures ?? null);
@@ -724,6 +955,8 @@ export default function IntegratedPnlSummaryView({
       totalFutPnl,
       totalKrPnl,
       totalEtfPnl,
+      totalEtfGrossPnl,
+      totalEtfTaxKrw,
       grandTotalPnl,
       todayCombinedPnl,
       todayFut,
@@ -756,14 +989,31 @@ export default function IntegratedPnlSummaryView({
               <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold font-mono">
                 운용계정: {effectiveUserId === "admin" ? "주인장(관리자)" : `${userName || effectiveUserId}님`}
               </span>
+              <span className="px-2.5 py-0.5 rounded-full bg-sky-500/20 border border-sky-400/50 text-sky-200 text-[11px] font-extrabold font-mono">
+                💱 원화환산 적용환율: 1 USD = {usdKrwRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}원
+              </span>
+              <button
+                type="button"
+                onClick={() => setIncludeUsCapitalGainsTax((v) => !v)}
+                className={`px-2.5 py-0.5 rounded-full border text-[11px] font-extrabold cursor-pointer transition ${
+                  includeUsCapitalGainsTax
+                    ? "bg-purple-600/30 border-purple-400 text-purple-200"
+                    : "bg-slate-800 border-slate-700 text-slate-400"
+                }`}
+                title="미국 ETF 해외주식 양도소득세(연 250만원 기본공제 후 22%) 차감 여부 토글"
+              >
+                {includeUsCapitalGainsTax
+                  ? "🏛️ 미국 ETF 자본차익세(연 250만 공제 후 22%) 반영 ON"
+                  : "🏛️ 미국 ETF 세전 수익률 보기 (자본차익세 OFF)"}
+              </button>
               {lastSyncedAt && (
                 <span className="text-[11px] text-slate-400 font-mono">
-                  실시간 동기화: {lastSyncedAt} KST
+                  동기화: {lastSyncedAt} KST
                 </span>
               )}
             </div>
             <h1 className="text-lg sm:text-xl font-black text-white mt-1 tracking-tight">
-              📋 통합손익관리표 (선물오버나잇 · 매수주문 · ETF투자전략 일일 손익 &amp; 보유 포지션·매수종목·선택ETF 총괄표)
+              📋 통합손익관리표 (선물오버나잇 · 매수주문 · ETF투자전략[KST 당일합산 · 환율 · 미국 자본차익세 22% 반영] 총괄표)
             </h1>
           </div>
 
@@ -772,9 +1022,9 @@ export default function IntegratedPnlSummaryView({
               {(
                 [
                   { id: "TODAY", label: "당일" },
-                  { id: "1M", label: "최근 1개월" },
-                  { id: "3M", label: "3개월" },
-                  { id: "6M", label: "6개월" },
+                  { id: "1M", label: "1개월 (vs 직전1M)" },
+                  { id: "3M", label: "3개월 (vs 직전3M)" },
+                  { id: "6M", label: "6개월 (vs 직전6M)" },
                   { id: "YTD", label: "금년(2026~)" },
                   { id: "ALL", label: "전체(2025~)" },
                 ] as const
@@ -810,8 +1060,8 @@ export default function IntegratedPnlSummaryView({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2 border-t border-slate-800/80">
           <div className="bg-slate-950/90 border-2 border-indigo-500/60 rounded-xl p-3.5 shadow-lg">
             <div className="flex items-center justify-between text-[11px] text-indigo-300 font-extrabold">
-              <span>⚡ 당일({todayStr}) 3대 전략 실시간 합산손익</span>
-              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-[10px]">TODAY</span>
+              <span>⚡ 당일({todayStr} KST) 3대 전략 합산손익</span>
+              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-[10px]">ETF 당일합산</span>
             </div>
             <div
               className={`text-xl sm:text-2xl font-black font-mono mt-1 ${
@@ -830,7 +1080,9 @@ export default function IntegratedPnlSummaryView({
           <div className="bg-slate-950/90 border-2 border-amber-500/60 rounded-xl p-3.5 shadow-lg">
             <div className="flex items-center justify-between text-[11px] text-amber-300 font-extrabold">
               <span>🏆 3대 전략 통합 누적손익 ({startDate}~)</span>
-              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-[10px]">원금 2.5억 기준</span>
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-[10px]">
+                {includeUsCapitalGainsTax ? "세후 실질" : "세전"} · 2.5억
+              </span>
             </div>
             <div
               className={`text-xl sm:text-2xl font-black font-mono mt-1 ${
@@ -931,7 +1183,7 @@ export default function IntegratedPnlSummaryView({
             className="bg-slate-950/90 border border-sky-500/40 hover:border-sky-400 rounded-xl p-3.5 cursor-pointer transition"
           >
             <div className="flex items-center justify-between text-[11px] text-sky-300 font-extrabold">
-              <span>⚡ ③ ETF투자전략 (당일 / 누적)</span>
+              <span>⚡ ③ ETF전략 ({includeUsCapitalGainsTax ? "세후" : "세전"} 당일/누적)</span>
               <span className="text-[10px] underline">바로가기 →</span>
             </div>
             <div className="flex items-baseline justify-between gap-2 mt-1 font-mono">
@@ -956,18 +1208,189 @@ export default function IntegratedPnlSummaryView({
                 </span>
               </div>
             </div>
-            <div className="text-[11px] text-slate-400 font-mono mt-1">
-              현재 선택 ETF:{" "}
-              <strong className="text-yellow-300">
-                {summaryStats.todayEtf?.targetEtf || summaryStats.topRankEtf?.ticker || "INDA"} (
-                {summaryStats.todayEtf?.tradeStatus || "Holding"})
-              </strong>
+            <div className="text-[10px] text-slate-400 font-mono mt-1 flex items-center justify-between">
+              <span>
+                환율 <strong className="text-sky-300">{usdKrwRate.toLocaleString()}원</strong>
+              </span>
+              <span>
+                양도세(22%): <strong className="text-purple-300">-{summaryStats.totalEtfTaxKrw.toLocaleString()}원</strong>
+              </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* 2. 당일 3대 전략 포지션 · 매수종목 · 선택 ETF 실시간 요약 카드 (3열) */}
+      {/* 2. 최근 구간(0 ~ -N일) vs 직전 구간(-N일 ~ -2N일) 동시 비교 오버레이 차트 (1개월: 0~-30일 / 3개월: 0~-90일 / 6개월: 0~-180일) */}
+      <div className="bg-slate-900/95 border border-amber-500/40 rounded-2xl p-4 shadow-xl space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-2.5">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-300 text-[11px] font-extrabold">
+                📊 기간별 수익률 연속성 비교 (X축: 0일[현재] → -{periodOverlayComparison.windowDays}일)
+              </span>
+              <span className="text-xs font-mono text-emerald-300 font-bold">
+                ■ 최근 {periodOverlayComparison.labelName} ({periodOverlayComparison.curRangeLabel}):{" "}
+                {periodOverlayComparison.curFinalRetPct >= 0 ? "+" : ""}
+                {periodOverlayComparison.curFinalRetPct}% ({formatKrw(periodOverlayComparison.curFinalPnlKrw)})
+              </span>
+              <span className="text-xs font-mono text-purple-300 font-bold">
+                ■ 직전 {periodOverlayComparison.labelName} ({periodOverlayComparison.prevRangeLabel}):{" "}
+                {periodOverlayComparison.prevFinalRetPct >= 0 ? "+" : ""}
+                {periodOverlayComparison.prevFinalRetPct}% ({formatKrw(periodOverlayComparison.prevFinalPnlKrw)})
+              </span>
+            </div>
+            <h2 className="text-sm sm:text-base font-extrabold text-white mt-1">
+              📈 [최근 {periodOverlayComparison.labelName} vs 직전 {periodOverlayComparison.labelName}] 통합 수익률 오버레이 비교 그래프 (X축: 0일 ~ -{periodOverlayComparison.windowDays}일)
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            {(
+              [
+                { id: "1M", label: "1개월 (0 ~ -30일)" },
+                { id: "3M", label: "3개월 (0 ~ -90일)" },
+                { id: "6M", label: "6개월 (0 ~ -180일)" },
+              ] as const
+            ).map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                onClick={() => applyPreset(b.id)}
+                className={`px-2.5 py-1 rounded-lg font-extrabold cursor-pointer border transition ${
+                  periodPreset === b.id
+                    ? "bg-amber-600 border-amber-300 text-white shadow"
+                    : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                }`}
+              >
+                {b.label}
+              </button>
+            ))}
+            <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 ml-1">
+              <button
+                type="button"
+                onClick={() => setCompareMetricMode("RETURN_PCT")}
+                className={`px-2 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                  compareMetricMode === "RETURN_PCT" ? "bg-indigo-600 text-white" : "text-slate-400"
+                }`}
+              >
+                수익률(%)
+              </button>
+              <button
+                type="button"
+                onClick={() => setCompareMetricMode("PNL_MAN")}
+                className={`px-2 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                  compareMetricMode === "PNL_MAN" ? "bg-indigo-600 text-white" : "text-slate-400"
+                }`}
+              >
+                누적손익(만원)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="h-64 w-full text-xs font-mono">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={periodOverlayComparison.series} margin={{ top: 10, right: 24, left: 0, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis
+                dataKey="dayAxisLabel"
+                stroke="#94a3b8"
+                tick={{ fontSize: 11 }}
+                minTickGap={25}
+              />
+              <YAxis
+                stroke="#94a3b8"
+                tick={{ fontSize: 11 }}
+                unit={compareMetricMode === "RETURN_PCT" ? "%" : "만"}
+              />
+              <Tooltip
+                content={({ active, payload }: any) => {
+                  if (!active || !payload || !payload.length) return null;
+                  const pt = payload[0].payload;
+                  return (
+                    <div className="bg-[#090d16] border border-slate-700 rounded-xl p-3 shadow-2xl text-xs font-mono space-y-1.5">
+                      <div className="font-extrabold text-amber-300 border-b border-slate-800 pb-1">
+                        경과일: {pt.dayAxisLabel} (0일=종료일 ← -{periodOverlayComparison.windowDays}일=시작일)
+                      </div>
+                      <div className="text-emerald-400 font-bold">
+                        ■ 최근 {periodOverlayComparison.labelName} ({pt.curDate}):{" "}
+                        {pt.최근구간_통합수익률 >= 0 ? "+" : ""}
+                        {pt.최근구간_통합수익률}% ({pt.최근구간_통합손익_만원 >= 0 ? "+" : ""}
+                        {pt.최근구간_통합손익_만원.toLocaleString()}만원)
+                      </div>
+                      <div className="text-purple-300 font-bold">
+                        ■ 직전 {periodOverlayComparison.labelName} ({pt.prevDate}):{" "}
+                        {pt.직전구간_통합수익률 >= 0 ? "+" : ""}
+                        {pt.직전구간_통합수익률}% ({pt.직전구간_통합손익_만원 >= 0 ? "+" : ""}
+                        {pt.직전구간_통합손익_만원.toLocaleString()}만원)
+                      </div>
+                      <div className="text-sky-300 text-[11px] border-t border-slate-800 pt-1">
+                        ⚡ ETF({includeUsCapitalGainsTax ? "세후 22% 반영" : "세전"}): 최근{" "}
+                        {pt.최근구간_ETF세후수익률 >= 0 ? "+" : ""}
+                        {pt.최근구간_ETF세후수익률}% vs 직전 {pt.직전구간_ETF세후수익률 >= 0 ? "+" : ""}
+                        {pt.직전구간_ETF세후수익률}%
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+              <Legend />
+              <ReferenceLine y={0} stroke="#475569" strokeDasharray="3 3" />
+              {compareMetricMode === "RETURN_PCT" ? (
+                <>
+                  <Line
+                    type="monotone"
+                    dataKey="최근구간_통합수익률"
+                    name={`■ 최근 ${periodOverlayComparison.labelName} 통합수익률 (${periodOverlayComparison.curRangeLabel})`}
+                    stroke="#10b981"
+                    strokeWidth={3}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="직전구간_통합수익률"
+                    name={`■ 직전 ${periodOverlayComparison.labelName} 통합수익률 (${periodOverlayComparison.prevRangeLabel})`}
+                    stroke="#a855f7"
+                    strokeWidth={2.5}
+                    strokeDasharray="5 5"
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="최근구간_ETF세후수익률"
+                    name={`⚡ 최근 ${periodOverlayComparison.labelName} ETF 수익률 (${includeUsCapitalGainsTax ? "미국 자본차익세 22% 차감" : "세전"})`}
+                    stroke="#38bdf8"
+                    strokeWidth={1.8}
+                    dot={false}
+                  />
+                </>
+              ) : (
+                <>
+                  <Line
+                    type="monotone"
+                    dataKey="최근구간_통합손익_만원"
+                    name={`■ 최근 ${periodOverlayComparison.labelName} 통합누적손익 (${periodOverlayComparison.curRangeLabel})`}
+                    stroke="#10b981"
+                    strokeWidth={3}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="직전구간_통합손익_만원"
+                    name={`■ 직전 ${periodOverlayComparison.labelName} 통합누적손익 (${periodOverlayComparison.prevRangeLabel})`}
+                    stroke="#a855f7"
+                    strokeWidth={2.5}
+                    strokeDasharray="5 5"
+                    dot={false}
+                  />
+                </>
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* 3. 당일 3대 전략 포지션 · 매수종목 · 선택 ETF 실시간 요약 카드 (3열) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* 카드 ①: 선물오버나잇자동매매 실시간 포지션 & 최근 체결 */}
         <div className="bg-slate-900/95 border border-emerald-500/40 rounded-2xl p-4 space-y-3 shadow-xl flex flex-col justify-between">
@@ -1183,7 +1606,7 @@ export default function IntegratedPnlSummaryView({
           </div>
         </div>
 
-        {/* 카드 ③: ETF 투자전략 현재 선택 ETF & 모멘텀 랭킹 요약 */}
+        {/* 카드 ③: ETF 투자전략 현재 선택 ETF & 환율/미국 자본차익세(22%) 상세 요약 */}
         <div className="bg-slate-900/95 border border-sky-500/40 rounded-2xl p-4 space-y-3 shadow-xl flex flex-col justify-between">
           <div className="space-y-2.5">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2">
@@ -1192,7 +1615,7 @@ export default function IntegratedPnlSummaryView({
                   ③ 글로벌 ETF 투자전략
                 </span>
                 <span className="text-xs font-mono text-slate-400">
-                  한도 {Math.round(etfBudgetKrw / 10000).toLocaleString()}만원 · 15:50 ET
+                  한도 {Math.round(etfBudgetKrw / 10000).toLocaleString()}만원 · 환율 {usdKrwRate.toLocaleString()}원
                 </span>
               </div>
               <button
@@ -1210,9 +1633,10 @@ export default function IntegratedPnlSummaryView({
               const activeTicker = curEtf?.targetEtf || topRank?.ticker || "INDA";
               const activeName = ETF_NAMES[activeTicker] || topRank?.name || activeTicker;
               const priceUsd = Number(topRank?.current_price || curEtf?.priceUsd || 0);
+              const fxNow = curEtf?.fxRate || usdKrwRate;
               const qty =
                 curEtf?.qty ||
-                (priceUsd > 0 ? Math.max(1, Math.floor(etfBudgetKrw / (priceUsd * usdKrwRate))) : 0);
+                (priceUsd > 0 ? Math.max(1, Math.floor(etfBudgetKrw / (priceUsd * fxNow))) : 0);
 
               return (
                 <>
@@ -1227,13 +1651,15 @@ export default function IntegratedPnlSummaryView({
                       </div>
                     </div>
                     <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5">
-                      <div className="text-[10px] text-slate-400">보유/목표 수량</div>
+                      <div className="text-[10px] text-slate-400">보유수량 (환율적용)</div>
                       <div className="text-sm font-black text-white mt-1">
                         {activeTicker === "CASH" ? "현금 100%" : `${qty.toLocaleString()}주`}
                       </div>
                     </div>
                     <div className="bg-slate-950 border border-emerald-500/40 rounded-xl p-2.5">
-                      <div className="text-[10px] text-emerald-300 font-bold">최근일 ETF 손익</div>
+                      <div className="text-[10px] text-emerald-300 font-bold">
+                        오늘(KST) {includeUsCapitalGainsTax ? "세후" : "세전"}손익
+                      </div>
                       <div
                         className={`text-sm font-black mt-1 ${
                           (curEtf?.dailyPnlKrw ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
@@ -1246,23 +1672,21 @@ export default function IntegratedPnlSummaryView({
 
                   <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-2.5 text-xs space-y-1 font-mono">
                     <div className="flex justify-between">
-                      <span className="text-slate-400">선택 ETF 종목명 / 현재가:</span>
+                      <span className="text-slate-400">선택 ETF / USD현재가(원화가):</span>
                       <span className="font-bold text-white">
-                        {activeName} (${priceUsd.toFixed(2)})
+                        {activeName} (${priceUsd.toFixed(2)} = {Math.round(priceUsd * fxNow).toLocaleString()}원)
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-400">매매 상태 (전일 → 당일):</span>
-                      <span className="font-bold text-emerald-300">
-                        {curEtf?.prevHeld || activeTicker} → {activeTicker} ({curEtf?.tradeStatus || "Holding"})
+                      <span className="text-slate-400">원화환산 적용환율 (KST 합산일):</span>
+                      <span className="font-bold text-sky-300">
+                        1 USD = {fxNow.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}원 ({curEtf?.date || todayStr})
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-400">모멘텀 가중치 / 샤프지수:</span>
-                      <span className="text-sky-300 font-bold">
-                        {Math.round((etfWeights?.w1 ?? 0.5) * 100)}/{Math.round((etfWeights?.w5 ?? 0.3) * 100)}/
-                        {Math.round((etfWeights?.w20 ?? 0.2) * 100)}% | Sharpe{" "}
-                        {topRank?.final_score !== undefined ? Number(topRank.final_score).toFixed(2) : "-"}
+                      <span className="text-slate-400">미국 자본차익세(연 250만 공제 후 22%):</span>
+                      <span className="text-purple-300 font-bold">
+                        세전 {formatKrw(summaryStats.totalEtfGrossPnl)} → 세후 {formatKrw(summaryStats.totalEtfPnl)}
                       </span>
                     </div>
                   </div>
@@ -1293,13 +1717,13 @@ export default function IntegratedPnlSummaryView({
         </div>
       </div>
 
-      {/* 3. 3대 전략 통합 누적손익 추이 차트 (만원 단위) */}
+      {/* 4. 3대 전략 통합 누적손익 추이 차트 (만원 단위) */}
       {chartSeriesAsc.length > 1 && (
         <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm sm:text-base font-extrabold text-white">
-                📈 3대 전략 통합 누적손익 및 전략별 기여도 추이 차트 ({startDate} ~ 현재 · 단위: 만원)
+                📈 3대 전략 통합 누적손익 및 전략별 기여도 추이 차트 ({startDate} ~ 현재 · 단위: 만원 · {includeUsCapitalGainsTax ? "미국 ETF 자본차익세 22% 차감 후" : "세전"})
               </h2>
               <p className="text-xs text-slate-400">
                 선물오버나잇(초록) · 매수주문 국내주식(빨강) · 글로벌 ETF 투자전략(하늘)의 일별 누적 손익과 통합 합산 손익(황금색 영역)을 한눈에 비교합니다.
@@ -1307,7 +1731,7 @@ export default function IntegratedPnlSummaryView({
             </div>
           </div>
 
-          <div className="h-64 w-full text-xs font-mono">
+          <div className="h-60 w-full text-xs font-mono">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartSeriesAsc} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                 <defs>
@@ -1360,7 +1784,7 @@ export default function IntegratedPnlSummaryView({
                 <Area
                   type="monotone"
                   dataKey="ETF전략_만원"
-                  name="⚡ ETF투자전략 누적"
+                  name={`⚡ ETF투자전략 누적 (${includeUsCapitalGainsTax ? "세후" : "세전"})`}
                   stroke="#38bdf8"
                   strokeWidth={2}
                   fillOpacity={0}
@@ -1371,18 +1795,18 @@ export default function IntegratedPnlSummaryView({
         </div>
       )}
 
-      {/* 4. 일자별 통합손익관리 마스터 요약표 (선물 포지션 + 매수종목 + 선택 ETF + 일일 손익 + 통합 누적손익) */}
+      {/* 5. 일자별 통합손익관리 마스터 요약표 (당일/누적 통합손익 맨 앞 배치 + 환율 & 미국 자본차익세 표시) */}
       <div className="bg-slate-900/95 border border-indigo-500/40 rounded-2xl p-4 shadow-2xl space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
           <div>
             <h2 className="text-sm sm:text-base font-extrabold text-white flex flex-wrap items-center gap-2">
-              <span>📊 일자별 통합손익관리 요약표 (선물오버나잇 포지션 · 매수주문 종목 · 선택 ETF · 일일 합산손익)</span>
+              <span>📊 일자별 통합손익관리 요약표 (당일·누적 통합손익 · 선물 포지션 · 매수주문 종목 · 선택 ETF 및 적용환율·자본차익세)</span>
               <span className="px-2.5 py-0.5 rounded-full bg-indigo-950 border border-indigo-500/40 text-indigo-300 text-xs font-mono">
                 총 {integratedRowsDesc.length}거래일
               </span>
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              각 거래일 행을 클릭하면 해당 날짜의 <strong>선물 모델 시그널, 매수주문 개별 체결 종목 리스트, ETF 교체/보유 상세 내역</strong>을 펼쳐서 확인할 수 있습니다.
+              미국 ETF 손익은 <strong>국내시간(KST) 기준 당일 손익에 자동 합산</strong>되며, 적용된 <strong>원/달러 환율(USD/KRW)</strong>과 <strong>미국 연간 자본차익세(250만원 기본공제 후 22%)</strong>가 반영됩니다.
             </p>
           </div>
 
@@ -1421,12 +1845,12 @@ export default function IntegratedPnlSummaryView({
             <table className="w-full text-xs text-left border-collapse font-mono whitespace-nowrap">
               <thead>
                 <tr className="bg-slate-950 text-slate-300 border-b-2 border-slate-700 sticky top-0 z-10">
-                  <th className="p-2.5">거래일자</th>
+                  <th className="p-2.5">거래일자 (KST)</th>
                   <th className="p-2.5 border-l border-slate-800 text-right text-amber-300 font-extrabold bg-amber-950/20">
                     🏆 당일 통합 합산손익
                   </th>
                   <th className="p-2.5 text-right text-white font-extrabold bg-amber-950/20">
-                    누적 통합손익
+                    누적 통합손익 (수익률)
                   </th>
                   <th className="p-2.5 border-l border-slate-800 text-emerald-300">
                     ① 선물오버나잇 포지션 (주문)
@@ -1437,9 +1861,11 @@ export default function IntegratedPnlSummaryView({
                   </th>
                   <th className="p-2.5 text-right text-rose-300">매수주문 일일손익</th>
                   <th className="p-2.5 border-l border-slate-800 text-sky-300">
-                    ③ ETF투자전략 선택 ETF (상태)
+                    ③ ETF전략 선택ETF (적용환율)
                   </th>
-                  <th className="p-2.5 text-right text-sky-300">ETF 일일손익</th>
+                  <th className="p-2.5 text-right text-sky-300">
+                    ETF 일일손익 ({includeUsCapitalGainsTax ? "세후 22%" : "세전"})
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80">
@@ -1557,7 +1983,7 @@ export default function IntegratedPnlSummaryView({
                         {/* ② 매수주문 종목 */}
                         <td className="p-2.5 border-l border-slate-800/80 font-sans">
                           {k ? (
-                            <div className="flex items-center gap-1.5 max-w-[260px] truncate">
+                            <div className="flex items-center gap-1.5 max-w-[240px] truncate">
                               <span className="px-1.5 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[10px] font-bold shrink-0">
                                 {k.stockCount > 0 ? `${k.stockCount}종목` : "정산"}
                               </span>
@@ -1589,7 +2015,7 @@ export default function IntegratedPnlSummaryView({
                           )}
                         </td>
 
-                        {/* ③ ETF투자전략 선택 ETF */}
+                        {/* ③ ETF투자전략 선택 ETF + 적용환율 */}
                         <td className="p-2.5 border-l border-slate-800/80">
                           {e ? (
                             <div className="flex items-center gap-1.5">
@@ -1612,13 +2038,16 @@ export default function IntegratedPnlSummaryView({
                               >
                                 {e.tradeStatus}
                               </span>
+                              <span className="text-[10px] text-sky-300/90 font-mono">
+                                @{e.fxRate.toLocaleString()}원
+                              </span>
                             </div>
                           ) : (
                             <span className="text-slate-600">-</span>
                           )}
                         </td>
 
-                        {/* ETF 일일손익 */}
+                        {/* ETF 일일손익 (세후/세전) */}
                         <td
                           className={`p-2.5 text-right font-bold ${
                             row.ePnl > 0 ? "text-emerald-400" : row.ePnl < 0 ? "text-rose-400" : "text-slate-500"
@@ -1703,22 +2132,27 @@ export default function IntegratedPnlSummaryView({
                                 )}
                               </div>
 
-                              {/* ETF 투자전략 상세 */}
+                              {/* ETF 투자전략 상세 (환율 및 미국 자본차익세 22% 내역 포함) */}
                               <div className="bg-slate-900 border border-sky-500/30 rounded-xl p-3 space-y-1.5">
                                 <div className="font-extrabold text-sky-300">
-                                  ⚡ [{row.date}] 글로벌 ETF 투자전략 상세
+                                  ⚡ [{row.date} KST] 글로벌 ETF 투자전략 상세 (미국 거래일: {e?.usTradeDate || row.date})
                                 </div>
                                 {e ? (
                                   <div className="space-y-1 font-mono text-[11px] text-slate-300">
                                     <div>
-                                      • 선택 ETF: <strong className="text-yellow-300">{e.targetEtf}</strong> ({e.targetEtfName})
+                                      • 선택 ETF: <strong className="text-yellow-300">{e.targetEtf}</strong> ({e.targetEtfName}) | 적용환율:{" "}
+                                      <strong className="text-sky-300">1 USD = {e.fxRate.toLocaleString()}원</strong>
                                     </div>
                                     <div>• 주문/보유 내역: {e.orderDetail}</div>
                                     <div>
-                                      • 당일 손익:{" "}
-                                      <strong className={row.ePnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                                        {formatKrw(row.ePnl)} ({e.dailyRetPct >= 0 ? "+" : ""}
-                                        {e.dailyRetPct}%)
+                                      • 세전 손익: {formatKrw(e.grossDailyPnlKrw)} ({e.grossDailyPnlUsd >= 0 ? "+" : ""}${e.grossDailyPnlUsd}) | 미국 자본차익세(22%):{" "}
+                                      <strong className="text-purple-300">{formatKrw(-e.dailyTaxKrw, false)}</strong>
+                                    </div>
+                                    <div>
+                                      • 세후 실질 손익:{" "}
+                                      <strong className={e.netDailyPnlKrw >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                                        {formatKrw(e.netDailyPnlKrw)} ({e.netDailyRetPct >= 0 ? "+" : ""}
+                                        {e.netDailyRetPct}%)
                                       </strong>{" "}
                                       (누적 {formatKrw(row.cumEtfKrw)})
                                     </div>
