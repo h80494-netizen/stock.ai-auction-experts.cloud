@@ -83,6 +83,7 @@ export default function TetrisScreenerView({
   const [bypassValuationFilters, setBypassValuationFilters] = useState<boolean>(false);
   const [stockSearchQuery, setStockSearchQuery] = useState<string>('');
   const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
+  const [useMcapBubbleSize, setUseMcapBubbleSize] = useState<boolean>(true);
   const [sortBy, setSortBy] = useState<string>('NAME_ASC');
   const [turnaroundFilter, setTurnaroundFilter] = useState<
     'ALL' | 'TURNAROUND_PROFIT' | 'TURNAROUND_LOSS' | 'BOTH_REVERSAL'
@@ -1471,18 +1472,39 @@ export default function TetrisScreenerView({
             return;
           }
 
-          let nearest: any = null;
-          let minDistSq = 18 * 18; // 반경 18px 이내 가장 가까운 종목 탐색
-          for (let i = 0; i < visibleItems.length; i++) {
-            const it = visibleItems[i];
-            const cx = toX(Number(it.pbr) || 0);
-            const cy = toY(Number(it.roe) || 0);
-            const dSq = (mx - cx) * (mx - cx) + (my - cy) * (my - cy);
-            if (dSq < minDistSq) {
-              minDistSq = dSq;
-              nearest = it;
-            }
+        // 🔵 시가총액(억원) 크기에 비례하는 원(버블) 반지름 계산 함수 (로그 스케일 + 제곱근 보정으로 500억~500조 전 구간 직관적 구분)
+        const getBubbleRadius = (it: any, isHov: boolean, isSpecial: boolean, idxHint: number) => {
+          if (!useMcapBubbleSize) {
+            return isHov
+              ? 9.0
+              : isSpecial
+                ? 6.8
+                : idxHint < 12 || visibleItems.length <= 35
+                  ? 6.0
+                  : 4.8;
           }
+          const mcapEok = Math.max(100, Number(it?.market_cap_eok) || 500);
+          // log10(100억=2.0) ~ log10(1,000,000억[100조]=6.0)
+          const logVal = Math.log10(mcapEok);
+          const norm = Math.max(0, Math.min(1, (logVal - 2.3) / 3.4)); // 200억(0.0) ~ 50조+(1.0)
+          const baseR = 4.2 + Math.pow(norm, 1.15) * 16.5; // 반지름 4.2px ~ 20.7px
+          return isHov ? baseR + 2.5 : baseR;
+        };
+
+        let nearest: any = null;
+        let minDistSq = 24 * 24; // 버블 반경 및 중심 기준 가장 가까운 종목 탐색
+        for (let i = 0; i < visibleItems.length; i++) {
+          const it = visibleItems[i];
+          const cx = toX(Number(it.pbr) || 0);
+          const cy = toY(Number(it.roe) || 0);
+          const rBub = getBubbleRadius(it, false, false, i);
+          const hitRadius = Math.max(18, rBub + 4);
+          const dSq = (mx - cx) * (mx - cx) + (my - cy) * (my - cy);
+          if (dSq <= hitRadius * hitRadius && dSq < minDistSq) {
+            minDistSq = dSq;
+            nearest = it;
+          }
+        }
 
           // 히스테리시스(Hysteresis): 이미 호버 중인 종목이 반경 20px 이내에 있고 새 종목과의 거리 차이가 미세하면 기존 종목을 유지하여 떨림(Jitter) 방지
           if (hoveredStock && nearest && hoveredStock.ticker !== nearest.ticker) {
@@ -1575,18 +1597,40 @@ export default function TetrisScreenerView({
           return px >= xMin - xRange * 0.03 && px <= xMax + xRange * 0.03 && py >= yMin - yRange * 0.03 && py <= yMax + yRange * 0.03;
         });
 
-        // 🚫 차트 내 주요 종목 라벨 글씨 겹침 방지 충돌 검사 (Collision-Free Greedy Bounding Box)
+        // 🔵 시가총액 원(버블) 반지름 계산 (마우스 호버, 라벨 충돌 검사, SVG 원 렌더링 공용)
+        const calcStockRadius = (it: any, isHov: boolean, isSpecial: boolean, idxHint: number) => {
+          if (!useMcapBubbleSize) {
+            return isHov
+              ? 9.0
+              : isSpecial
+                ? 6.8
+                : idxHint < 12 || visibleItems.length <= 35
+                  ? 6.0
+                  : 4.8;
+          }
+          const mcapEok = Math.max(100, Number(it?.market_cap_eok) || 500);
+          const logVal = Math.log10(mcapEok);
+          const norm = Math.max(0, Math.min(1, (logVal - 2.3) / 3.4)); // 200억(0.0) ~ 50조+(1.0)
+          const baseR = 4.2 + Math.pow(norm, 1.15) * 16.5; // 반지름 4.2px ~ 20.7px
+          return Number((isHov ? baseR + 2.5 : baseR).toFixed(1));
+        };
+
+        // 🚫 차트 내 주요 종목 라벨 글씨 겹침 방지 충돌 검사 (시가총액 큰 종목 또는 상위 종목 우선 라벨 배치)
         const placedLabelBoxes: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
         const nonOverlappingLabelTickers = new Set<string>();
-        visibleItems.forEach((it: any, idx: number) => {
-          const isCandidate = !showTopLabelsOnly || visibleItems.length <= 25 || idx < 24;
+        const labelCandidates = useMcapBubbleSize
+          ? [...visibleItems].sort((a: any, b: any) => (Number(b.market_cap_eok) || 0) - (Number(a.market_cap_eok) || 0))
+          : visibleItems;
+        labelCandidates.forEach((it: any, idx: number) => {
+          const isCandidate = !showTopLabelsOnly || visibleItems.length <= 28 || idx < 26;
           if (!isCandidate) return;
           const cx = toX(Number(it.pbr) || 0);
           const cy = toY(Number(it.roe) || 0);
+          const rBub = calcStockRadius(it, false, false, idx);
           const nameStr = getStockName(it);
           const estW = Math.max(54, nameStr.length * 12.5 + 16);
           const estH = 18;
-          const bx1 = cx + 7;
+          const bx1 = cx + rBub + 5;
           const by1 = cy - 10;
           const bx2 = bx1 + estW;
           const by2 = by1 + estH;
@@ -1597,6 +1641,16 @@ export default function TetrisScreenerView({
             placedLabelBoxes.push({ x1: bx1, y1: by1, x2: bx2, y2: by2 });
             nonOverlappingLabelTickers.add(it.ticker);
           }
+        });
+
+        // 큰 시가총액 버블이 작은 버블을 가리지 않도록 큰 원부터 먼저 그리고 작은 원을 위에 그리되, 호버된 종목은 맨 위에 렌더링
+        const renderOrderedItems = [...visibleItems].sort((a: any, b: any) => {
+          if (hoveredStock?.ticker === a.ticker) return 1;
+          if (hoveredStock?.ticker === b.ticker) return -1;
+          if (useMcapBubbleSize) {
+            return (Number(b.market_cap_eok) || 0) - (Number(a.market_cap_eok) || 0);
+          }
+          return 0;
         });
 
         const anchorSvgX = toX(effectiveAnchor.pbr);
@@ -1742,6 +1796,36 @@ export default function TetrisScreenerView({
                     🟢 ROE상태별 색상
                   </button>
                 </div>
+
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer text-amber-200 font-extrabold bg-amber-950/60 border border-amber-500/50 rounded-lg px-2.5 py-1"
+                  title="각 종목 원(●)의 크기를 시가총액(억원) 규모에 비례하는 버블 크기로 표시합니다"
+                >
+                  <input
+                    type="checkbox"
+                    checked={useMcapBubbleSize}
+                    onChange={(e) => setUseMcapBubbleSize(e.target.checked)}
+                    className="accent-amber-400"
+                  />
+                  <span>🔵 시가총액 크기 원(버블)</span>
+                </label>
+                {useMcapBubbleSize && (
+                  <div className="hidden 2xl:flex items-center gap-2 text-[11px] text-gray-300 bg-gray-900/90 border border-gray-700 rounded-lg px-2.5 py-1 font-mono">
+                    <span className="text-amber-300 font-sans font-bold">원 크기(시총):</span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-2 h-2 rounded-full bg-sky-400/80 border border-white/60" />
+                      <span>1천억</span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-3 h-3 rounded-full bg-sky-400/80 border border-white/60" />
+                      <span>1조</span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-4 h-4 rounded-full bg-sky-400/80 border border-white/60" />
+                      <span>10조+</span>
+                    </span>
+                  </div>
+                )}
 
                 <label className="flex items-center gap-1.5 cursor-pointer text-rose-300 font-extrabold bg-rose-950/60 border border-rose-500/50 rounded-lg px-2.5 py-1">
                   <input
@@ -2047,6 +2131,15 @@ export default function TetrisScreenerView({
                         )}
                     </div>
 
+                    <span className="text-amber-300 font-extrabold text-sm sm:text-base">
+                      시총:{' '}
+                      <strong className="text-white">
+                        {Number(hoveredStock.market_cap_eok || 0) >= 10000
+                          ? `${(Number(hoveredStock.market_cap_eok) / 10000).toFixed(2)}조`
+                          : `${Number(hoveredStock.market_cap_eok || 0).toLocaleString()}억`}
+                      </strong>
+                    </span>
+
                     <span className="text-sky-300 font-extrabold text-sm sm:text-base">
                       PBR: {hoveredStock.prev_q_pbr} → <strong className="text-white underline">{hoveredStock.pbr}배</strong>{' '}
                       <span className="text-xs sm:text-sm">
@@ -2342,9 +2435,9 @@ export default function TetrisScreenerView({
                   Y축: ROE (자기자본이익률, %) — 위쪽일수록 고수익 (고ROE ↑)
                 </text>
 
-                {/* 종목별 전분기 -> 현재 이동 궤적선 & 현재 위치 점(Point) 렌더링 */}
+                {/* 종목별 전분기 -> 현재 이동 궤적선 & 현재 위치 시가총액 비례 원(Bubble) 렌더링 */}
                 <g clipPath="url(#tetris-scatter-clip)">
-                  {visibleItems.map((it: any, idx: number) => {
+                  {renderOrderedItems.map((it: any, idx: number) => {
                     const curX = toX(Number(it.pbr) || 0);
                     const curY = toY(Number(it.roe) || 0);
                     const prevX = toX(Number(it.prev_q_pbr) || Number(it.pbr) || 0);
@@ -2358,7 +2451,7 @@ export default function TetrisScreenerView({
                       it.roe_turnaround_type === 'TURNAROUND_PROFIT' || (prevRoeVal < 0 && roeVal > 0);
                     const isTurnaroundLoss =
                       it.roe_turnaround_type === 'TURNAROUND_LOSS' || (prevRoeVal > 0 && roeVal < 0);
-                    const secName = String(it.sector || '기타').trim() || '기타';
+                    const secName = getItemSectorLabel(it);
 
                     const dotColor =
                       colorMode === 'SECTOR'
@@ -2373,13 +2466,7 @@ export default function TetrisScreenerView({
                                 ? '#38bdf8'
                                 : '#f59e0b';
 
-                    const radius = isHovered
-                      ? 9.0
-                      : isTurnaroundProfit || isTurnaroundLoss
-                        ? 6.8
-                        : idx < 12 || visibleItems.length <= 35
-                          ? 6.0
-                          : 4.8;
+                    const radius = calcStockRadius(it, isHovered, isTurnaroundProfit || isTurnaroundLoss, idx);
                     const showLabel =
                       isHovered || isTurnaroundProfit || isTurnaroundLoss || nonOverlappingLabelTickers.has(it.ticker);
 
@@ -2473,13 +2560,13 @@ export default function TetrisScreenerView({
                           />
                         )}
 
-                        {/* 현재 종목 위치 원 */}
+                        {/* 현재 종목 위치 시가총액 비례 원(Bubble) */}
                         <circle
                           cx={curX}
                           cy={curY}
                           r={radius}
                           fill={dotColor}
-                          fillOpacity={isHovered ? 1.0 : 0.88}
+                          fillOpacity={isHovered ? 0.98 : useMcapBubbleSize ? 0.68 : 0.88}
                           stroke={
                             isHovered
                               ? '#ffffff'
@@ -2487,9 +2574,9 @@ export default function TetrisScreenerView({
                                 ? '#fef08a'
                                 : isTurnaroundLoss
                                   ? '#f5d0fe'
-                                  : '#0f172a'
+                                  : 'rgba(255,255,255,0.45)'
                           }
-                          strokeWidth={isHovered || isTurnaroundProfit || isTurnaroundLoss ? '2.2' : '1.2'}
+                          strokeWidth={isHovered || isTurnaroundProfit || isTurnaroundLoss ? '2.4' : '1.2'}
                         />
 
                         {/* 차트 내부에서는 서로 겹치지 않는(Collision-Free) 종목명을 크고 선명한 글씨로 표시 */}
