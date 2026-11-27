@@ -904,6 +904,11 @@ def get_dart_screener_results(conditions: dict):
     use_qoq_pbr_limit = bool(conditions.get("use_qoq_pbr_limit", True))
     max_qoq_pbr_diff = float(conditions.get("max_qoq_pbr_diff", 0.15))
     max_qoq_pbr_growth_pct = float(conditions.get("max_qoq_pbr_growth_pct", 20.0))
+    # 슬라이더를 왼쪽 끝(-0.5배)으로 밀어 음수 상한이 들어온 경우 96%의 종목이 사라지므로 최소 +0.15배 이상으로 자동 방어
+    if max_qoq_pbr_diff < 0:
+        max_qoq_pbr_diff = 0.15
+    if max_qoq_pbr_growth_pct < 0:
+        max_qoq_pbr_growth_pct = 15.0
 
     # 4) PER 필터 (적자 기업 제외 또는 저PER 필터)
     use_per = bool(conditions.get("use_per", False))

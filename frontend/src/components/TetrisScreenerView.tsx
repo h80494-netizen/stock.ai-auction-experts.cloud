@@ -125,6 +125,7 @@ export default function TetrisScreenerView({
   }, [initialSector]);
 
   const [results, setResults] = useState<any[]>([]);
+  const [universeResults, setUniverseResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [hoveredStock, setHoveredStock] = useState<any | null>(null);
@@ -190,8 +191,15 @@ export default function TetrisScreenerView({
     if (cfg.min_pbr !== undefined) setMinPbr(Number(cfg.min_pbr));
     if (cfg.max_pbr !== undefined) setMaxPbr(Number(cfg.max_pbr));
     if (cfg.use_qoq_pbr_limit !== undefined) setUseQoqPbrLimit(Boolean(cfg.use_qoq_pbr_limit));
-    if (cfg.max_qoq_pbr_diff !== undefined) setMaxQoqPbrDiff(Number(cfg.max_qoq_pbr_diff));
-    if (cfg.max_qoq_pbr_growth_pct !== undefined) setMaxQoqPbrGrowthPct(Number(cfg.max_qoq_pbr_growth_pct));
+    if (cfg.max_qoq_pbr_diff !== undefined) {
+      // ΔPBR 상한이 음수(예: -0.5배)로 잘못 저장되어 있으면 96%의 종목이 사라지므로 최소 0.15배 이상으로 자동 보정
+      const rawDiff = Number(cfg.max_qoq_pbr_diff);
+      setMaxQoqPbrDiff(rawDiff < 0 ? 0.15 : rawDiff);
+    }
+    if (cfg.max_qoq_pbr_growth_pct !== undefined) {
+      const rawGrowth = Number(cfg.max_qoq_pbr_growth_pct);
+      setMaxQoqPbrGrowthPct(rawGrowth < 0 ? 15 : rawGrowth);
+    }
     if (cfg.use_per !== undefined) setUsePer(Boolean(cfg.use_per));
     if (cfg.min_per !== undefined) setMinPer(Number(cfg.min_per));
     if (cfg.max_per !== undefined) setMaxPer(Number(cfg.max_per));
@@ -295,10 +303,30 @@ export default function TetrisScreenerView({
           loadedCfg = null;
         }
       }
+      if (mounted) {
+        // 전체 상장종목(2,473개) 유니버스를 백그라운드에서 함께 로드하여 64개 세부업종/31개 중분류 버튼과 전체 업종 종목수를 항상 누락 없이 표시
+        fetch('/api/dart/screener', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bypass_valuation_filters: true, sort_by: 'NAME_ASC' }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((uData) => {
+            if (mounted && uData?.success && Array.isArray(uData.results)) {
+              setUniverseResults(uData.results);
+            }
+          })
+          .catch(() => {});
+      }
       if (mounted && loadedCfg) {
-        // 사용자 요청: 디폴트 정렬을 종목명 가나다순(NAME_ASC)으로 유지
+        // 사용자 요청: 디폴트 정렬을 종목명 가나다순(NAME_ASC)으로 유지하고, 음수 ΔPBR 상한(-0.5배 등)이 저장되어 82종목만 나오는 현상 자동 복구
+        const fixedMaxPbrDiff =
+          loadedCfg.max_qoq_pbr_diff !== undefined && Number(loadedCfg.max_qoq_pbr_diff) < 0
+            ? 0.15
+            : loadedCfg.max_qoq_pbr_diff;
         const cfgWithAlphabetDefault = {
           ...loadedCfg,
+          max_qoq_pbr_diff: fixedMaxPbrDiff,
           sort_by: 'NAME_ASC',
         };
         applyFilterConfigToState(cfgWithAlphabetDefault);
@@ -541,19 +569,29 @@ export default function TetrisScreenerView({
   };
 
   const sectorStats = useMemo(() => {
-    const counts: Record<string, number> = {};
+    const matchedCounts: Record<string, number> = {};
+    const totalCounts: Record<string, number> = {};
+
+    const universeSource = universeResults.length > 0 ? universeResults : results;
+    universeSource.forEach((it: any) => {
+      const sec = getItemSectorLabel(it);
+      totalCounts[sec] = (totalCounts[sec] || 0) + 1;
+    });
     results.forEach((it: any) => {
       const sec = getItemSectorLabel(it);
-      counts[sec] = (counts[sec] || 0) + 1;
+      matchedCounts[sec] = (matchedCounts[sec] || 0) + 1;
     });
-    return Object.entries(counts)
-      .sort((a, b) => a[0].localeCompare(b[0], 'ko'))
-      .map(([sector, count], idx) => ({
+
+    const allSectors = Array.from(new Set([...Object.keys(totalCounts), ...Object.keys(matchedCounts)]));
+    return allSectors
+      .sort((a, b) => a.localeCompare(b, 'ko'))
+      .map((sector, idx) => ({
         sector,
-        count,
+        count: matchedCounts[sector] || 0,
+        totalCount: totalCounts[sector] || matchedCounts[sector] || 0,
         color: getSectorColor(sector, idx),
       }));
-  }, [results, sectorTaxonomyMode]);
+  }, [results, universeResults, sectorTaxonomyMode]);
 
   const sectorColorMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -1157,8 +1195,8 @@ export default function TetrisScreenerView({
                 <span className="w-16 text-[11px] text-gray-400">ΔPBR 상한:</span>
                 <input
                   type="range"
-                  min="-0.5"
-                  max="1.0"
+                  min="0"
+                  max="3.0"
                   step="0.05"
                   value={maxQoqPbrDiff}
                   disabled={!useQoqPbrLimit}
@@ -1931,7 +1969,7 @@ export default function TetrisScreenerView({
                     : 'bg-gray-950 text-gray-300 border-gray-700 hover:bg-gray-800'
                     }`}
                 >
-                  전체 섹터 ({results.length})
+                  전체 섹터 (필터통과 {results.length} / 전체 {universeResults.length || results.length}종목)
                 </button>
                 {sectorStats.map((sObj) => {
                   const isSel = selectedSector === sObj.sector;
@@ -1947,15 +1985,20 @@ export default function TetrisScreenerView({
                       }}
                       className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border transition flex items-center gap-1.5 ${isSel
                         ? 'bg-indigo-950 text-white border-white shadow-md ring-1 ring-white/50'
-                        : 'bg-gray-950/90 text-gray-200 border-gray-800 hover:border-gray-600 hover:bg-gray-800/80'
+                        : sObj.count > 0
+                          ? 'bg-gray-950/90 text-gray-200 border-gray-800 hover:border-gray-600 hover:bg-gray-800/80'
+                          : 'bg-gray-950/40 text-gray-500 border-gray-800/60 hover:text-gray-300'
                         }`}
+                      title={`${sObj.sector}: 현재 필터 통과 ${sObj.count}종목 / 업종 전체 ${sObj.totalCount}종목`}
                     >
                       <span
                         className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
                         style={{ backgroundColor: sObj.color }}
                       />
                       <span>{sObj.sector}</span>
-                      <span className="text-[10px] font-mono text-gray-400">({sObj.count})</span>
+                      <span className="text-[10px] font-mono text-gray-400">
+                        ({sObj.count}/{sObj.totalCount})
+                      </span>
                     </button>
                   );
                 })}
