@@ -927,7 +927,7 @@ def get_dart_screener_results(conditions: dict):
     sub_sector_filter = str(conditions.get("sub_sector_filter", "ALL")).strip()
     bypass_valuation_filters = bool(conditions.get("bypass_valuation_filters", False))
     turnaround_filter = str(conditions.get("turnaround_filter", "ALL")).upper()
-    sort_by = str(conditions.get("sort_by", "ROE_PBR_RATIO")).upper()
+    sort_by = str(conditions.get("sort_by", "NAME_ASC")).upper()
 
     results = []
     for r in rows:
@@ -1098,7 +1098,9 @@ def get_dart_screener_results(conditions: dict):
             "selection_tags": tags,
         })
 
-    if sort_by == "QOQ_ROE_DIFF":
+    if sort_by in ("NAME_ASC", "NAME"):
+        results.sort(key=lambda x: str(x.get("name") or ""))
+    elif sort_by == "QOQ_ROE_DIFF":
         results.sort(key=lambda x: (x["qoq_roe_diff"], x["roe_pbr_ratio"]), reverse=True)
     elif sort_by == "ROE_DESC":
         results.sort(key=lambda x: (x["roe"], -x["pbr"]), reverse=True)
@@ -1106,9 +1108,11 @@ def get_dart_screener_results(conditions: dict):
         results.sort(key=lambda x: (x["pbr"], -x["roe"]))
     elif sort_by == "PER_ASC":
         results.sort(key=lambda x: (x["per"] if x["per"] > 0 else 9999.0, -x["roe"]))
-    else:
-        # 기본: ROE/PBR 가성비 지수 (ROE ÷ PBR) 높은 순 정렬
+    elif sort_by == "ROE_PBR_RATIO":
         results.sort(key=lambda x: (x["roe_pbr_ratio"], x["qoq_roe_diff"]), reverse=True)
+    else:
+        # 기본: 종목명 가나다순 정렬
+        results.sort(key=lambda x: str(x.get("name") or ""))
 
     return results
 
@@ -1137,7 +1141,7 @@ DEFAULT_TETRIS_SCREENER_CONFIG = {
     "min_price_change": -20.0,
     "max_price_change": 25.0,
     "market_filter": "ALL",
-    "sort_by": "ROE_PBR_RATIO",
+    "sort_by": "NAME_ASC",
 }
 
 

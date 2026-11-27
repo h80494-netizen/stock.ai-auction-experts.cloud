@@ -83,7 +83,7 @@ export default function TetrisScreenerView({
   const [bypassValuationFilters, setBypassValuationFilters] = useState<boolean>(false);
   const [stockSearchQuery, setStockSearchQuery] = useState<string>('');
   const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
-  const [sortBy, setSortBy] = useState<string>('ROE_PBR_RATIO');
+  const [sortBy, setSortBy] = useState<string>('NAME_ASC');
   const [turnaroundFilter, setTurnaroundFilter] = useState<
     'ALL' | 'TURNAROUND_PROFIT' | 'TURNAROUND_LOSS' | 'BOTH_REVERSAL'
   >('ALL');
@@ -101,8 +101,8 @@ export default function TetrisScreenerView({
     | 'ROE_PBR_RATIO'
     | 'PRICE_GROWTH'
     | 'TAGS';
-  const [tableSortKey, setTableSortKey] = useState<TableSortKey | null>(null);
-  const [tableSortDir, setTableSortDir] = useState<'asc' | 'desc'>('desc');
+  const [tableSortKey, setTableSortKey] = useState<TableSortKey | null>('NAME');
+  const [tableSortDir, setTableSortDir] = useState<'asc' | 'desc'>('asc');
 
   const handleTableSort = (key: TableSortKey) => {
     if (tableSortKey === key) {
@@ -296,10 +296,19 @@ export default function TetrisScreenerView({
         }
       }
       if (mounted && loadedCfg) {
-        applyFilterConfigToState(loadedCfg);
-        await executeScreener(loadedCfg);
+        // 사용자 요청: 디폴트 정렬을 종목명 가나다순(NAME_ASC)으로 유지
+        const cfgWithAlphabetDefault = {
+          ...loadedCfg,
+          sort_by: 'NAME_ASC',
+        };
+        applyFilterConfigToState(cfgWithAlphabetDefault);
+        setTableSortKey('NAME');
+        setTableSortDir('asc');
+        await executeScreener(cfgWithAlphabetDefault);
       } else if (mounted) {
-        await executeScreener();
+        setTableSortKey('NAME');
+        setTableSortDir('asc');
+        await executeScreener({ sort_by: 'NAME_ASC' });
       }
     };
     initFromSavedConfig();
@@ -538,12 +547,12 @@ export default function TetrisScreenerView({
       counts[sec] = (counts[sec] || 0) + 1;
     });
     return Object.entries(counts)
+      .sort((a, b) => a[0].localeCompare(b[0], 'ko'))
       .map(([sector, count], idx) => ({
         sector,
         count,
         color: getSectorColor(sector, idx),
-      }))
-      .sort((a, b) => b.count - a.count);
+      }));
   }, [results, sectorTaxonomyMode]);
 
   const sectorColorMap = useMemo(() => {
@@ -776,10 +785,30 @@ export default function TetrisScreenerView({
             onChange={(e) => {
               const s = e.target.value;
               setSortBy(s);
+              if (s === 'NAME_ASC') {
+                setTableSortKey('NAME');
+                setTableSortDir('asc');
+              } else if (s === 'ROE_PBR_RATIO') {
+                setTableSortKey('ROE_PBR_RATIO');
+                setTableSortDir('desc');
+              } else if (s === 'QOQ_ROE_DIFF') {
+                setTableSortKey('QOQ_ROE_DIFF');
+                setTableSortDir('desc');
+              } else if (s === 'ROE_DESC') {
+                setTableSortKey('ROE');
+                setTableSortDir('desc');
+              } else if (s === 'PBR_ASC') {
+                setTableSortKey('PBR');
+                setTableSortDir('asc');
+              } else if (s === 'PER_ASC') {
+                setTableSortKey('PER');
+                setTableSortDir('asc');
+              }
               executeScreener({ sort_by: s });
             }}
             className="bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-1.5 text-emerald-300 font-bold"
           >
+            <option value="NAME_ASC">정렬: 종목명 가나다순 (기본)</option>
             <option value="ROE_PBR_RATIO">정렬: ROE/PBR 가성비 높은 순 (고ROE·저PBR)</option>
             <option value="QOQ_ROE_DIFF">정렬: 전분기 대비 ROE 증가폭(ΔROE) 큰 순</option>
             <option value="ROE_DESC">정렬: 절대 ROE 높은 순</option>
