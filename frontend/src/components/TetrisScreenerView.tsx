@@ -84,6 +84,7 @@ export default function TetrisScreenerView({
   const [stockSearchQuery, setStockSearchQuery] = useState<string>('');
   const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
   const [useMcapBubbleSize, setUseMcapBubbleSize] = useState<boolean>(true);
+  const [trimOutliers5Pct, setTrimOutliers5Pct] = useState<boolean>(true); // 차트 내 극단값(PER, ROE, ΔROE, PBR) 상하위 5% 제거 (기본 ON)
   const [sortBy, setSortBy] = useState<string>('NAME_ASC');
   const [turnaroundFilter, setTurnaroundFilter] = useState<
     'ALL' | 'TURNAROUND_PROFIT' | 'TURNAROUND_LOSS' | 'BOTH_REVERSAL'
@@ -1396,20 +1397,85 @@ export default function TetrisScreenerView({
         const plotW = W - padL - padR;
         const plotH = H - padT - padB;
 
-        const plotItems = filteredResults.slice(0, 220);
+        const rawCandidateItems = filteredResults.slice(0, 350);
+
+        // ✂️ 사용자 요청: 차트 내 극단값(PER, ROE, ROE 증가[ΔROE], PBR) 상하위 5%를 삭제해서 데이터가 제대로 넓게 보이도록 트리밍
+        const getPercentileBounds = (arr: number[], lowPct = 0.05, highPct = 0.95) => {
+          if (arr.length < 10) {
+            return {
+              lo: arr.length ? Math.min(...arr) : -999999,
+              hi: arr.length ? Math.max(...arr) : 999999,
+            };
+          }
+          const sorted = [...arr].sort((a, b) => a - b);
+          const loIdx = Math.max(0, Math.floor(sorted.length * lowPct));
+          const hiIdx = Math.min(sorted.length - 1, Math.ceil(sorted.length * highPct) - 1);
+          return { lo: sorted[loIdx], hi: sorted[hiIdx] };
+        };
+
+        let plotItems = rawCandidateItems;
+        let trimmedOutlierCount = 0;
+
+        if (trimOutliers5Pct && rawCandidateItems.length >= 12) {
+          const roeBounds = getPercentileBounds(
+            rawCandidateItems.map((it: any) => Number(it.roe) || 0),
+            0.05,
+            0.95
+          );
+          const qoqRoeBounds = getPercentileBounds(
+            rawCandidateItems.map((it: any) => Number(it.qoq_roe_diff) || 0),
+            0.05,
+            0.95
+          );
+          const pbrBounds = getPercentileBounds(
+            rawCandidateItems.map((it: any) => Number(it.pbr) || 0).filter((v) => v > 0),
+            0.02,
+            0.95
+          );
+          const validPers = rawCandidateItems
+            .map((it: any) => Number(it.per) || 0)
+            .filter((v) => v > 0);
+          const perBounds = getPercentileBounds(validPers, 0.02, 0.95);
+
+          const trimmed = rawCandidateItems.filter((it: any) => {
+            const rVal = Number(it.roe) || 0;
+            const qrVal = Number(it.qoq_roe_diff) || 0;
+            const pbrVal = Number(it.pbr) || 0;
+            const perVal = Number(it.per) || 0;
+
+            if (rVal < roeBounds.lo || rVal > roeBounds.hi) return false;
+            if (qrVal < qoqRoeBounds.lo || qrVal > qoqRoeBounds.hi) return false;
+            if (pbrVal > pbrBounds.hi) return false;
+            if (perVal > 0 && validPers.length >= 12 && perVal > Math.max(250, perBounds.hi)) return false;
+            return true;
+          });
+
+          if (trimmed.length >= 5) {
+            trimmedOutlierCount = rawCandidateItems.length - trimmed.length;
+            plotItems = trimmed;
+          }
+        }
+
         const isDualTrajectoryActive = showQoqTrajectory || onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD';
 
         // 현재분기(25.4Q~26.3Q) 위치(pbr, roe)와 전분기(25.3Q~26.2Q) 위치(prev_q_pbr, prev_q_roe)를 동시에 표시하되,
-        // 전분기 극단적 적자(-168% ROE 등) 때문에 축이 찌그러지지 않도록 정상 범위(-15% 이상)의 전분기 점을 기본 축에 함께 포함
+        // 전분기 값이 현재분기 트리밍 범위를 크게 벗어나 축을 찌그러뜨리지 않도록 축 범위 내의 전분기 값만 스케일에 반영
         const curPbrVals = plotItems.map((it: any) => Number(it.pbr) || 0).filter((v) => v > 0);
+        const maxCurPbr = curPbrVals.length ? Math.max(...curPbrVals) : 5.0;
         const prevPbrVals = isDualTrajectoryActive
-          ? plotItems.map((it: any) => Number(it.prev_q_pbr) || 0).filter((v) => v > 0 && v <= 25)
+          ? plotItems
+              .map((it: any) => Number(it.prev_q_pbr) || 0)
+              .filter((v) => v > 0 && v <= maxCurPbr * 1.15)
           : [];
         const allXForAxis = [...curPbrVals, ...prevPbrVals];
 
         const curRoeVals = plotItems.map((it: any) => Number(it.roe) || 0);
+        const minCurRoe = curRoeVals.length ? Math.min(...curRoeVals) : -15;
+        const maxCurRoe = curRoeVals.length ? Math.max(...curRoeVals) : 40;
         const prevRoeVals = isDualTrajectoryActive
-          ? plotItems.map((it: any) => Number(it.prev_q_roe) || 0).filter((v) => v >= -15 && v <= 120)
+          ? plotItems
+              .map((it: any) => Number(it.prev_q_roe) || 0)
+              .filter((v) => v >= minCurRoe - 5 && v <= maxCurRoe + 5)
           : [];
         const allYForAxis = [...curRoeVals, ...prevRoeVals];
 
@@ -1803,6 +1869,22 @@ export default function TetrisScreenerView({
                     🟢 ROE상태별 색상
                   </button>
                 </div>
+
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer text-cyan-200 font-extrabold bg-cyan-950/70 border border-cyan-500/50 rounded-lg px-2.5 py-1"
+                  title="극단적인 이상치(ROE, ΔROE 증가폭, PER, PBR 상하위 5%)를 차트에서 제외하여 핵심 종목 분포가 찌그러지지 않고 한눈에 넓게 보이도록 합니다"
+                >
+                  <input
+                    type="checkbox"
+                    checked={trimOutliers5Pct}
+                    onChange={(e) => setTrimOutliers5Pct(e.target.checked)}
+                    className="accent-cyan-400"
+                  />
+                  <span>
+                    ✂️ 극단값 상하위 5% 제거 (ROE·ΔROE·PER·PBR)
+                    {trimOutliers5Pct && trimmedOutlierCount > 0 ? ` [-${trimmedOutlierCount}종목]` : ''}
+                  </span>
+                </label>
 
                 <label
                   className="flex items-center gap-1.5 cursor-pointer text-amber-200 font-extrabold bg-amber-950/60 border border-amber-500/50 rounded-lg px-2.5 py-1"
