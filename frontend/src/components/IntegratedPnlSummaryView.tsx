@@ -617,7 +617,43 @@ export default function IntegratedPnlSummaryView({
     const stratArr: number[] = etfSimData.strategy || [];
     const selArr: string[] = etfSimData.selected_etf || [];
 
-    // 국내 거래일 목록 (미국장 마감일 T_US -> 한국시간 익일 아침 06:00 KST 확정이므로, 최신 미국 거래일이 오늘 KST보다 이전이면 국내시간 기준 오늘(todayStr) 손익에 합산)
+    // ★ 한국 시장 개장일(KST 거래일) 목록 정렬:
+    // 미국장 거래일(usDate) 직후 처음으로 열리는 한국 시장 개장일(예: 11/25 미국장 마감 -> 11/26 한국장, 주말이 끼면 월요일 한국장)에
+    // 해당 ETF 손익이 배정되며, 다음 날(11/27, 11/28...)이 되어도 해당 한국 시장 개장일(11/26) 행의 ETF 손익이 0으로 바뀌거나 다른 날로 이동하지 않고 영구적으로 그대로 유지됩니다.
+    const krMarketDaysSet = new Set<string>([
+      ...Object.keys(futuresByDate),
+      ...Object.keys(krByDate),
+    ]);
+    // 오늘(todayStr)이 평일(월~금)이면 한국 시장 개장일에 포함
+    const todayDow = new Date(todayStr + "T00:00:00").getDay();
+    if (todayDow >= 1 && todayDow <= 5) {
+      krMarketDaysSet.add(todayStr);
+    }
+    const sortedKrMarketDays = Array.from(krMarketDaysSet).sort((a, b) => a.localeCompare(b));
+
+    const getNextKoreanMarketDay = (usDateStr: string): string => {
+      // 1) usDateStr 보다 엄격히 큰(다음 날 이후) 첫 번째 한국 시장 개장일 탐색 (최대 5일 이내)
+      for (let k = 0; k < sortedKrMarketDays.length; k++) {
+        const krDay = sortedKrMarketDays[k];
+        if (krDay > usDateStr) {
+          const gapDays = Math.round(
+            (new Date(krDay + "T00:00:00").getTime() - new Date(usDateStr + "T00:00:00").getTime()) / 86400000
+          );
+          if (gapDays <= 5) {
+            return krDay;
+          }
+          break;
+        }
+      }
+      // 2) 만약 DB 거래일 목록 범위 밖이면 미국 거래일 다음 평일(월~금)로 계산
+      const dt = new Date(usDateStr + "T00:00:00");
+      dt.setDate(dt.getDate() + 1);
+      while (dt.getDay() === 0 || dt.getDay() === 6) {
+        dt.setDate(dt.getDate() + 1);
+      }
+      return dt.toISOString().split("T")[0];
+    };
+
     const lastValidIdx = dates.length - 1;
     const lastUsDate = String(dates[lastValidIdx] || "");
 
@@ -629,8 +665,8 @@ export default function IntegratedPnlSummaryView({
       const usDate = String(dates[i] || "");
       if (!usDate || selArr[i] === "Waiting") continue;
 
-      // 국내시간(KST) 기준 매핑: 최신 미국장 거래일(예: 11/25 미국장 마감 -> 11/26 06:00 KST 확정)을 오늘(todayStr) 행에 정렬하여 오늘 통합손익에 합산
-      const kstDate = i === lastValidIdx && lastUsDate < todayStr ? todayStr : usDate;
+      // 미국 거래일(usDate)의 손익을 직후 한국 시장 개장일(kstDate)에 고정 배정하여 시간이 지나도 항상 그 한국 개장일에 그대로 유지
+      const kstDate = getNextKoreanMarketDay(usDate);
       const yearKey = kstDate.slice(0, 4);
 
       const prevRaw = String(selArr[i - 1] || "CASH");
@@ -708,8 +744,49 @@ export default function IntegratedPnlSummaryView({
       };
     }
 
+    // ★ 한국 시장이 열리는 모든 개장일(sortedKrMarketDays) 중 미국장이 휴장이어서 해당 날 아침 새로 정산된 미국장 손익이 없는 날에는
+    // 직전 보유 ETF 상태를 유지하되 당일 손익은 0원으로 채워주어, 각 한국 개장일의 ETF 손익이 언제 조회하든 흔들림 없이 그대로 유지되도록 보장
+    const mappedKstDates = Object.keys(map).sort((a, b) => a.localeCompare(b));
+    if (mappedKstDates.length > 0) {
+      let lastKnownEntry = map[mappedKstDates[0]];
+      sortedKrMarketDays.forEach((krDay) => {
+        if (krDay < mappedKstDates[0]) return;
+        if (map[krDay]) {
+          lastKnownEntry = map[krDay];
+        } else if (lastKnownEntry) {
+          const yearKey = krDay.slice(0, 4);
+          const fxAtDay = Number(fxByDateMap[krDay] || usdKrwRate || lastKnownEntry.fxRate || 1400);
+          map[krDay] = {
+            date: krDay,
+            usTradeDate: `${lastKnownEntry.usTradeDate} (전일 미국장 휴장)`,
+            prevHeld: lastKnownEntry.targetEtf,
+            targetEtf: lastKnownEntry.targetEtf,
+            targetEtfName: lastKnownEntry.targetEtfName,
+            isHolding: true,
+            tradeStatus: "미국장 휴장 (손익 0원)",
+            orderDetail:
+              lastKnownEntry.targetEtf === "CASH"
+                ? "전일 미국시장 휴장 · CASH 현금 보유 유지 (당일 손익 0원)"
+                : `전일 미국시장 휴장 · ${lastKnownEntry.targetEtf} ${lastKnownEntry.qty.toLocaleString()}주 ($${lastKnownEntry.priceUsd.toFixed(2)}) 보유 유지 (당일 손익 0원)`,
+            fxRate: fxAtDay,
+            grossDailyPnlUsd: 0,
+            grossDailyPnlKrw: 0,
+            grossDailyRetPct: 0,
+            annualTaxAccruedKrw: yearCumTaxMap[yearKey] || lastKnownEntry.annualTaxAccruedKrw || 0,
+            dailyTaxKrw: 0,
+            netDailyPnlKrw: 0,
+            netDailyRetPct: 0,
+            dailyPnlKrw: 0,
+            dailyRetPct: 0,
+            priceUsd: lastKnownEntry.priceUsd,
+            qty: lastKnownEntry.qty,
+          };
+        }
+      });
+    }
+
     return map;
-  }, [etfSimData, etfRanking, etfBudgetKrw, usdKrwRate, fxByDateMap, todayStr, includeUsCapitalGainsTax]);
+  }, [etfSimData, etfRanking, etfBudgetKrw, usdKrwRate, fxByDateMap, futuresByDate, krByDate, todayStr, includeUsCapitalGainsTax]);
 
   // ============================================================================
   // 4) 전체 일자별 통합 시계열 (직전 1개월/3개월/6개월 비교 및 마스터 요약표 공용)
@@ -960,10 +1037,11 @@ export default function IntegratedPnlSummaryView({
     const totalEtfTaxKrw = latestRow ? latestRow.cumEtfTaxKrw : 0;
     const grandTotalPnl = totalFutPnl + totalKrPnl + totalEtfPnl;
 
-    const todayFut = futuresByDate[todayStr] || (integratedRowsDesc[0]?.futures ?? null);
-    const todayKr = krByDate[todayStr] || null;
-    const latestEtfDate = Object.keys(etfByDate).sort().pop() || "";
-    const todayEtf = etfByDate[todayStr] || (latestEtfDate ? etfByDate[latestEtfDate] : null);
+    // 한국 시장이 열린 가장 최신 개장일(latestRow.date) 기준: 자정이 넘어 주말/새벽이 되어도 최신 한국 시장 개장일의 당일 손익이 그대로 유지되도록 보장
+    const activeKrMarketDate = futuresByDate[todayStr] || krByDate[todayStr] ? todayStr : (latestRow?.date || todayStr);
+    const todayFut = futuresByDate[activeKrMarketDate] || (latestRow?.futures ?? null);
+    const todayKr = krByDate[activeKrMarketDate] || (latestRow?.krOrder ?? null);
+    const todayEtf = etfByDate[activeKrMarketDate] || (latestRow?.etf ?? null);
     const topRankEtf = etfRanking[0] || null;
 
     const todayCombinedPnl =
@@ -975,6 +1053,7 @@ export default function IntegratedPnlSummaryView({
       posDays + negDays > 0 ? Number(((posDays / (posDays + negDays)) * 100).toFixed(1)) : 0;
 
     return {
+      activeKrMarketDate,
       totalFutPnl,
       totalKrPnl,
       totalEtfPnl,
@@ -1083,8 +1162,8 @@ export default function IntegratedPnlSummaryView({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2 border-t border-slate-800/80">
           <div className="bg-slate-950/90 border-2 border-indigo-500/60 rounded-xl p-3.5 shadow-lg">
             <div className="flex items-center justify-between text-[11px] text-indigo-300 font-extrabold">
-              <span>⚡ 당일({todayStr} KST) 3대 전략 합산손익</span>
-              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-[10px]">ETF 당일합산</span>
+              <span>⚡ 당일({summaryStats.activeKrMarketDate} KST) 3대 전략 합산손익</span>
+              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-[10px]">한국장 개장일 기준</span>
             </div>
             <div
               className={`text-xl sm:text-2xl font-black font-mono mt-1 ${
