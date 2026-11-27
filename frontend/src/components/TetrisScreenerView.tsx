@@ -79,8 +79,42 @@ export default function TetrisScreenerView({
 
   const [marketFilter, setMarketFilter] = useState<'ALL' | 'KOSPI' | 'KOSDAQ'>('ALL');
   const [selectedSector, setSelectedSector] = useState<string>(initialSector || 'ALL');
+  const [sectorTaxonomyMode, setSectorTaxonomyMode] = useState<'MAJOR' | 'SUB_SECTOR'>('MAJOR');
+  const [bypassValuationFilters, setBypassValuationFilters] = useState<boolean>(false);
+  const [stockSearchQuery, setStockSearchQuery] = useState<string>('');
   const [colorMode, setColorMode] = useState<'SECTOR' | 'ROE_STATUS'>('SECTOR');
   const [sortBy, setSortBy] = useState<string>('ROE_PBR_RATIO');
+  const [turnaroundFilter, setTurnaroundFilter] = useState<
+    'ALL' | 'TURNAROUND_PROFIT' | 'TURNAROUND_LOSS' | 'BOTH_REVERSAL'
+  >('ALL');
+  const [chartSizePct, setChartSizePct] = useState<number>(100); // 그래프 박스 크기 축소/확대 비율 (60% ~ 100%)
+
+  type TableSortKey =
+    | 'NAME'
+    | 'SECTOR'
+    | 'MARKET_CAP'
+    | 'ROE'
+    | 'QOQ_ROE_DIFF'
+    | 'PBR'
+    | 'QOQ_PBR_DIFF'
+    | 'PER'
+    | 'ROE_PBR_RATIO'
+    | 'PRICE_GROWTH'
+    | 'TAGS';
+  const [tableSortKey, setTableSortKey] = useState<TableSortKey | null>(null);
+  const [tableSortDir, setTableSortDir] = useState<'asc' | 'desc'>('desc');
+
+  const handleTableSort = (key: TableSortKey) => {
+    if (tableSortKey === key) {
+      setTableSortDir((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setTableSortKey(key);
+      // PBR, ΔPBR, PER, 종목명, 업종은 기본 오름차순(낮은 밸류/가나다 우선)이 직관적이나,
+      // 사용자가 한 번씩 클릭할 때마다 내림차순/오름차순이 즉시 토글되도록 명확히 설정
+      const defaultAscKeys: TableSortKey[] = ['NAME', 'SECTOR', 'PBR', 'PER'];
+      setTableSortDir(defaultAscKeys.includes(key) ? 'asc' : 'desc');
+    }
+  };
 
   useEffect(() => {
     if (initialSector) {
@@ -135,6 +169,8 @@ export default function TetrisScreenerView({
     min_price_change: minPriceChange,
     max_price_change: maxPriceChange,
     market_filter: marketFilter,
+    turnaround_filter: turnaroundFilter,
+    bypass_valuation_filters: bypassValuationFilters,
     sort_by: sortBy,
   });
 
@@ -487,11 +523,18 @@ export default function TetrisScreenerView({
     return s ? s.name : item.ticker;
   };
 
-  // 섹터별 종목 수 집계 및 섹터 필터링된 결과
+  // 섹터(중분류 31개 vs 거래소 세부업종 64개) 기준 종목 수 집계 및 섹터 필터링된 결과
+  const getItemSectorLabel = (it: any) => {
+    if (sectorTaxonomyMode === 'SUB_SECTOR') {
+      return String(it?.sub_sector || it?.sector || '기타').trim() || '기타';
+    }
+    return String(it?.sector || '기타').trim() || '기타';
+  };
+
   const sectorStats = useMemo(() => {
     const counts: Record<string, number> = {};
     results.forEach((it: any) => {
-      const sec = String(it.sector || '기타').trim() || '기타';
+      const sec = getItemSectorLabel(it);
       counts[sec] = (counts[sec] || 0) + 1;
     });
     return Object.entries(counts)
@@ -501,7 +544,7 @@ export default function TetrisScreenerView({
         color: getSectorColor(sector, idx),
       }))
       .sort((a, b) => b.count - a.count);
-  }, [results]);
+  }, [results, sectorTaxonomyMode]);
 
   const sectorColorMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -512,11 +555,52 @@ export default function TetrisScreenerView({
   }, [sectorStats]);
 
   const filteredResults = useMemo(() => {
-    let base = results;
+    let base = [...results];
     if (selectedSector && selectedSector !== 'ALL') {
-      base = base.filter((it: any) => (String(it.sector || '기타').trim() || '기타') === selectedSector);
+      base = base.filter(
+        (it: any) =>
+          getItemSectorLabel(it) === selectedSector ||
+          String(it.sector || '').trim() === selectedSector ||
+          String(it.sub_sector || '').trim() === selectedSector
+      );
     }
-    if (onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') {
+    if (stockSearchQuery.trim()) {
+      const q = stockSearchQuery.trim().toLowerCase();
+      base = base.filter(
+        (it: any) =>
+          String(getStockName(it) || '').toLowerCase().includes(q) ||
+          String(it.ticker || '').toLowerCase().includes(q) ||
+          String(it.sub_sector || '').toLowerCase().includes(q) ||
+          String(it.business_desc || '').toLowerCase().includes(q)
+      );
+    }
+    if (turnaroundFilter === 'TURNAROUND_PROFIT') {
+      base = base.filter(
+        (it: any) =>
+          it.roe_turnaround_type === 'TURNAROUND_PROFIT' ||
+          (Number(it.prev_q_roe) < 0 && Number(it.roe) > 0)
+      );
+    } else if (turnaroundFilter === 'TURNAROUND_LOSS') {
+      base = base.filter(
+        (it: any) =>
+          it.roe_turnaround_type === 'TURNAROUND_LOSS' ||
+          (Number(it.prev_q_roe) > 0 && Number(it.roe) < 0)
+      );
+    } else if (turnaroundFilter === 'BOTH_REVERSAL') {
+      base = base.filter(
+        (it: any) =>
+          it.roe_turnaround_type === 'TURNAROUND_PROFIT' ||
+          it.roe_turnaround_type === 'TURNAROUND_LOSS' ||
+          (Number(it.prev_q_roe) < 0 && Number(it.roe) > 0) ||
+          (Number(it.prev_q_roe) > 0 && Number(it.roe) < 0)
+      );
+    }
+    if (
+      !bypassValuationFilters &&
+      (onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') &&
+      turnaroundFilter !== 'TURNAROUND_LOSS' &&
+      turnaroundFilter !== 'BOTH_REVERSAL'
+    ) {
       const floorRoe = useRoe ? minRoe : 10.0;
       const minSlope = useQoqRoe && minQoqRoeDiff > 0 ? minQoqRoeDiff : 0.01;
       base = base.filter(
@@ -526,8 +610,65 @@ export default function TetrisScreenerView({
           Number(it.qoq_roe_diff || 0) > 0
       );
     }
+
+    if (tableSortKey) {
+      const dir = tableSortDir === 'asc' ? 1 : -1;
+      base.sort((a: any, b: any) => {
+        switch (tableSortKey) {
+          case 'NAME':
+            return String(getStockName(a) || '').localeCompare(String(getStockName(b) || ''), 'ko') * dir;
+          case 'SECTOR': {
+            const sa = `${a.market || ''} ${a.sector || ''}`;
+            const sb = `${b.market || ''} ${b.sector || ''}`;
+            return sa.localeCompare(sb, 'ko') * dir;
+          }
+          case 'MARKET_CAP':
+            return (Number(a.market_cap_eok ?? a.price ?? 0) - Number(b.market_cap_eok ?? b.price ?? 0)) * dir;
+          case 'ROE':
+            return (Number(a.roe ?? -9999) - Number(b.roe ?? -9999)) * dir;
+          case 'QOQ_ROE_DIFF':
+            return (Number(a.qoq_roe_diff ?? -9999) - Number(b.qoq_roe_diff ?? -9999)) * dir;
+          case 'PBR':
+            return (Number(a.pbr ?? 9999) - Number(b.pbr ?? 9999)) * dir;
+          case 'QOQ_PBR_DIFF':
+            return (Number(a.qoq_pbr_diff ?? 9999) - Number(b.qoq_pbr_diff ?? 9999)) * dir;
+          case 'PER': {
+            const pa = Number(a.per) > 0 ? Number(a.per) : 999999;
+            const pb = Number(b.per) > 0 ? Number(b.per) : 999999;
+            return (pa - pb) * dir;
+          }
+          case 'ROE_PBR_RATIO':
+            return (Number(a.roe_pbr_ratio ?? -9999) - Number(b.roe_pbr_ratio ?? -9999)) * dir;
+          case 'PRICE_GROWTH':
+            return (Number(a.qoq_price_growth_pct ?? -9999) - Number(b.qoq_price_growth_pct ?? -9999)) * dir;
+          case 'TAGS': {
+            const ta = (a.selection_tags || []).join(' ');
+            const tb = (b.selection_tags || []).join(' ');
+            return ta.localeCompare(tb, 'ko') * dir;
+          }
+          default:
+            return 0;
+        }
+      });
+    }
+
     return base;
-  }, [results, selectedSector, onlyUpwardSlope, roeFilterMode, useRoe, minRoe, useQoqRoe, minQoqRoeDiff]);
+  }, [
+    results,
+    selectedSector,
+    turnaroundFilter,
+    onlyUpwardSlope,
+    roeFilterMode,
+    useRoe,
+    minRoe,
+    useQoqRoe,
+    minQoqRoeDiff,
+    tableSortKey,
+    tableSortDir,
+    sectorTaxonomyMode,
+    bypassValuationFilters,
+    stockSearchQuery,
+  ]);
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a] text-gray-200 p-4 sm:p-6 overflow-y-auto space-y-5">
@@ -755,11 +896,10 @@ export default function TetrisScreenerView({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
           {/* ① 현재 ROE 수준 (%) */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              useRoe
-                ? 'bg-indigo-950/40 border-indigo-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${useRoe
+              ? 'bg-indigo-950/40 border-indigo-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -822,11 +962,10 @@ export default function TetrisScreenerView({
 
           {/* ② 전분기 대비(QoQ) ROE 증가폭 (%p) */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              useQoqRoe
-                ? 'bg-emerald-950/40 border-emerald-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${useQoqRoe
+              ? 'bg-emerald-950/40 border-emerald-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -890,11 +1029,10 @@ export default function TetrisScreenerView({
 
           {/* ③ PBR 절대 수준 (배) */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              usePbr
-                ? 'bg-sky-950/40 border-sky-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${usePbr
+              ? 'bg-sky-950/40 border-sky-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -963,11 +1101,10 @@ export default function TetrisScreenerView({
 
           {/* ④ 전분기 대비(QoQ) PBR 상승폭 제한 ("PBR이 크게 늘어나지 않은 종목") */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              useQoqPbrLimit
-                ? 'bg-amber-950/40 border-amber-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${useQoqPbrLimit
+              ? 'bg-amber-950/40 border-amber-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -1033,11 +1170,10 @@ export default function TetrisScreenerView({
 
           {/* ⑤ PER 범위 (배) */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              usePer
-                ? 'bg-purple-950/40 border-purple-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${usePer
+              ? 'bg-purple-950/40 border-purple-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -1101,11 +1237,10 @@ export default function TetrisScreenerView({
 
           {/* ⑥ ROE / PBR 가성비 지수 (ROE ÷ PBR) 및 분기 주가 상승률 */}
           <div
-            className={`p-3.5 rounded-lg border transition-all space-y-2 ${
-              useRoePbrRatio || usePriceChange
-                ? 'bg-rose-950/40 border-rose-500/80 text-white'
-                : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
-            }`}
+            className={`p-3.5 rounded-lg border transition-all space-y-2 ${useRoePbrRatio || usePriceChange
+              ? 'bg-rose-950/40 border-rose-500/80 text-white'
+              : 'bg-gray-900/40 border-gray-800 text-gray-400 opacity-60'
+              }`}
           >
             <div className="flex items-center justify-between">
               <label className="flex items-center gap-2 cursor-pointer font-bold">
@@ -1178,11 +1313,11 @@ export default function TetrisScreenerView({
       {/* X축: PBR (배), Y축: ROE (%) 사분면 밸류에이션 산점도 (Interactive Zoom & Sector Scatter Plot) */}
       {results.length > 0 && (() => {
         const W = 960;
-        const H = 460;
+        const H = 500;
         const padL = 68;
         const padR = 36;
-        const padT = 32;
-        const padB = 52;
+        const padT = 76; // 차트 내부 상단에 데이터 포인트와 절대 겹치지 않는 전용 호버 정보 표시 영역 확보
+        const padB = 50;
         const plotW = W - padL - padR;
         const plotH = H - padT - padB;
 
@@ -1231,7 +1366,7 @@ export default function TetrisScreenerView({
 
         const baseXSpan = Math.max(0.1, defaultXMax - defaultXMin);
         const baseYSpan = Math.max(4.0, defaultYMax - defaultYMin);
-        const safeZoomPct = Math.max(100, Math.min(1000, zoomPercent));
+        const safeZoomPct = Math.max(40, Math.min(1000, zoomPercent));
         const scaleFactor = 100 / safeZoomPct;
 
         let xMin = defaultXMin;
@@ -1239,7 +1374,7 @@ export default function TetrisScreenerView({
         let yMin = defaultYMin;
         let yMax = defaultYMax;
 
-        if (safeZoomPct > 100) {
+        if (safeZoomPct !== 100) {
           const halfX = (baseXSpan * scaleFactor) / 2;
           const halfY = (baseYSpan * scaleFactor) / 2;
           xMin = Math.max(0, Number((effectiveAnchor.pbr - halfX).toFixed(3)));
@@ -1341,8 +1476,8 @@ export default function TetrisScreenerView({
 
         const handleSvgWheel = (e: React.WheelEvent<SVGSVGElement>) => {
           e.preventDefault();
-          const step = e.deltaY < 0 ? 50 : -50;
-          setZoomPercent((prev) => Math.max(100, Math.min(800, prev + step)));
+          const step = e.deltaY < 0 ? 25 : -25;
+          setZoomPercent((prev) => Math.max(40, Math.min(800, prev + step)));
         };
 
         const refPbr = 1.0;
@@ -1382,10 +1517,10 @@ export default function TetrisScreenerView({
           const cx = toX(Number(it.pbr) || 0);
           const cy = toY(Number(it.roe) || 0);
           const nameStr = getStockName(it);
-          const estW = Math.max(46, nameStr.length * 10.5 + 14);
-          const estH = 15;
-          const bx1 = cx + 6;
-          const by1 = cy - 9;
+          const estW = Math.max(54, nameStr.length * 12.5 + 16);
+          const estH = 18;
+          const bx1 = cx + 7;
+          const by1 = cy - 10;
           const bx2 = bx1 + estW;
           const by2 = by1 + estH;
           const hasCollision = placedLabelBoxes.some(
@@ -1397,42 +1532,41 @@ export default function TetrisScreenerView({
           }
         });
 
-        // 차트 상단 고정 바에 겹침 없이 정렬 표시할 주요 종목 TOP 16
-        const topHeaderStocks = visibleItems.slice(0, 16);
-
         const anchorSvgX = toX(effectiveAnchor.pbr);
         const anchorSvgY = toY(effectiveAnchor.roe);
-        const ZOOM_PRESETS = [100, 150, 200, 300, 400, 600];
+        const ZOOM_PRESETS = [50, 75, 100, 150, 200, 300, 400, 600];
+        const SIZE_PRESETS = [65, 75, 85, 100];
 
         return (
           <div className="bg-[#111] border border-gray-800 p-5 rounded-xl shadow-xl space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3">
               <div>
                 <h3 className="text-sm sm:text-base font-extrabold text-white flex flex-wrap items-center gap-2">
-                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 섹터별 &amp; 배율 확대(100%~800%) 밸류에이션 산점도</span>
+                  <span>🎯 [X축: PBR (배) · Y축: ROE (%)] 섹터별 &amp; 배율 축소·확대(40%~800%) 밸류에이션 산점도</span>
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-xs font-mono">
-                    {selectedSector === 'ALL' ? `전체 섹터 (${filteredResults.length}종목)` : `[${selectedSector}] 섹터 단독 (${filteredResults.length}종목)`} · 현재 배율 {safeZoomPct}%
+                    {selectedSector === 'ALL' ? `전체 섹터 (${filteredResults.length}종목)` : `[${selectedSector}] 섹터 단독 (${filteredResults.length}종목)`} · 배율 {safeZoomPct}% · 그래프크기 {chartSizePct}%
                   </span>
                 </h3>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  💡 <strong>클릭 고정 &amp; 배율 확대 사용법:</strong> 차트 위에서 <strong>확대하고 싶은 위치(또는 종목 점)를 마우스로 클릭해 기준점을 고정</strong>한 뒤, 상단 <strong>배율 버튼(100% ~ 600%)</strong>을 누르면 고정된 기준점을 중심으로 깔끔하게 확대됩니다.
+                  💡 <strong>축소/확대 &amp; 그래프 크기 조정:</strong> <strong>축소/확대 배율(50% ~ 600%)</strong>로 좌표 시야를 넓히거나 확대할 수 있으며, 우측 <strong>[📐 그래프 크기: 65%~100%]</strong>로 차트 화면 자체의 크기를 한눈에 들어오게 줄일 수 있습니다.
                 </p>
               </div>
 
-              {/* 상단 배율(%) 표시 및 원클릭 배율 선택 바 */}
+              {/* 상단 배율(%) 축소·확대 및 그래프 화면 크기 선택 바 */}
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <div className="flex flex-wrap items-center gap-1 bg-gray-900 border border-indigo-500/40 rounded-lg p-1.5">
-                  <span className="text-indigo-300 font-extrabold px-1.5">🔍 확대 배율:</span>
+                  <span className="text-indigo-300 font-extrabold px-1.5">🔍 축소/확대 배율:</span>
                   {ZOOM_PRESETS.map((pct) => (
                     <button
                       key={pct}
                       type="button"
                       onClick={() => setZoomPercent(pct)}
-                      className={`px-2.5 py-1 rounded font-mono font-extrabold cursor-pointer transition ${
-                        safeZoomPct === pct
-                          ? 'bg-indigo-600 text-white shadow border border-indigo-300'
+                      className={`px-2 py-1 rounded font-mono font-extrabold cursor-pointer transition ${safeZoomPct === pct
+                        ? 'bg-indigo-600 text-white shadow border border-indigo-300'
+                        : pct < 100
+                          ? 'bg-sky-950/80 hover:bg-sky-900 text-sky-300 border border-sky-500/30'
                           : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-                      }`}
+                        }`}
                     >
                       {pct}%
                     </button>
@@ -1440,27 +1574,27 @@ export default function TetrisScreenerView({
                   <div className="flex items-center gap-1 pl-1 border-l border-gray-700 ml-1">
                     <button
                       type="button"
-                      onClick={() => setZoomPercent((p) => Math.max(100, p - 25))}
+                      onClick={() => setZoomPercent((p) => Math.max(40, p - 15))}
                       className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
-                      title="25% 축소"
+                      title="15% 축소"
                     >
                       -
                     </button>
                     <input
                       type="number"
-                      min={100}
+                      min={40}
                       max={800}
-                      step={25}
+                      step={10}
                       value={safeZoomPct}
-                      onChange={(e) => setZoomPercent(Math.max(100, Math.min(800, Number(e.target.value) || 100)))}
+                      onChange={(e) => setZoomPercent(Math.max(40, Math.min(800, Number(e.target.value) || 100)))}
                       className="w-16 bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 text-center font-mono font-extrabold text-emerald-300"
                     />
                     <span className="text-gray-400 font-mono">%</span>
                     <button
                       type="button"
-                      onClick={() => setZoomPercent((p) => Math.min(800, p + 25))}
+                      onClick={() => setZoomPercent((p) => Math.min(800, p + 15))}
                       className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold cursor-pointer"
-                      title="25% 확대"
+                      title="15% 확대"
                     >
                       +
                     </button>
@@ -1472,11 +1606,40 @@ export default function TetrisScreenerView({
                         setZoomPercent(100);
                         setAnchorPoint(null);
                       }}
-                      className="ml-1 px-2.5 py-1 rounded bg-amber-700/80 hover:bg-amber-600 text-white font-bold cursor-pointer"
+                      className="ml-1 px-2 py-1 rounded bg-amber-700/80 hover:bg-amber-600 text-white font-bold cursor-pointer"
                     >
                       🔄 100% 초기화
                     </button>
                   )}
+                </div>
+
+                {/* 📐 그래프 화면 크기(박스 비율) 축소/확대 컨트롤 */}
+                <div className="flex items-center gap-1 bg-gray-900 border border-teal-500/40 rounded-lg p-1.5">
+                  <span className="text-teal-300 font-extrabold px-1">📐 그래프 크기:</span>
+                  {SIZE_PRESETS.map((sz) => (
+                    <button
+                      key={sz}
+                      type="button"
+                      onClick={() => setChartSizePct(sz)}
+                      className={`px-2 py-1 rounded font-mono font-extrabold cursor-pointer transition ${chartSizePct === sz
+                        ? 'bg-teal-600 text-white shadow border border-teal-300'
+                        : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                        }`}
+                    >
+                      {sz}%
+                    </button>
+                  ))}
+                  <input
+                    type="number"
+                    min={50}
+                    max={100}
+                    step={5}
+                    value={chartSizePct}
+                    onChange={(e) => setChartSizePct(Math.max(50, Math.min(100, Number(e.target.value) || 100)))}
+                    className="w-14 bg-gray-950 border border-gray-700 rounded px-1 py-0.5 text-center font-mono font-extrabold text-teal-300 ml-0.5"
+                    title="그래프 화면 표시 크기 비율 (50%~100%)"
+                  />
+                  <span className="text-gray-400 font-mono">%</span>
                 </div>
 
                 {/* 현재 클릭 고정된 기준점(Anchor) 표시 배지 */}
@@ -1494,22 +1657,20 @@ export default function TetrisScreenerView({
                   <button
                     type="button"
                     onClick={() => setColorMode('SECTOR')}
-                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
-                      colorMode === 'SECTOR'
-                        ? 'bg-purple-600 text-white'
-                        : 'text-gray-400 hover:text-white'
-                    }`}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${colorMode === 'SECTOR'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                      }`}
                   >
                     🎨 섹터별 색상구분
                   </button>
                   <button
                     type="button"
                     onClick={() => setColorMode('ROE_STATUS')}
-                    className={`px-2 py-1 rounded font-bold cursor-pointer ${
-                      colorMode === 'ROE_STATUS'
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-gray-400 hover:text-white'
-                    }`}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer ${colorMode === 'ROE_STATUS'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                      }`}
                   >
                     🟢 ROE상태별 색상
                   </button>
@@ -1552,30 +1713,183 @@ export default function TetrisScreenerView({
                   />
                   <span>{showTopLabelsOnly ? '주요 종목명' : '전체 종목명'}</span>
                 </label>
-              </div>
-            </div>
 
-            {/* 🏭 섹터별 필터 & 섹터별 단독 산점도 전환 바 */}
-            <div className="bg-gray-900/90 border border-gray-800 rounded-xl p-2.5 space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] text-gray-400">
-                <span className="font-bold text-gray-300">
-                  🏭 섹터별 산점도 선택 (클릭 시 해당 섹터 종목만 산점도 &amp; 하단 리스트에 단독 플롯):
-                </span>
-                {selectedSector !== 'ALL' && (
+                {/* 🔥 ROE 기울기 적자↔흑자 반전 전용 차별화 필터 버튼 그룹 */}
+                <div className="flex flex-wrap items-center gap-1 bg-gray-900 border border-amber-500/40 rounded-lg p-1">
+                  <span className="text-amber-300 font-extrabold px-1.5">⚡ ROE 흑자·적자 반전 구분:</span>
                   <button
                     type="button"
                     onClick={() => {
-                      setSelectedSector('ALL');
-                      setZoomPercent(100);
-                      setAnchorPoint(null);
+                      setTurnaroundFilter('ALL');
+                      executeScreener({ turnaround_filter: 'ALL' });
                     }}
-                    className="text-amber-300 hover:underline font-bold cursor-pointer"
+                    className={`px-2 py-1 rounded font-bold cursor-pointer transition ${turnaroundFilter === 'ALL'
+                      ? 'bg-gray-700 text-white border border-gray-400'
+                      : 'text-gray-400 hover:text-white'
+                      }`}
                   >
-                    ✕ 섹터 필터 해제 (전체 {results.length}종목 보기)
+                    전체
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = turnaroundFilter === 'TURNAROUND_PROFIT' ? 'ALL' : 'TURNAROUND_PROFIT';
+                      setTurnaroundFilter(next);
+                      setShowQoqTrajectory(true);
+                      executeScreener({ turnaround_filter: next });
+                    }}
+                    className={`px-2.5 py-1 rounded font-extrabold cursor-pointer transition flex items-center gap-1 ${turnaroundFilter === 'TURNAROUND_PROFIT'
+                      ? 'bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 shadow-md ring-1 ring-yellow-200'
+                      : 'bg-amber-950/80 text-amber-300 border border-amber-500/50 hover:bg-amber-900'
+                      }`}
+                    title="전분기 적자(ROE < 0)에서 현재분기 흑자(ROE > 0)로 돌아선 턴어라운드 종목만 필터링합니다"
+                  >
+                    <span>🔥 적자→흑자 전환</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = turnaroundFilter === 'TURNAROUND_LOSS' ? 'ALL' : 'TURNAROUND_LOSS';
+                      setTurnaroundFilter(next);
+                      setShowQoqTrajectory(true);
+                      executeScreener({ turnaround_filter: next });
+                    }}
+                    className={`px-2.5 py-1 rounded font-extrabold cursor-pointer transition flex items-center gap-1 ${turnaroundFilter === 'TURNAROUND_LOSS'
+                      ? 'bg-gradient-to-r from-fuchsia-600 to-rose-600 text-white shadow-md ring-1 ring-fuchsia-300'
+                      : 'bg-fuchsia-950/80 text-fuchsia-300 border border-fuchsia-500/50 hover:bg-fuchsia-900'
+                      }`}
+                    title="전분기 흑자(ROE > 0)에서 현재분기 적자(ROE < 0)로 반전한 실적 악화 주의 종목만 필터링합니다"
+                  >
+                    <span>⚠️ 흑자→적자 반전</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = turnaroundFilter === 'BOTH_REVERSAL' ? 'ALL' : 'BOTH_REVERSAL';
+                      setTurnaroundFilter(next);
+                      setShowQoqTrajectory(true);
+                      executeScreener({ turnaround_filter: next });
+                    }}
+                    className={`px-2 py-1 rounded font-bold cursor-pointer transition ${turnaroundFilter === 'BOTH_REVERSAL'
+                      ? 'bg-indigo-600 text-white border border-indigo-300'
+                      : 'bg-gray-800 text-indigo-300 hover:bg-gray-700'
+                      }`}
+                    title="적자→흑자 전환 및 흑자→적자 반전 종목을 한눈에 비교합니다"
+                  >
+                    🔄 흑·적 반전 모두
+                  </button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-1.5 max-h-24 overflow-y-auto pr-1">
+            </div>
+
+            {/* 🏭 섹터별 필터 & 거래소 세부업종(64개) / 중분류(31개) 전환 & 전종목 보기 바 */}
+            <div className="bg-gray-900/90 border border-gray-800 rounded-xl p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-extrabold text-gray-200">
+                    🏭 업종 분류 기준 선택:
+                  </span>
+                  <div className="flex items-center bg-gray-950 border border-indigo-500/40 rounded-lg p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSectorTaxonomyMode('MAJOR');
+                        setSelectedSector('ALL');
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-extrabold cursor-pointer transition ${
+                        sectorTaxonomyMode === 'MAJOR'
+                          ? 'bg-indigo-600 text-white shadow'
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      중분류 섹터 (31개)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSectorTaxonomyMode('SUB_SECTOR');
+                        setSelectedSector('ALL');
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-extrabold cursor-pointer transition ${
+                        sectorTaxonomyMode === 'SUB_SECTOR'
+                          ? 'bg-indigo-600 text-white shadow'
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      거래소/WICS 세부업종 (64개 · 개인생활용품/화장품 등)
+                    </button>
+                  </div>
+
+                  {/* ★ 핵심: ΔPBR·PER·가성비 부가필터 때문에 한국콜마·코스맥스 등이 가려지지 않도록 원클릭 전종목 해제 토글 */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextBypass = !bypassValuationFilters;
+                      setBypassValuationFilters(nextBypass);
+                      if (nextBypass) {
+                        setOnlyUpwardSlope(false);
+                        setUseQoqPbrLimit(false);
+                        setUsePer(false);
+                        setUseRoePbrRatio(false);
+                        setUsePbr(false);
+                        setUseRoe(false);
+                        setUseQoqRoe(false);
+                      }
+                      executeScreener({
+                        bypass_valuation_filters: nextBypass,
+                        only_upward_slope: false,
+                        use_qoq_pbr_limit: nextBypass ? false : useQoqPbrLimit,
+                        use_per: nextBypass ? false : usePer,
+                        use_roe_pbr_ratio: nextBypass ? false : useRoePbrRatio,
+                        use_pbr: nextBypass ? false : usePbr,
+                        use_roe: nextBypass ? false : useRoe,
+                        use_qoq_roe: nextBypass ? false : useQoqRoe,
+                      });
+                    }}
+                    className={`px-3 py-1 rounded-lg font-extrabold cursor-pointer border transition flex items-center gap-1.5 ${
+                      bypassValuationFilters
+                        ? 'bg-amber-500 text-slate-950 border-yellow-200 shadow-lg ring-1 ring-amber-300'
+                        : 'bg-amber-950/70 text-amber-200 border-amber-500/50 hover:bg-amber-900'
+                    }`}
+                    title="④ΔPBR 상승폭 제한, ⑤PER 상한, ⑥ROE/PBR 가성비 등 모든 밸류에이션 필터를 해제하여 한국콜마·코스맥스 등 업종 내 전종목(2,473개)을 빠짐없이 차트에 표시합니다"
+                  >
+                    <span>{bypassValuationFilters ? '🔓 전종목 제한해제 ON (필터 없이 업종 내 전종목 표시중)' : '🔓 업종 내 전종목 모두 보기 (④ΔPBR·⑤PER·⑥가성비 제한 일괄해제)'}</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={stockSearchQuery}
+                    onChange={(e) => setStockSearchQuery(e.target.value)}
+                    placeholder="종목명/코드/사업내용 빠른 검색 (예: 콜마, 코스맥스)"
+                    className="bg-gray-950 border border-gray-700 focus:border-emerald-400 rounded-lg px-2.5 py-1 text-xs text-white w-64 outline-none"
+                  />
+                  {stockSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setStockSearchQuery('')}
+                      className="text-xs text-gray-400 hover:text-white cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {selectedSector !== 'ALL' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedSector('ALL');
+                        setZoomPercent(100);
+                        setAnchorPoint(null);
+                      }}
+                      className="text-amber-300 hover:underline font-bold cursor-pointer"
+                    >
+                      ✕ 섹터 필터 해제 (전체 {results.length}종목)
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 max-h-28 overflow-y-auto pr-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -1583,11 +1897,10 @@ export default function TetrisScreenerView({
                     setZoomPercent(100);
                     setAnchorPoint(null);
                   }}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer border transition ${
-                    selectedSector === 'ALL'
-                      ? 'bg-emerald-600 text-white border-emerald-400 shadow'
-                      : 'bg-gray-950 text-gray-300 border-gray-700 hover:bg-gray-800'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer border transition ${selectedSector === 'ALL'
+                    ? 'bg-emerald-600 text-white border-emerald-400 shadow'
+                    : 'bg-gray-950 text-gray-300 border-gray-700 hover:bg-gray-800'
+                    }`}
                 >
                   전체 섹터 ({results.length})
                 </button>
@@ -1603,11 +1916,10 @@ export default function TetrisScreenerView({
                         setZoomPercent(100);
                         setAnchorPoint(null);
                       }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border transition flex items-center gap-1.5 ${
-                        isSel
-                          ? 'bg-indigo-950 text-white border-white shadow-md ring-1 ring-white/50'
-                          : 'bg-gray-950/90 text-gray-200 border-gray-800 hover:border-gray-600 hover:bg-gray-800/80'
-                      }`}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border transition flex items-center gap-1.5 ${isSel
+                        ? 'bg-indigo-950 text-white border-white shadow-md ring-1 ring-white/50'
+                        : 'bg-gray-950/90 text-gray-200 border-gray-800 hover:border-gray-600 hover:bg-gray-800/80'
+                        }`}
                     >
                       <span
                         className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
@@ -1621,120 +1933,106 @@ export default function TetrisScreenerView({
               </div>
             </div>
 
-            {/* 🏆 차트 맨위: 마우스 호버 툴팁 & 주요 종목 라벨 겹침 없는 전용 상단 대시보드 바 */}
-            <div className="bg-[#0b101b] border border-indigo-500/40 rounded-xl p-3 space-y-2.5 shadow-inner">
-              {/* 1단: 마우스 호버 툴팁 고정 패널 (높이 고정으로 차트 상하 떨림 원천 차단) */}
-              <div className="flex items-center justify-between gap-2 border-b border-gray-800/90 pb-2 h-[42px] overflow-x-auto overflow-y-hidden whitespace-nowrap">
-                <div className="flex items-center gap-2 text-xs whitespace-nowrap">
-                  <span className="px-2 py-0.5 rounded bg-indigo-600/30 border border-indigo-400/50 text-indigo-200 font-extrabold shrink-0">
-                    🎯 선택·호버 종목 상세 툴팁
-                  </span>
-                  {hoveredStock ? (
-                    <div className="flex items-center gap-2 font-mono text-xs bg-indigo-950/90 border border-indigo-400/70 px-2.5 py-0.5 rounded-lg shadow whitespace-nowrap">
-                      <span className="font-sans font-extrabold text-white text-xs">
-                        {getStockName(hoveredStock)} ({hoveredStock.ticker})
+            <div
+              className="relative mx-auto transition-all duration-200"
+              style={{ width: `${chartSizePct}%` }}
+            >
+              {/* 🎯 차트 내부 최상단 전용 HUD 오버레이 (padT=76 영역에 위치하여 아래 차트 데이터 포인트와 절대 겹치지 않으며 큰 글씨로 선명하게 표시) */}
+              <div className="absolute top-2.5 left-3 right-3 z-10 pointer-events-none flex items-center justify-between gap-3 bg-[#0b1324]/95 border border-indigo-400/50 rounded-xl px-4 py-2.5 shadow-lg min-h-[48px]">
+                {hoveredStock ? (
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm sm:text-base font-mono pointer-events-auto">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-md bg-indigo-600 text-white font-sans font-extrabold text-xs sm:text-sm">
+                        🎯 선택 종목
+                      </span>
+                      <span className="font-sans font-black text-white text-base sm:text-lg tracking-tight">
+                        {getStockName(hoveredStock)}{' '}
+                        <span className="text-gray-300 font-mono text-sm">({hoveredStock.ticker})</span>
                       </span>
                       <span
-                        className="px-1.5 py-0.5 rounded text-[10px] font-sans font-extrabold text-slate-950"
+                        className="px-2 py-0.5 rounded-md text-xs sm:text-sm font-sans font-extrabold text-slate-950"
                         style={{
                           backgroundColor:
-                            sectorColorMap[String(hoveredStock.sector || '기타').trim() || '기타'] || '#38bdf8',
+                            sectorColorMap[getItemSectorLabel(hoveredStock)] || '#38bdf8',
                         }}
                       >
                         {hoveredStock.sector || '기타'}
+                        {hoveredStock.sub_sector && hoveredStock.sub_sector !== hoveredStock.sector
+                          ? ` (${hoveredStock.sub_sector})`
+                          : ''}
                       </span>
-                      <span className="text-sky-300 font-bold">
-                        PBR: {hoveredStock.prev_q_pbr}→{hoveredStock.pbr}배 (
-                        {hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
+                      {(hoveredStock.roe_turnaround_type === 'TURNAROUND_PROFIT' ||
+                        (Number(hoveredStock.prev_q_roe) < 0 && Number(hoveredStock.roe) > 0)) && (
+                          <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950 font-sans font-black text-xs sm:text-sm shadow">
+                            🔥 적자→흑자 전환
+                          </span>
+                        )}
+                      {(hoveredStock.roe_turnaround_type === 'TURNAROUND_LOSS' ||
+                        (Number(hoveredStock.prev_q_roe) > 0 && Number(hoveredStock.roe) < 0)) && (
+                          <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-fuchsia-600 to-rose-600 text-white font-sans font-black text-xs sm:text-sm shadow">
+                            ⚠️ 흑자→적자 반전
+                          </span>
+                        )}
+                    </div>
+
+                    <span className="text-sky-300 font-extrabold text-sm sm:text-base">
+                      PBR: {hoveredStock.prev_q_pbr} → <strong className="text-white underline">{hoveredStock.pbr}배</strong>{' '}
+                      <span className="text-xs sm:text-sm">
+                        ({hoveredStock.qoq_pbr_diff >= 0 ? `+${hoveredStock.qoq_pbr_diff}` : hoveredStock.qoq_pbr_diff})
                       </span>
-                      <span className="text-emerald-300 font-extrabold">
-                        ROE(25.3Q~26.2Q→25.4Q~26.3Q): {hoveredStock.prev_q_roe}%→{hoveredStock.roe}% (
-                        {hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p{' '}
+                    </span>
+
+                    <span className="text-emerald-300 font-extrabold text-sm sm:text-base">
+                      ROE(25.3Q~26.2Q→25.4Q~26.3Q): {hoveredStock.prev_q_roe}% →{' '}
+                      <strong className="text-yellow-300 underline">{hoveredStock.roe}%</strong>{' '}
+                      <span className={hoveredStock.qoq_roe_diff >= 0 ? 'text-emerald-300' : 'text-rose-400'}>
+                        ({hoveredStock.qoq_roe_diff >= 0 ? `+${hoveredStock.qoq_roe_diff}` : hoveredStock.qoq_roe_diff}%p{' '}
                         {hoveredStock.qoq_roe_diff >= 0 ? '↗' : '↘'})
                       </span>
-                      <span className="text-purple-300 font-bold">PER: {hoveredStock.per}배</span>
-                      <span className="text-rose-300 font-bold">ROE/PBR: {hoveredStock.roe_pbr_ratio}</span>
-                      {setGlobalSearchTicker && (
-                        <button
-                          type="button"
-                          onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
-                          className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-extrabold text-[10px] cursor-pointer"
-                        >
-                          상세 리포트 →
-                        </button>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-gray-400 text-xs truncate">
-                      아래 주요 종목 라벨 배지 또는 차트의 점(●) 위에 마우스를 올리면 전분기(25.3Q~26.2Q)→현재분기(25.4Q~26.3Q) 상세 수치가 이곳에 고정 표시됩니다.
                     </span>
-                  )}
-                </div>
 
-                <div className="hidden xl:flex items-center gap-3 text-[11px] text-gray-300 shrink-0">
-                  <span className="flex items-center gap-1">
-                    <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-emerald-400 bg-transparent" />
-                    <span>빈 원(○): 전분기(25.3Q~26.2Q)</span>
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                    <span>채운 원(●) &amp; 화살표(↗): 현재분기(25.4Q~26.3Q)</span>
-                  </span>
-                </div>
-              </div>
+                    <span className="text-purple-300 font-extrabold text-sm sm:text-base">
+                      PER: <strong className="text-white">{hoveredStock.per}배</strong>
+                    </span>
 
-              {/* 2단: 주요 종목 라벨을 차트 맨위에 겹치지 않게 바둑판 태그로 정렬 표시 */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-extrabold text-emerald-300">
-                    🏷️ 화면 내 주요 핵심 종목 라벨 (마우스 호버 시 차트 위치 하이라이트 · 클릭 시 종목조회 화면으로 즉시 이동):
-                  </span>
-                  <span className="text-gray-400 font-mono">
-                    화면 표시 {visibleItems.length}종목 중 상위 {topHeaderStocks.length}개 라벨 정렬
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {topHeaderStocks.map((it: any, idx: number) => {
-                    const isHov = hoveredStock?.ticker === it.ticker;
-                    const secName = String(it.sector || '기타').trim() || '기타';
-                    const badgeColor = sectorColorMap[secName] || '#38bdf8';
-                    const qoqDiff = Number(it.qoq_roe_diff) || 0;
-                    return (
+                    <span className="text-rose-300 font-extrabold text-sm sm:text-base">
+                      ROE/PBR: <strong className="text-rose-200">{hoveredStock.roe_pbr_ratio}</strong>
+                    </span>
+
+                    {setGlobalSearchTicker && (
                       <button
-                        key={`top-lbl-${it.ticker}`}
                         type="button"
-                        onMouseEnter={() => {
-                          if (hoveredStock?.ticker !== it.ticker) setHoveredStock(it);
-                        }}
-                        onClick={() => {
-                          if (setGlobalSearchTicker) {
-                            setGlobalSearchTicker(it.ticker);
-                          }
-                        }}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-colors cursor-pointer flex items-center gap-1.5 border ${
-                          isHov
-                            ? 'bg-indigo-900 border-white text-white shadow-md'
-                            : 'bg-[#121826] border-gray-700/80 text-gray-200 hover:border-indigo-400 hover:bg-gray-800/80'
-                        }`}
+                        onClick={() => setGlobalSearchTicker(hoveredStock.ticker)}
+                        className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-extrabold text-xs sm:text-sm cursor-pointer shadow"
                       >
-                        <span className="text-[10px] font-bold text-amber-300">#{idx + 1}</span>
-                        <span
-                          className="inline-block w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: badgeColor }}
-                        />
-                        <span className="font-sans font-extrabold text-white">{getStockName(it)}</span>
-                        <span className="text-sky-300 text-[11px]">PBR {it.pbr}</span>
-                        <span className="text-emerald-300 text-[11px] font-bold">
-                          ROE {it.prev_q_roe}→{it.roe}% ({qoqDiff >= 0 ? `+${it.qoq_roe_diff}` : it.qoq_roe_diff}%p↗)
-                        </span>
+                        상세 리포트 →
                       </button>
-                    );
-                  })}
-                </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between w-full gap-3 text-xs sm:text-sm text-gray-300 font-sans">
+                    <span className="flex items-center gap-2 font-semibold">
+                      <span className="px-2 py-0.5 rounded bg-indigo-600/40 border border-indigo-400/50 text-indigo-200 font-extrabold">
+                        💡 차트 포인트 안내
+                      </span>
+                      <span>
+                        차트의 점(●)에 마우스를 대면 이 상단 영역에 <strong className="text-white">종목명 · PBR · ROE(전분기→현재) · PER · 가성비</strong>가 큰 글씨로 표시됩니다. (점 클릭 시 상세 리포트 이동)
+                      </span>
+                    </span>
+                    <div className="hidden lg:flex items-center gap-4 text-xs text-gray-300 shrink-0">
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block w-3 h-3 rounded-full border-2 border-emerald-400 bg-transparent" />
+                        <span>빈 원(○): 전분기(25.3Q~26.2Q)</span>
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block w-3 h-3 rounded-full bg-emerald-400" />
+                        <span>채운 원(●): 현재분기(25.4Q~26.3Q)</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
 
-            <div className="relative w-full">
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${W} ${H}`}
@@ -1748,9 +2046,8 @@ export default function TetrisScreenerView({
                   setZoomPercent(100);
                   setAnchorPoint(null);
                 }}
-                className={`w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none ${
-                  hoveredStock ? 'cursor-pointer' : 'cursor-crosshair'
-                }`}
+                className={`w-full h-auto bg-[#070b12] rounded-xl border border-gray-800 select-none ${hoveredStock ? 'cursor-pointer' : 'cursor-crosshair'
+                  }`}
               >
                 <defs>
                   <clipPath id="tetris-scatter-clip">
@@ -1777,6 +2074,28 @@ export default function TetrisScreenerView({
                     orient="auto-start-reverse"
                   >
                     <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171" />
+                  </marker>
+                  <marker
+                    id="arrow-turnaround-gold"
+                    viewBox="0 0 10 10"
+                    refX="7"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 0.5 L 10 5 L 0 9.5 z" fill="#facc15" />
+                  </marker>
+                  <marker
+                    id="arrow-reversal-purple"
+                    viewBox="0 0 10 10"
+                    refX="7"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 0.5 L 10 5 L 0 9.5 z" fill="#e879f9" />
                   </marker>
                 </defs>
 
@@ -1962,19 +2281,50 @@ export default function TetrisScreenerView({
                     const isHovered = hoveredStock?.ticker === it.ticker;
                     const qoqRoe = Number(it.qoq_roe_diff) || 0;
                     const roeVal = Number(it.roe) || 0;
+                    const prevRoeVal = Number(it.prev_q_roe) || 0;
+                    const isTurnaroundProfit =
+                      it.roe_turnaround_type === 'TURNAROUND_PROFIT' || (prevRoeVal < 0 && roeVal > 0);
+                    const isTurnaroundLoss =
+                      it.roe_turnaround_type === 'TURNAROUND_LOSS' || (prevRoeVal > 0 && roeVal < 0);
                     const secName = String(it.sector || '기타').trim() || '기타';
 
                     const dotColor =
                       colorMode === 'SECTOR'
                         ? sectorColorMap[secName] || '#38bdf8'
-                        : roeVal >= 10 && qoqRoe >= 1.0
-                        ? '#10b981'
-                        : roeVal >= 10
-                        ? '#38bdf8'
-                        : '#f59e0b';
+                        : isTurnaroundProfit
+                          ? '#facc15'
+                          : isTurnaroundLoss
+                            ? '#e879f9'
+                            : roeVal >= 10 && qoqRoe >= 1.0
+                              ? '#10b981'
+                              : roeVal >= 10
+                                ? '#38bdf8'
+                                : '#f59e0b';
 
-                    const radius = isHovered ? 8.5 : idx < 12 || visibleItems.length <= 35 ? 6.0 : 4.8;
-                    const showLabel = isHovered || nonOverlappingLabelTickers.has(it.ticker);
+                    const radius = isHovered
+                      ? 9.0
+                      : isTurnaroundProfit || isTurnaroundLoss
+                        ? 6.8
+                        : idx < 12 || visibleItems.length <= 35
+                          ? 6.0
+                          : 4.8;
+                    const showLabel =
+                      isHovered || isTurnaroundProfit || isTurnaroundLoss || nonOverlappingLabelTickers.has(it.ticker);
+
+                    const vectorColor = isTurnaroundProfit
+                      ? '#facc15'
+                      : isTurnaroundLoss
+                        ? '#e879f9'
+                        : qoqRoe >= 0
+                          ? '#34d399'
+                          : '#f87171';
+                    const vectorMarker = isTurnaroundProfit
+                      ? 'url(#arrow-turnaround-gold)'
+                      : isTurnaroundLoss
+                        ? 'url(#arrow-reversal-purple)'
+                        : qoqRoe >= 0
+                          ? 'url(#arrow-upward-green)'
+                          : 'url(#arrow-downward-red)';
 
                     return (
                       <g
@@ -1982,31 +2332,73 @@ export default function TetrisScreenerView({
                         className="pointer-events-none"
                       >
                         {/* 하나의 기업에 대해 전분기(2025.3Q~2026.2Q, 빈 원 ○) 점과 현재분기(2025.4Q~2026.3Q, 채운 원 ●) 점을 동시에 표시하고 우상향 기울기 벡터 화살표로 연결 */}
-                        {(showQoqTrajectory || isHovered || onlyUpwardSlope || roeFilterMode === 'GROWTH_UPWARD') && (
-                          <g opacity={isHovered ? 1.0 : 0.78}>
-                            {/* 전분기(25.3Q~26.2Q) 시작점: 테두리가 있는 빈 원(○) */}
-                            <circle
-                              cx={prevX}
-                              cy={prevY}
-                              r={isHovered ? 5.2 : 3.6}
-                              fill="#070b12"
-                              stroke={dotColor}
-                              strokeWidth={isHovered ? '2.2' : '1.6'}
-                            />
-                            {/* 전분기 -> 현재분기 기울기 연결 벡터 화살표 */}
-                            {(Math.abs(curX - prevX) > 1.5 || Math.abs(curY - prevY) > 1.5) && (
-                              <line
-                                x1={prevX}
-                                y1={prevY}
-                                x2={curX}
-                                y2={curY}
-                                stroke={qoqRoe >= 0 ? '#34d399' : '#f87171'}
-                                strokeWidth={isHovered ? '2.4' : '1.5'}
-                                strokeDasharray={isHovered ? undefined : '4,2'}
-                                markerEnd={qoqRoe >= 0 ? 'url(#arrow-upward-green)' : 'url(#arrow-downward-red)'}
+                        {(showQoqTrajectory ||
+                          isHovered ||
+                          isTurnaroundProfit ||
+                          isTurnaroundLoss ||
+                          onlyUpwardSlope ||
+                          roeFilterMode === 'GROWTH_UPWARD') && (
+                            <g opacity={isHovered || isTurnaroundProfit || isTurnaroundLoss ? 0.96 : 0.78}>
+                              {/* 전분기(25.3Q~2026.2Q) 시작점: 테두리가 있는 빈 원(○) */}
+                              <circle
+                                cx={prevX}
+                                cy={prevY}
+                                r={isHovered ? 5.2 : 3.8}
+                                fill="#070b12"
+                                stroke={vectorColor}
+                                strokeWidth={isHovered || isTurnaroundProfit || isTurnaroundLoss ? '2.2' : '1.6'}
                               />
-                            )}
-                          </g>
+                              {/* 전분기 -> 현재분기 기울기 연결 벡터 화살표 (적자->흑자: 골드 실선, 흑자->적자: 마젠타 경고선) */}
+                              {(Math.abs(curX - prevX) > 1.5 || Math.abs(curY - prevY) > 1.5) && (
+                                <line
+                                  x1={prevX}
+                                  y1={prevY}
+                                  x2={curX}
+                                  y2={curY}
+                                  stroke={vectorColor}
+                                  strokeWidth={
+                                    isHovered
+                                      ? '2.8'
+                                      : isTurnaroundProfit || isTurnaroundLoss
+                                        ? '2.2'
+                                        : '1.5'
+                                  }
+                                  strokeDasharray={
+                                    isTurnaroundProfit
+                                      ? undefined
+                                      : isTurnaroundLoss
+                                        ? '6,3'
+                                        : isHovered
+                                          ? undefined
+                                          : '4,2'
+                                  }
+                                  markerEnd={vectorMarker}
+                                />
+                              )}
+                            </g>
+                          )}
+
+                        {/* 적자->흑자 전환(골드 이중 링) 및 흑자->적자 반전(보라/크림슨 경고 링) 특수 외곽 후광 */}
+                        {isTurnaroundProfit && (
+                          <circle
+                            cx={curX}
+                            cy={curY}
+                            r={radius + 3.2}
+                            fill="none"
+                            stroke="#facc15"
+                            strokeWidth="2.0"
+                          />
+                        )}
+                        {isTurnaroundLoss && (
+                          <circle
+                            cx={curX}
+                            cy={curY}
+                            r={radius + 3.2}
+                            fill="none"
+                            stroke="#e879f9"
+                            strokeWidth="2.0"
+                            strokeDasharray="3,2"
+                          />
                         )}
 
                         {/* 현재 종목 위치 원 */}
@@ -2015,21 +2407,40 @@ export default function TetrisScreenerView({
                           cy={curY}
                           r={radius}
                           fill={dotColor}
-                          fillOpacity={isHovered ? 1.0 : 0.86}
-                          stroke={isHovered ? '#ffffff' : '#0f172a'}
-                          strokeWidth={isHovered ? '2.2' : '1.2'}
+                          fillOpacity={isHovered ? 1.0 : 0.88}
+                          stroke={
+                            isHovered
+                              ? '#ffffff'
+                              : isTurnaroundProfit
+                                ? '#fef08a'
+                                : isTurnaroundLoss
+                                  ? '#f5d0fe'
+                                  : '#0f172a'
+                          }
+                          strokeWidth={isHovered || isTurnaroundProfit || isTurnaroundLoss ? '2.2' : '1.2'}
                         />
 
-                        {/* 차트 내부에서는 서로 겹치지 않는(Collision-Free) 종목명만 간결하게 표시 (상세 수치는 차트 맨위 고정 패널에 표시) */}
+                        {/* 차트 내부에서는 서로 겹치지 않는(Collision-Free) 종목명을 크고 선명한 글씨로 표시 */}
                         {showLabel && (
                           <text
-                            x={curX + radius + 4}
-                            y={curY + 3}
-                            fill={isHovered ? '#fde047' : idx < 12 ? '#a7f3d0' : '#cbd5e1'}
-                            fontSize={isHovered ? '11.5' : '9.5'}
-                            fontWeight={isHovered || idx < 12 ? 'bold' : 'normal'}
+                            x={curX + radius + 6}
+                            y={curY + 4}
+                            fill={
+                              isHovered
+                                ? '#fde047'
+                                : isTurnaroundProfit
+                                  ? '#fde047'
+                                  : isTurnaroundLoss
+                                    ? '#f0abfc'
+                                    : idx < 12
+                                      ? '#a7f3d0'
+                                      : '#e2e8f0'
+                            }
+                            fontSize={isHovered ? '14' : isTurnaroundProfit || isTurnaroundLoss ? '12.5' : '11.5'}
+                            fontWeight={isHovered || isTurnaroundProfit || isTurnaroundLoss || idx < 15 ? 'bold' : '600'}
                             className="pointer-events-none"
                           >
+                            {isTurnaroundProfit ? '🔥' : isTurnaroundLoss ? '⚠️' : ''}
                             {getStockName(it)}
                           </text>
                         )}
@@ -2101,25 +2512,128 @@ export default function TetrisScreenerView({
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left border-collapse whitespace-nowrap font-mono">
               <thead>
-                <tr className="bg-gray-900/90 text-gray-300 border-b border-gray-800">
-                  <th className="p-2.5 font-sans">순위 / 종목명 (코드)</th>
-                  <th className="p-2.5 font-sans">시장 / 업종</th>
-                  <th className="p-2.5 text-right">현재가 (시총)</th>
-                  <th className="p-2.5 text-right text-indigo-300">
-                    전분기(25.3Q~26.2Q) → 현재(25.4Q~26.3Q) ROE
+                <tr className="bg-gray-900/90 text-gray-300 border-b border-gray-800 select-none">
+                  <th
+                    onClick={() => handleTableSort('NAME')}
+                    title="클릭하여 종목명 오름차순/내림차순 정렬"
+                    className="p-2.5 font-sans cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    순위 / 종목명 (코드){' '}
+                    <span className={tableSortKey === 'NAME' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'NAME' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
                   </th>
-                  <th className="p-2.5 text-right text-emerald-300">기울기 (전분기비 ΔROE)</th>
-                  <th className="p-2.5 text-right text-sky-300">전분기 → 현재 PBR (배)</th>
-                  <th className="p-2.5 text-right text-amber-300">전분기비 ΔPBR (변동률)</th>
-                  <th className="p-2.5 text-right text-purple-300">PER (배)</th>
-                  <th className="p-2.5 text-right text-rose-300">ROE / PBR 가성비</th>
-                  <th className="p-2.5 text-right">분기 주가상승률</th>
-                  <th className="p-2.5 font-sans">ROE/PBR 핵심 포착 사유</th>
+                  <th
+                    onClick={() => handleTableSort('SECTOR')}
+                    title="클릭하여 시장/업종 오름차순/내림차순 정렬"
+                    className="p-2.5 font-sans cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    시장 / 업종{' '}
+                    <span className={tableSortKey === 'SECTOR' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'SECTOR' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('MARKET_CAP')}
+                    title="클릭하여 시가총액 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    현재가 (시총){' '}
+                    <span className={tableSortKey === 'MARKET_CAP' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'MARKET_CAP' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('ROE')}
+                    title="클릭하여 현재 ROE 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-indigo-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    전분기(25.3Q~26.2Q) → 현재(25.4Q~26.3Q) ROE{' '}
+                    <span className={tableSortKey === 'ROE' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'ROE' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('QOQ_ROE_DIFF')}
+                    title="클릭하여 기울기(전분기비 ΔROE) 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-emerald-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    기울기 (전분기비 ΔROE){' '}
+                    <span className={tableSortKey === 'QOQ_ROE_DIFF' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'QOQ_ROE_DIFF' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('PBR')}
+                    title="클릭하여 현재 PBR 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-sky-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    전분기 → 현재 PBR (배){' '}
+                    <span className={tableSortKey === 'PBR' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'PBR' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('QOQ_PBR_DIFF')}
+                    title="클릭하여 전분기비 ΔPBR 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-amber-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    전분기비 ΔPBR (변동률){' '}
+                    <span className={tableSortKey === 'QOQ_PBR_DIFF' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'QOQ_PBR_DIFF' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('PER')}
+                    title="클릭하여 PER 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-purple-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    PER (배){' '}
+                    <span className={tableSortKey === 'PER' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'PER' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('ROE_PBR_RATIO')}
+                    title="클릭하여 ROE/PBR 가성비 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right text-rose-300 cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    ROE / PBR 가성비{' '}
+                    <span className={tableSortKey === 'ROE_PBR_RATIO' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'ROE_PBR_RATIO' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('PRICE_GROWTH')}
+                    title="클릭하여 분기 주가상승률 오름차순/내림차순 정렬"
+                    className="p-2.5 text-right cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    분기 주가상승률{' '}
+                    <span className={tableSortKey === 'PRICE_GROWTH' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'PRICE_GROWTH' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
+                  <th
+                    onClick={() => handleTableSort('TAGS')}
+                    title="클릭하여 핵심 포착 사유 정렬"
+                    className="p-2.5 font-sans cursor-pointer hover:bg-gray-800/80 transition-colors"
+                  >
+                    ROE/PBR 핵심 포착 사유{' '}
+                    <span className={tableSortKey === 'TAGS' ? 'text-amber-400 font-extrabold' : 'text-gray-600'}>
+                      {tableSortKey === 'TAGS' ? (tableSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/80">
                 {filteredResults.map((item: any, idx: number) => {
                   const roeUp = (item.qoq_roe_diff ?? 0) >= 0;
+                  const prevRoe = Number(item.prev_q_roe ?? 0);
+                  const curRoe = Number(item.roe ?? 0);
+                  const isTurnaroundProfit =
+                    item.roe_turnaround_type === 'TURNAROUND_PROFIT' || (prevRoe < 0 && curRoe > 0);
+                  const isTurnaroundLoss =
+                    item.roe_turnaround_type === 'TURNAROUND_LOSS' || (prevRoe > 0 && curRoe < 0);
                   const pbrStable = (item.qoq_pbr_diff ?? 0) <= 0.15;
                   const qPriceG = Number(item.qoq_price_growth_pct ?? 0);
                   return (
@@ -2128,7 +2642,12 @@ export default function TetrisScreenerView({
                       onClick={() => {
                         if (setGlobalSearchTicker) setGlobalSearchTicker(item.ticker);
                       }}
-                      className="hover:bg-indigo-950/35 transition-colors cursor-pointer group"
+                      className={`hover:bg-indigo-950/35 transition-colors cursor-pointer group ${isTurnaroundProfit
+                        ? 'bg-amber-950/20'
+                        : isTurnaroundLoss
+                          ? 'bg-fuchsia-950/20'
+                          : ''
+                        }`}
                     >
                       <td className="p-2.5 font-sans">
                         <div className="flex items-center gap-2">
@@ -2136,8 +2655,18 @@ export default function TetrisScreenerView({
                             #{idx + 1}
                           </span>
                           <div>
-                            <div className="font-bold text-white group-hover:text-emerald-300">
-                              {getStockName(item)}
+                            <div className="font-bold text-white group-hover:text-emerald-300 flex items-center gap-1.5">
+                              <span>{getStockName(item)}</span>
+                              {isTurnaroundProfit && (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 text-[10px] font-extrabold">
+                                  🔥흑자전환
+                                </span>
+                              )}
+                              {isTurnaroundLoss && (
+                                <span className="px-1.5 py-0.2 rounded bg-fuchsia-600 text-white text-[10px] font-extrabold">
+                                  ⚠️적자반전
+                                </span>
+                              )}
                             </div>
                             <div className="text-[10px] text-gray-500 font-mono">{item.ticker}</div>
                           </div>
@@ -2145,8 +2674,17 @@ export default function TetrisScreenerView({
                       </td>
 
                       <td className="p-2.5 font-sans">
-                        <div className="text-gray-200 font-semibold">{item.market || '코스피'}</div>
-                        <div className="text-[10px] text-gray-400">{item.sector || '-'}</div>
+                        <div className="text-gray-200 font-semibold">
+                          {item.market || '코스피'} · <span className="text-emerald-300">{item.sector || '-'}</span>
+                        </div>
+                        <div className="text-[10px] text-indigo-300 font-semibold">
+                          세부: {item.sub_sector || item.sector || '-'}
+                        </div>
+                        {item.business_desc && (
+                          <div className="text-[10px] text-gray-500 max-w-[180px] truncate" title={item.business_desc}>
+                            {item.business_desc}
+                          </div>
+                        )}
                       </td>
 
                       <td className="p-2.5 text-right">
@@ -2159,22 +2697,56 @@ export default function TetrisScreenerView({
                       </td>
 
                       <td className="p-2.5 text-right">
-                        <div className="font-extrabold text-indigo-300 text-sm">{item.roe}%</div>
+                        <div
+                          className={`font-extrabold text-sm ${isTurnaroundProfit
+                            ? 'text-amber-300'
+                            : isTurnaroundLoss
+                              ? 'text-fuchsia-300'
+                              : 'text-indigo-300'
+                            }`}
+                        >
+                          {item.roe}%
+                        </div>
                         <div className="text-[10px] text-gray-400">
-                          25.3Q~26.2Q ({item.prev_q_roe}%) → 25.4Q~26.3Q ({item.roe}%)
+                          <span className={prevRoe < 0 ? 'text-rose-400 font-bold' : ''}>
+                            25.3Q~26.2Q ({item.prev_q_roe}%)
+                          </span>{' '}
+                          →{' '}
+                          <span className={curRoe < 0 ? 'text-rose-400 font-bold' : 'text-emerald-300 font-bold'}>
+                            25.4Q~26.3Q ({item.roe}%)
+                          </span>
                         </div>
                       </td>
 
                       <td className="p-2.5 text-right">
-                        <span
-                          className={`px-2 py-0.5 rounded font-bold ${
-                            roeUp
+                        {isTurnaroundProfit ? (
+                          <div className="inline-flex flex-col items-end gap-0.5">
+                            <span className="px-2.5 py-0.5 rounded-md font-extrabold bg-gradient-to-r from-amber-500/90 to-yellow-400/90 text-slate-950 border border-yellow-200 shadow">
+                              🔥 적자→흑자 +{item.qoq_roe_diff}%p ⏫
+                            </span>
+                            <span className="text-[10px] text-amber-300 font-sans font-bold">
+                              턴어라운드 ({item.prev_q_roe}% → +{item.roe}%)
+                            </span>
+                          </div>
+                        ) : isTurnaroundLoss ? (
+                          <div className="inline-flex flex-col items-end gap-0.5">
+                            <span className="px-2.5 py-0.5 rounded-md font-extrabold bg-gradient-to-r from-fuchsia-700 to-rose-700 text-white border border-fuchsia-300 shadow">
+                              ⚠️ 흑자→적자 {item.qoq_roe_diff}%p ⏬
+                            </span>
+                            <span className="text-[10px] text-fuchsia-300 font-sans font-bold">
+                              적자반전 주의 (+{item.prev_q_roe}% → {item.roe}%)
+                            </span>
+                          </div>
+                        ) : (
+                          <span
+                            className={`px-2 py-0.5 rounded font-bold ${roeUp
                               ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-500/40'
                               : 'bg-rose-950/60 text-rose-300 border border-rose-500/30'
-                          }`}
-                        >
-                          {roeUp ? `+${item.qoq_roe_diff}%p ▲` : `${item.qoq_roe_diff}%p ▼`}
-                        </span>
+                              }`}
+                          >
+                            {roeUp ? `+${item.qoq_roe_diff}%p ▲` : `${item.qoq_roe_diff}%p ▼`}
+                          </span>
+                        )}
                       </td>
 
                       <td className="p-2.5 text-right">
@@ -2186,13 +2758,12 @@ export default function TetrisScreenerView({
 
                       <td className="p-2.5 text-right">
                         <div
-                          className={`font-bold ${
-                            (item.qoq_pbr_diff ?? 0) <= 0
-                              ? 'text-emerald-300'
-                              : pbrStable
+                          className={`font-bold ${(item.qoq_pbr_diff ?? 0) <= 0
+                            ? 'text-emerald-300'
+                            : pbrStable
                               ? 'text-amber-300'
                               : 'text-rose-400'
-                          }`}
+                            }`}
                         >
                           {(item.qoq_pbr_diff ?? 0) >= 0 ? `+${item.qoq_pbr_diff}배` : `${item.qoq_pbr_diff}배`}
                         </div>

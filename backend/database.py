@@ -469,20 +469,47 @@ def prune_old_dart_financials_12quarters(ticker: str, max_quarters: int = 12):
         
     conn.close()
 
-def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit):
+def insert_dart_financials(
+    ticker,
+    year,
+    quarter,
+    assets,
+    equity,
+    liabilities,
+    revenue,
+    operating_profit,
+    net_profit,
+    revenue_ttm=None,
+    operating_profit_ttm=None,
+    net_profit_ttm=None,
+):
     conn = get_db_connection()
     c = conn.cursor()
+    rev_t = revenue_ttm if revenue_ttm is not None else revenue
+    op_t = operating_profit_ttm if operating_profit_ttm is not None else operating_profit
+    np_t = net_profit_ttm if net_profit_ttm is not None else net_profit
+    roe_t = (np_t / equity * 100.0) if (equity and equity > 0 and np_t is not None) else 0.0
+    opm_t = (op_t / rev_t * 100.0) if (rev_t and rev_t > 0 and op_t is not None) else 0.0
     c.execute('''
-        INSERT INTO dart_financials (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO dart_financials (
+            ticker, year, quarter, assets, equity, liabilities,
+            revenue, operating_profit, net_profit,
+            revenue_ttm, operating_profit_ttm, net_profit_ttm, roe_ttm, op_margin_ttm
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, year, quarter) DO UPDATE SET
             assets=excluded.assets,
             equity=excluded.equity,
             liabilities=excluded.liabilities,
             revenue=excluded.revenue,
             operating_profit=excluded.operating_profit,
-            net_profit=excluded.net_profit
-    ''', (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit))
+            net_profit=excluded.net_profit,
+            revenue_ttm=excluded.revenue_ttm,
+            operating_profit_ttm=excluded.operating_profit_ttm,
+            net_profit_ttm=excluded.net_profit_ttm,
+            roe_ttm=excluded.roe_ttm,
+            op_margin_ttm=excluded.op_margin_ttm
+    ''', (ticker, year, quarter, assets, equity, liabilities, revenue, operating_profit, net_profit, rev_t, op_t, np_t, roe_t, opm_t))
     conn.commit()
     conn.close()
     
@@ -494,93 +521,32 @@ def insert_dart_financials(ticker, year, quarter, assets, equity, liabilities, r
 
 def calculate_and_save_ttm_financials(ticker: str):
     """
-    특정 종목의 과거 분기별 누적 재무 데이터에서
-    직전 4개 분기 실적 합계(TTM, Trailing 12 Months)를 정교하게 산출하여 DB에 업데이트합니다.
+    특정 종목의 dart_financials 행들을 시간 오름차순(연도 -> 1Q/2Q/3Q/4Q)으로 정렬하여
+    단일 분기 실적(revenue, operating_profit, net_profit)의 직전 4개 분기 롤링 합계(TTM)를 산출하고 DB에 업데이트합니다.
     """
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM dart_financials WHERE ticker = ? ORDER BY year ASC, quarter ASC", (ticker,))
+    c.execute("SELECT * FROM dart_financials WHERE ticker = ?", (ticker,))
     rows = [dict(r) for r in c.fetchall()]
     
     if not rows:
         conn.close()
         return
 
-    # 순수 3개월 분기 실적(Discrete Quarter) 구하기
-    year_map = {}
-    for r in rows:
-        y = r['year']
-        if y not in year_map:
-            year_map[y] = {}
-        year_map[y][r['quarter']] = r
+    q_weight = {'11013': 1, '11012': 2, '11014': 3, '11011': 4}
+    rows.sort(key=lambda r: (int(r.get('year') or 0), q_weight.get(str(r.get('quarter')), 0)))
 
-    discrete_quarters = []
-    for y in sorted(year_map.keys()):
-        q_dict = year_map[y]
-        q1 = q_dict.get('11013')
-        q2 = q_dict.get('11012')
-        q3 = q_dict.get('11014')
-        fy = q_dict.get('11011')
-        
-        for q_code, q_obj in [('11013', q1), ('11012', q2), ('11014', q3), ('11011', fy)]:
-            if not q_obj:
-                continue
-            
-            raw_rev = q_obj.get('revenue') or 0
-            raw_op = q_obj.get('operating_profit') or 0
-            raw_np = q_obj.get('net_profit') or 0
-            equity = q_obj.get('equity') or 0
-            
-            if q_code == '11013':
-                s_rev, s_op, s_np = raw_rev, raw_op, raw_np
-            elif q_code == '11012':
-                prev = q1
-                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev / 2.0)
-                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op / 2.0)
-                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np / 2.0)
-            elif q_code == '11014':
-                prev = q2
-                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev * 2 / 3.0)
-                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op * 2 / 3.0)
-                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np * 2 / 3.0)
-            else: # 11011
-                prev = q3
-                s_rev = raw_rev - (prev.get('revenue', 0) if prev else raw_rev * 3 / 4.0)
-                s_op = raw_op - (prev.get('operating_profit', 0) if prev else raw_op * 3 / 4.0)
-                s_np = raw_np - (prev.get('net_profit', 0) if prev else raw_np * 3 / 4.0)
+    for idx, r in enumerate(rows):
+        window = rows[max(0, idx - 3) : idx + 1]
+        factor = 4.0 / len(window) if window else 1.0
+        rev_ttm = sum(float(w.get('revenue') or 0.0) for w in window) * factor
+        op_ttm = sum(float(w.get('operating_profit') or 0.0) for w in window) * factor
+        np_ttm = sum(float(w.get('net_profit') or 0.0) for w in window) * factor
 
-            discrete_quarters.append({
-                "id": q_obj['id'],
-                "year": y,
-                "quarter": q_code,
-                "equity": equity,
-                "s_rev": s_rev,
-                "s_op": s_op,
-                "s_np": s_np,
-                "raw_rev": raw_rev,
-                "raw_op": raw_op,
-                "raw_np": raw_np
-            })
+        equity = float(r.get('equity') or 0.0)
+        roe_ttm = (np_ttm / equity * 100.0) if equity > 0 else 0.0
+        op_margin_ttm = (op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0.0
 
-    # TTM (직전 4개 분기 순수 실적 누적 합산) 계산
-    for idx, dq in enumerate(discrete_quarters):
-        start_idx = max(0, idx - 3)
-        window = discrete_quarters[start_idx : idx + 1]
-        
-        if len(window) == 4:
-            rev_ttm = sum(w['s_rev'] for w in window)
-            op_ttm = sum(w['s_op'] for w in window)
-            np_ttm = sum(w['s_np'] for w in window)
-        else:
-            factor = 4.0 / len(window)
-            rev_ttm = sum(w['s_rev'] for w in window) * factor
-            op_ttm = sum(w['s_op'] for w in window) * factor
-            np_ttm = sum(w['s_np'] for w in window) * factor
-            
-        equity = dq['equity']
-        roe_ttm = (np_ttm / equity * 100.0) if equity > 0 else 0
-        op_margin_ttm = (op_ttm / rev_ttm * 100.0) if rev_ttm > 0 else 0
-        
         c.execute('''
             UPDATE dart_financials SET
                 revenue_ttm = ?,
@@ -589,8 +555,8 @@ def calculate_and_save_ttm_financials(ticker: str):
                 roe_ttm = ?,
                 op_margin_ttm = ?
             WHERE id = ?
-        ''', (rev_ttm, op_ttm, np_ttm, roe_ttm, op_margin_ttm, dq['id']))
-        
+        ''', (rev_ttm, op_ttm, np_ttm, roe_ttm, op_margin_ttm, r['id']))
+
     conn.commit()
     conn.close()
 
@@ -639,12 +605,21 @@ def ensure_tetris_roe_pbr_seeded():
             roe_pbr_ratio REAL,
             qoq_price_growth_pct REAL,
             yoy_price_growth_pct REAL,
-            quarter_label TEXT
+            quarter_label TEXT,
+            sub_sector TEXT,
+            business_desc TEXT
         )
     ''')
-    c.execute("SELECT COUNT(*) FROM tetris_roe_pbr_screener")
-    cnt = c.fetchone()[0]
-    if cnt >= 1500:
+    c.execute("PRAGMA table_info(tetris_roe_pbr_screener)")
+    existing_cols = {row[1] for row in c.fetchall()}
+    if "sub_sector" not in existing_cols:
+        c.execute("ALTER TABLE tetris_roe_pbr_screener ADD COLUMN sub_sector TEXT")
+    if "business_desc" not in existing_cols:
+        c.execute("ALTER TABLE tetris_roe_pbr_screener ADD COLUMN business_desc TEXT")
+
+    c.execute("SELECT COUNT(*) FROM tetris_roe_pbr_screener WHERE sub_sector IS NOT NULL AND sub_sector != ''")
+    sub_cnt = c.fetchone()[0]
+    if sub_cnt >= 1500:
         conn.close()
         return
 
@@ -675,6 +650,7 @@ def ensure_tetris_roe_pbr_seeded():
         wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
         ws_u = wb["테트리스U"] if "테트리스U" in wb.sheetnames else wb.active
         ws_q = wb["분기"] if "분기" in wb.sheetnames else None
+        ws_c = wb["code"] if "code" in wb.sheetnames else None
 
         q_map = {}
         if ws_q is not None:
@@ -684,6 +660,18 @@ def ensure_tetris_roe_pbr_seeded():
                 raw_tk = str(qr[1]).strip()
                 tk = raw_tk[1:] if raw_tk.startswith("A") else raw_tk
                 q_map[tk] = qr
+
+        c_sub_map = {}
+        if ws_c is not None:
+            for cr in ws_c.iter_rows(min_row=2, values_only=True):
+                if not cr or not cr[0]:
+                    continue
+                raw_tk = str(cr[0]).strip()
+                if raw_tk.startswith("A"):
+                    tk = raw_tk[1:]
+                    sub_v = str(cr[2] or "").strip()
+                    if sub_v and sub_v not in ("0", "#N/A", "None"):
+                        c_sub_map[tk] = sub_v
 
         records = []
         for r in ws_u.iter_rows(min_row=2, values_only=True):
@@ -697,6 +685,25 @@ def ensure_tetris_roe_pbr_seeded():
             market = str(r[3] or "코스피").strip()
             style = str(r[4] or "").strip()
             sector = str(r[5] or "기타").strip()
+            raw_biz = str(r[6] or "").strip()
+            business_desc = "" if raw_biz in ("0", "#N/A", "None") else raw_biz
+
+            qr_for_sub = q_map.get(tk)
+            sub_from_q = str(qr_for_sub[4] or "").strip() if (qr_for_sub and len(qr_for_sub) > 4) else ""
+            if sub_from_q in ("0", "#N/A", "None"):
+                sub_from_q = ""
+            sub_sector = sub_from_q or c_sub_map.get(tk, "")
+            if not sub_sector:
+                if "리츠" in name or "부동산" in business_desc:
+                    sub_sector = "부동산·리츠"
+                elif "스팩" in name or "인수목적" in business_desc:
+                    sub_sector = "스팩·금융"
+                elif sector and sector != "기타1":
+                    sub_sector = sector
+                else:
+                    sub_sector = "복합산업·기타"
+            if sector == "기타1":
+                sector = "부동산·리츠" if "리츠" in sub_sector else "기타"
 
             price_now = _f(r[8], 0.0) or _f(r[197], 0.0) or 0.0
             if price_now <= 0:
@@ -830,6 +837,8 @@ def ensure_tetris_roe_pbr_seeded():
                 round(qoq_price_growth_pct, 2),
                 round(yoy_price_growth_pct, 2),
                 q_label,
+                sub_sector,
+                business_desc,
             ))
         wb.close()
 
@@ -837,7 +846,7 @@ def ensure_tetris_roe_pbr_seeded():
             c.executemany(
                 '''
                 INSERT OR REPLACE INTO tetris_roe_pbr_screener VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ''',
                 records,
@@ -915,6 +924,9 @@ def get_dart_screener_results(conditions: dict):
 
     market_filter = str(conditions.get("market_filter", "ALL")).upper()
     sector_filter = str(conditions.get("sector_filter", "ALL")).strip()
+    sub_sector_filter = str(conditions.get("sub_sector_filter", "ALL")).strip()
+    bypass_valuation_filters = bool(conditions.get("bypass_valuation_filters", False))
+    turnaround_filter = str(conditions.get("turnaround_filter", "ALL")).upper()
     sort_by = str(conditions.get("sort_by", "ROE_PBR_RATIO")).upper()
 
     results = []
@@ -933,13 +945,46 @@ def get_dart_screener_results(conditions: dict):
         mcap_eok = float(r.get("market_cap_eok") or 0.0)
         mkt = str(r.get("market") or "")
         sec = str(r.get("sector") or "").strip()
+        sub_sec = str(r.get("sub_sector") or sec or "기타").strip()
+        biz_desc = str(r.get("business_desc") or "").strip()
+
+        # ROE 적자↔흑자 턴어라운드 / 반전 유형 분류:
+        if prev_q_roe < 0 and roe > 0:
+            roe_turnaround_type = "TURNAROUND_PROFIT"
+        elif prev_q_roe > 0 and roe < 0:
+            roe_turnaround_type = "TURNAROUND_LOSS"
+        elif prev_q_roe >= 0 and roe >= 0:
+            roe_turnaround_type = "PROFIT_UP" if qoq_roe_diff >= 0 else "PROFIT_DOWN"
+        else:
+            roe_turnaround_type = "CONT_LOSS"
 
         if market_filter == "KOSPI" and "코스피" not in mkt:
             continue
         if market_filter == "KOSDAQ" and "코스닥" not in mkt:
             continue
-        if sector_filter and sector_filter != "ALL" and sec != sector_filter:
+        if sector_filter and sector_filter != "ALL" and sec != sector_filter and sub_sec != sector_filter:
             continue
+        if sub_sector_filter and sub_sector_filter != "ALL" and sub_sec != sub_sector_filter:
+            continue
+
+        # ★ 사용자가 '흑자→적자 반전(TURNAROUND_LOSS)' 전용 조회를 선택한 경우에는 적자(roe < 0) 및 PER<=0 종목도 반드시 통과시켜 확인 가능하게 처리
+        if turnaround_filter == "TURNAROUND_PROFIT":
+            if roe_turnaround_type != "TURNAROUND_PROFIT":
+                continue
+        elif turnaround_filter == "TURNAROUND_LOSS":
+            if roe_turnaround_type != "TURNAROUND_LOSS":
+                continue
+        elif turnaround_filter == "BOTH_REVERSAL":
+            if roe_turnaround_type not in ("TURNAROUND_PROFIT", "TURNAROUND_LOSS"):
+                continue
+        elif turnaround_filter == "EXCLUDE_TURNAROUND_LOSS":
+            if roe_turnaround_type == "TURNAROUND_LOSS":
+                continue
+
+        is_loss_reversal_mode = (
+            turnaround_filter in ("TURNAROUND_LOSS", "BOTH_REVERSAL")
+            and roe_turnaround_type == "TURNAROUND_LOSS"
+        ) or bypass_valuation_filters
 
         # [핵심 조건 1] ROE 수준 & 전분기 대비 ROE 개선(기울기 우상향) 필터
         cond_high_roe = (min_roe <= roe <= max_roe)
@@ -948,45 +993,46 @@ def get_dart_screener_results(conditions: dict):
         # 성장주 우상향 전용 모드(only_upward_slope / GROWTH_UPWARD):
         # 반드시 현재분기(25.4Q~26.3Q) ROE 절대수준이 기준치(기본 10%) 이상이면서
         # 전분기(25.3Q~26.2Q) 대비 현재분기 ROE 증감폭(기울기 ΔROE = cur_roe - prev_q_roe)이 양수(> 0) 및 최소 증감폭 이상인 우상향 종목만 채택!
-        if only_upward_slope:
-            eff_min_roe = min_roe if use_roe else 10.0
-            eff_min_slope = max(0.01, min_qoq_roe_diff if (use_qoq_roe and min_qoq_roe_diff > 0) else 0.01)
-            if not (eff_min_roe <= roe <= max_roe and qoq_roe_diff >= eff_min_slope and qoq_roe_diff > 0):
-                continue
-        elif use_roe and use_qoq_roe:
-            if roe_mode in ("HIGH_AND_UP", "GROWTH_UPWARD"):
-                if not (cond_high_roe and cond_qoq_roe_up and qoq_roe_diff > 0):
+        if not is_loss_reversal_mode:
+            if only_upward_slope:
+                eff_min_roe = min_roe if use_roe else 10.0
+                eff_min_slope = max(0.01, min_qoq_roe_diff if (use_qoq_roe and min_qoq_roe_diff > 0) else 0.01)
+                if not (eff_min_roe <= roe <= max_roe and qoq_roe_diff >= eff_min_slope and qoq_roe_diff > 0):
                     continue
-            else:
-                # HIGH_OR_UP: ROE가 이미 높은 수준이거나, 전분기 대비 뚜렷하게 증가하는 종목 모두 포착
-                if not (cond_high_roe or cond_qoq_roe_up):
+            elif use_roe and use_qoq_roe:
+                if roe_mode in ("HIGH_AND_UP", "GROWTH_UPWARD"):
+                    if not (cond_high_roe and cond_qoq_roe_up and qoq_roe_diff > 0):
+                        continue
+                else:
+                    # HIGH_OR_UP: ROE가 이미 높은 수준이거나, 전분기 대비 뚜렷하게 증가하는 종목 모두 포착
+                    if not (cond_high_roe or cond_qoq_roe_up):
+                        continue
+            elif use_roe:
+                if not cond_high_roe:
                     continue
-        elif use_roe:
-            if not cond_high_roe:
-                continue
-        elif use_qoq_roe:
-            if not cond_qoq_roe_up:
-                continue
+            elif use_qoq_roe:
+                if not cond_qoq_roe_up:
+                    continue
 
         # [핵심 조건 2] PBR 절대 수준 필터 (저PBR)
-        if use_pbr:
+        if use_pbr and not is_loss_reversal_mode:
             if pbr < min_pbr or pbr > max_pbr:
                 continue
 
         # [핵심 조건 3] 전분기 대비 PBR이 크게 늘어나지 않은 종목 필터
-        if use_qoq_pbr_limit:
+        if use_qoq_pbr_limit and not is_loss_reversal_mode:
             if qoq_pbr_diff > max_qoq_pbr_diff:
                 continue
             if qoq_pbr_growth_pct > max_qoq_pbr_growth_pct:
                 continue
 
         # [핵심 조건 4] PER 범위 필터
-        if use_per:
+        if use_per and not is_loss_reversal_mode:
             if per <= 0 or per < min_per or per > max_per:
                 continue
 
         # [핵심 조건 5] ROE / PBR 가성비 지수 필터 (ROE ÷ PBR)
-        if use_roe_pbr_ratio:
+        if use_roe_pbr_ratio and not is_loss_reversal_mode:
             if roe_pbr_ratio < min_roe_pbr_ratio:
                 continue
 
@@ -1002,9 +1048,13 @@ def get_dart_screener_results(conditions: dict):
 
         # 선별 사유 태그 생성
         tags = []
+        if roe_turnaround_type == "TURNAROUND_PROFIT":
+            tags.append(f"🔥적자→흑자 전환({prev_q_roe:.1f}%→{roe:.1f}%)")
+        elif roe_turnaround_type == "TURNAROUND_LOSS":
+            tags.append(f"⚠️흑자→적자 반전({prev_q_roe:.1f}%→{roe:.1f}%)")
         if roe >= 12.0:
             tags.append(f"고ROE({roe:.1f}%)")
-        if qoq_roe_diff >= 1.0:
+        if qoq_roe_diff >= 1.0 and roe_turnaround_type != "TURNAROUND_PROFIT":
             tags.append(f"전분기비 ROE +{qoq_roe_diff:.1f}%p↑")
         if pbr <= 0.8:
             tags.append(f"저PBR({pbr:.2f}배)")
@@ -1017,13 +1067,16 @@ def get_dart_screener_results(conditions: dict):
             "ticker": r["ticker"],
             "name": r["name"],
             "market": mkt,
-            "sector": r["sector"],
+            "sector": sec,
+            "sub_sector": sub_sec,
+            "business_desc": biz_desc,
             "style": r["style"],
             "price": int(r.get("price") or 0),
             "market_cap_eok": round(mcap_eok, 1),
             "roe": round(roe, 2),
             "prev_q_roe": round(prev_q_roe, 2),
             "qoq_roe_diff": round(qoq_roe_diff, 2),
+            "roe_turnaround_type": roe_turnaround_type,
             "yoy_roe_diff": round(qoq_roe_diff, 2),  # 하위 호환
             "roe_2312": round(float(r.get("roe_2312") or 0.0), 2),
             "roe_2403": round(float(r.get("roe_2403") or 0.0), 2),
